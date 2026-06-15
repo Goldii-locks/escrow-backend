@@ -48,6 +48,13 @@ router.post("/build-tx", async (req: Request, res: Response) => {
       if (a.type === "i128") return nativeToScVal(BigInt(a.value), { type: "i128" });
       if (a.type === "u32") return nativeToScVal(a.value, { type: "u32" });
       if (a.type === "bool") return nativeToScVal(a.value, { type: "bool" });
+      if (a.type === "vec") {
+        const vecElements = a.value.map((item: any) => {
+          if (item.type === "i128") return nativeToScVal(BigInt(item.value), { type: "i128" });
+          return nativeToScVal(item.value);
+        });
+        return nativeToScVal(vecElements);
+      }
       return nativeToScVal(a.value);
     });
 
