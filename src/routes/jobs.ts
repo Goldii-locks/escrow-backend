@@ -219,6 +219,37 @@ router.post("/:contractId/milestones/:index/partial-release", async (req: Reques
   }
 });
 
+// GET /api/jobs/:contractId/milestones/:index/time-remaining
+router.get("/:contractId/milestones/:index/time-remaining", async (req: Request, res: Response) => {
+  try {
+    const { contractId, index } = req.params;
+    const contract = new Contract(contractId as string);
+    const account = await server.getAccount(process.env.DEPLOYER_ADDRESS || "");
+    const tx = new TransactionBuilder(account, {
+      fee: BASE_FEE,
+      networkPassphrase: Networks.TESTNET,
+    })
+      .addOperation(contract.call(
+        "time_until_auto_release",
+        nativeToScVal(parseInt(index as string), { type: "u32" })
+      ))
+      .setTimeout(30)
+      .build();
+
+    const result = await server.simulateTransaction(tx);
+    if ("error" in result) {
+      res.status(500).json({ success: false, error: result.error as string });
+    } else if ("result" in result && result.result?.retval) {
+      const secondsRemaining = Number(result.result.retval);
+      res.json({ success: true, secondsRemaining });
+    } else {
+      res.status(500).json({ success: false, error: "Failed to get time remaining" });
+    }
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // POST /api/jobs/submit - submit a signed transaction
 router.post("/submit", async (req: Request, res: Response) => {
   try {
