@@ -10,6 +10,10 @@ import {
 } from "@stellar/stellar-sdk";
 import { Server } from "@stellar/stellar-sdk/rpc";
 import { getJobsByWallet } from "../indexer/db.js";
+import {
+  jobContractCors,
+  jobContractSecurityHeaders,
+} from "../middleware/job-contract-security.js";
 
 const router = Router();
 const CONTRACT_ID = process.env.CONTRACT_ID || "";
@@ -67,7 +71,11 @@ router.get("/by-wallet/:address", (req: Request, res: Response) => {
 });
 
 // GET /api/jobs/:contractId - get job state
-router.get("/:contractId", async (req: Request, res: Response) => {
+router.get(
+  "/:contractId",
+  jobContractCors,
+  jobContractSecurityHeaders,
+  async (req: Request, res: Response) => {
   try {
     const { contractId } = req.params;
     const contract = new Contract(contractId as string);
@@ -87,7 +95,8 @@ router.get("/:contractId", async (req: Request, res: Response) => {
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
   }
-});
+  }
+);
 
 // GET /api/jobs/:contractId/whitelist - get whitelisted tokens
 router.get("/:contractId/whitelist", async (req: Request, res: Response) => {
