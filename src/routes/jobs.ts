@@ -10,6 +10,7 @@ import {
 } from "@stellar/stellar-sdk";
 import { Server } from "@stellar/stellar-sdk/rpc";
 import { getJobsByWallet } from "../indexer/db.js";
+import { isValidStellarContractId } from "../utils/stellar.js";
 
 const router = Router();
 const CONTRACT_ID = process.env.CONTRACT_ID || "";
@@ -70,6 +71,15 @@ router.get("/by-wallet/:address", (req: Request, res: Response) => {
 router.get("/:contractId", async (req: Request, res: Response) => {
   try {
     const { contractId } = req.params;
+
+    if (!isValidStellarContractId(contractId as string)) {
+      res.status(400).json({
+        success: false,
+        error: "contractId must be a valid Stellar contract address (C...)",
+      });
+      return;
+    }
+
     const contract = new Contract(contractId as string);
     const account = await server.getAccount(process.env.DEPLOYER_ADDRESS || "");
     const tx = new TransactionBuilder(account, {
