@@ -10,6 +10,7 @@ import {
 } from "@stellar/stellar-sdk";
 import { Server } from "@stellar/stellar-sdk/rpc";
 import { getJobsByWallet } from "../indexer/db.js";
+import { jobContractRateLimit } from "../middleware/job-contract-rate-limit.js";
 import {
   jobContractCors,
   jobContractSecurityHeaders,
@@ -77,6 +78,7 @@ router.get(
   "/:contractId",
   jobContractCors,
   jobContractSecurityHeaders,
+  jobContractRateLimit,
   async (req: Request, res: Response) => {
   const { contractId } = req.params;
 
