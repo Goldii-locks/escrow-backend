@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express';
+// FIXED: Added the required .js extension for native ES Modules
 import { cacheService } from '../services/cacheService.js';
 
 const router = Router();
