@@ -66,21 +66,87 @@ router.get('/api/jobs/by-wallet/:address', async (req: Request, res: Response) =
       cacheService.set(cacheKey, cachedJobs, 30000);
     }
 
-    const startIndex = (page - 1) * limit;
-    const endIndex = page * limit;
-    const paginatedJobs = cachedJobs.slice(startIndex, endIndex);
-
-    const duration = Date.now() - startTime;
-    res.setHeader('X-Response-Time', `${duration}ms`);
-
-    return res.status(200).json({
-      success: true,
-      jobs: paginatedJobs
-    });
-  } catch (error: any) {
-    return res.status(500).json({ success: false, error: error.message });
+    const result = getJobsByWallet(address, page, limit);
+    res.json({ success: true, ...result });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
   }
 });
+
+// GET /api/jobs/:contractId - get job state
+router.get(
+  "/:contractId",
+  jobContractCors,
+  jobContractSecurityHeaders,
+  jobContractRateLimit,
+  async (req: Request, res: Response) => {
+  const { contractId } = req.params;
+
+  if (!isValidStellarContractId(contractId as string)) {
+    sendError(
+      res,
+      400,
+      "contractId must be a valid Stellar contract address (C...)"
+    );
+    return;
+  }
+
+  const requiredApiKey = process.env.API_KEY;
+  if (requiredApiKey) {
+    const providedKey = req.header("x-api-key");
+    if (providedKey !== requiredApiKey) {
+      sendError(res, 401, "Unauthorized");
+      return;
+    }
+  }
+
+  try {
+    const contract = new Contract(contractId as string);
+    const account = await server.getAccount(process.env.DEPLOYER_ADDRESS || "");
+    const tx = new TransactionBuilder(account, {
+      fee: BASE_FEE,
+      networkPassphrase: Networks.TESTNET,
+    })
+      .addOperation(contract.call("get_job"))
+      .setTimeout(30)
+      .build();
+
+    const result = await server.simulateTransaction(tx);
+
+    if ("error" in result) {
+      const errorMsg = String(result.error);
+      if (
+        /not found|NotFound|contract not found/i.test(errorMsg) ||
+        /contract error #1\b/i.test(errorMsg)
+      ) {
+        sendError(res, 404, "Job not found");
+        return;
+      }
+      sendError(res, 500, errorMsg);
+      return;
+    }
+
+    const job = parseJobFromResult(result, contractId as string);
+    if (!job) {
+      sendError(res, 404, "Job not found");
+      return;
+    }
+
+    sendSuccess(res, job);
+  } catch (err: any) {
+    const message = err?.message ?? "Internal server error";
+    if (/unauthorized|authentication|401/i.test(message)) {
+      sendError(res, 401, "Unauthorized");
+      return;
+    }
+    if (/not found|404/i.test(message)) {
+      sendError(res, 404, "Job not found");
+      return;
+    }
+    sendError(res, 500, message);
+  }
+  }
+);
 
 // 2. GET /api/jobs/:contractId - Get job state from Stellar Smart Contract
 router.get(
