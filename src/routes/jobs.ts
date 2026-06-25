@@ -16,7 +16,7 @@ import {
   jobContractSecurityHeaders,
 } from "../middleware/job-contract-security.js";
 import { sendError, sendSuccess } from "../utils/api-response.js";
-import { isValidStellarContractId } from "../utils/stellar.js";
+import { validateContractId } from "../utils/validation.js";
 
 const router = Router();
 const CONTRACT_ID = process.env.CONTRACT_ID || "";
@@ -82,12 +82,9 @@ router.get(
   async (req: Request, res: Response) => {
   const { contractId } = req.params;
 
-  if (!isValidStellarContractId(contractId as string)) {
-    sendError(
-      res,
-      400,
-      "contractId must be a valid Stellar contract address (C...)"
-    );
+  const validation = validateContractId(contractId);
+  if (!validation.valid) {
+    sendError(res, 400, validation.error!);
     return;
   }
 
