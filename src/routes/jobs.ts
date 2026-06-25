@@ -17,6 +17,7 @@ import {
 } from "../middleware/job-contract-security.js";
 import { sendError, sendSuccess } from "../utils/api-response.js";
 import { isValidStellarContractId } from "../utils/stellar.js";
+import { strictLimiter } from "../middleware/rateLimiter.js";
 
 const router = Router();
 const CONTRACT_ID = process.env.CONTRACT_ID || "";
@@ -204,7 +205,7 @@ router.get("/:contractId/whitelist", jobContractCors, jobContractSecurityHeaders
 });
 
 // POST /api/jobs/build-tx - build an unsigned transaction for the frontend to sign
-router.post("/build-tx", async (req: Request, res: Response) => {
+router.post("/build-tx", strictLimiter, async (req: Request, res: Response) => {
   try {
     const { contractId, method, args, sourceAddress } = req.body;
     const contract = new Contract(contractId as string);
@@ -350,7 +351,7 @@ router.post("/:contractId/milestones/:index/claim-auto-release", async (req: Req
 });
 
 // POST /api/jobs/submit - submit a signed transaction
-router.post("/submit", async (req: Request, res: Response) => {
+router.post("/submit", strictLimiter, async (req: Request, res: Response) => {
   try {
     const { signedXdr } = req.body;
     const { TransactionBuilder: TB } = await import("@stellar/stellar-sdk");

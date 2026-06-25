@@ -2,8 +2,11 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import jobRoutes from "./routes/jobs.js";
+import adminRoutes from "./routes/admin.js";
 import { initSchema } from "./indexer/db.js";
+import { generalLimiter } from "./middleware/rateLimiter.js";
 import { startPoller } from "./indexer/poller.js";
+import { markIndexerStarted } from "./indexer/status.js";
 
 dotenv.config();
 
@@ -18,10 +21,13 @@ app.get("/health", (req, res) => {
   res.json({ status: "ok", contract: process.env.CONTRACT_ID });
 });
 
+app.use("/api", generalLimiter);
 app.use("/api/jobs", jobRoutes);
+app.use("/api/admin", adminRoutes);
 
 // Initialize indexer schema and start polling
 initSchema();
+markIndexerStarted();
 startPoller();
 
 app.listen(PORT, () => {
