@@ -1,6 +1,7 @@
 import { jest } from "@jest/globals";
 import request from "supertest";
 import express from "express";
+import logger from "../src/utils/logger.js";
 
 const VALID_CONTRACT =
   "CDD5WKK3WT3QVKXMXTJNDIXE4T73FK6GGXDSD6UTJAH6YYZU52SQ4MUH";
@@ -158,5 +159,112 @@ describe("GET /api/jobs/:contractId – response format and status codes", () =>
       funded: true,
     });
     expect(Array.isArray(res.body.data.milestones)).toBe(true);
+  });
+});
+
+describe("GET /api/jobs/:contractId – logging traces", () => {
+  let infoSpy: ReturnType<typeof jest.spyOn>;
+  let warnSpy: ReturnType<typeof jest.spyOn>;
+  let errorSpy: ReturnType<typeof jest.spyOn>;
+  const origApiKey = process.env.API_KEY;
+
+  beforeEach(() => {
+    delete process.env.API_KEY;
+    mockGetAccount.mockReset();
+    mockSimulateTransaction.mockReset();
+    mockGetAccount.mockResolvedValue({
+      accountId: () =>
+        "GAODBHVR63Z56MVQRBEJSYM2H5423LJ4WAPUUBOFG4JYY72S6ROKVZRX",
+      sequenceNumber: () => "123456789",
+      incrementSequenceNumber: () => {},
+    });
+    infoSpy = jest.spyOn(logger, "info");
+    warnSpy = jest.spyOn(logger, "warn");
+    errorSpy = jest.spyOn(logger, "error");
+  });
+
+  afterEach(() => {
+    infoSpy.mockRestore();
+    warnSpy.mockRestore();
+    errorSpy.mockRestore();
+  });
+
+  afterAll(() => {
+    if (origApiKey === undefined) {
+      delete process.env.API_KEY;
+    } else {
+      process.env.API_KEY = origApiKey;
+    }
+  });
+
+  it("logs 'Fetching job' on entry with the contractId", async () => {
+    await request(buildApp()).get(`/api/jobs/${VALID_CONTRACT}`);
+    expect(infoSpy).toHaveBeenCalledWith("Fetching job", { contractId: VALID_CONTRACT });
+  });
+
+  it("logs 'Invalid contractId provided' for bad contract IDs", async () => {
+    await request(buildApp()).get("/api/jobs/not-a-contract");
+    expect(warnSpy).toHaveBeenCalledWith("Invalid contractId provided", { contractId: "not-a-contract" });
+  });
+
+  it("logs 'Unauthorized request' when API_KEY is required but missing", async () => {
+    process.env.API_KEY = "secret-key";
+    await request(buildApp()).get(`/api/jobs/${VALID_CONTRACT}`);
+    expect(warnSpy).toHaveBeenCalledWith("Unauthorized request", { contractId: VALID_CONTRACT });
+  });
+
+  it("logs 'Job not found' when simulation reports not found", async () => {
+    mockSimulateTransaction.mockResolvedValue({ error: "contract not found on network" });
+    await request(buildApp()).get(`/api/jobs/${VALID_CONTRACT}`);
+    expect(warnSpy).toHaveBeenCalledWith("Job not found", { contractId: VALID_CONTRACT });
+  });
+
+  it("logs 'Failed to fetch job' on unexpected simulation error", async () => {
+    mockSimulateTransaction.mockResolvedValue({ error: "host unreachable" });
+    await request(buildApp()).get(`/api/jobs/${VALID_CONTRACT}`);
+    expect(errorSpy).toHaveBeenCalledWith("Failed to fetch job", {
+      contractId: VALID_CONTRACT,
+      error: "host unreachable",
+    });
+  });
+
+  it("logs 'Failed to fetch job' when the RPC client throws", async () => {
+    mockGetAccount.mockRejectedValue(new Error("upstream failure"));
+    await request(buildApp()).get(`/api/jobs/${VALID_CONTRACT}`);
+    expect(errorSpy).toHaveBeenCalledWith("Failed to fetch job", {
+      contractId: VALID_CONTRACT,
+      error: "upstream failure",
+    });
+  });
+
+  it("logs 'Job fetched successfully' on success with job data", async () => {
+    const milestones = {
+      map: (fn: (m: unknown, i: number) => unknown) =>
+        [{ amount: () => ({ toString: () => "100" }), status: () => ({ funded: true }) }].map(fn),
+    };
+    mockSimulateTransaction.mockResolvedValue({
+      result: {
+        retval: {
+          client: () => ({ toString: () => "GCLIENT" }),
+          freelancer: () => ({ toString: () => "GFREELANCER" }),
+          arbiter: () => ({ toString: () => "GARBITER" }),
+          token: () => ({ toString: () => "GTOKEN" }),
+          funded: () => true,
+          milestones: () => milestones,
+        },
+      },
+    });
+
+    await request(buildApp()).get(`/api/jobs/${VALID_CONTRACT}`);
+
+    expect(infoSpy).toHaveBeenCalledWith("Job fetched successfully", {
+      contractId: VALID_CONTRACT,
+      client: "GCLIENT",
+      freelancer: "GFREELANCER",
+      arbiter: "GARBITER",
+      token: "GTOKEN",
+      funded: true,
+      milestoneCount: 1,
+    });
   });
 });
