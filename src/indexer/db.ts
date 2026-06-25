@@ -237,3 +237,41 @@ export function getJobsByWallet(
 
   return { jobs, total, page: safePage, limit: safeLimit };
 }
+
+export interface IndexerStatusData {
+  lastIndexedLedger: number;
+  totalEvents: number;
+  lastEventAt: string | null;
+  eventsByType: Record<string, number>;
+}
+
+export function getIndexerStatusData(): IndexerStatusData {
+  const db = getDb();
+  const lastIndexedLedger = getLastIndexedLedger();
+
+  const totalRow = db
+    .prepare("SELECT COUNT(*) as count FROM events")
+    .get() as { count: number };
+
+  const lastEventRow = db
+    .prepare("SELECT MAX(created_at) as last_at FROM events")
+    .get() as { last_at: string | null };
+
+  const typeRows = db
+    .prepare(
+      "SELECT event_type, COUNT(*) as count FROM events GROUP BY event_type"
+    )
+    .all() as Array<{ event_type: string; count: number }>;
+
+  const eventsByType: Record<string, number> = {};
+  for (const row of typeRows) {
+    eventsByType[row.event_type] = row.count;
+  }
+
+  return {
+    lastIndexedLedger,
+    totalEvents: totalRow.count,
+    lastEventAt: lastEventRow.last_at,
+    eventsByType,
+  };
+}
