@@ -20,7 +20,7 @@ import {
 } from "../middleware/job-contract-security.js";
 import { validateContractIdParams } from "../middleware/contract-id-validation.js";
 import { sendError, sendSuccess } from "../utils/api-response.js";
-import { isValidStellarContractId } from "../utils/stellar.js";
+import { validateContractId } from "../utils/validation.js";
 import { strictLimiter } from "../middleware/rateLimiter.js";
 import logger from "../utils/logger.js";
 
@@ -87,7 +87,16 @@ router.get(
   jobContractSecurityHeaders,
   jobContractRateLimit,
   async (req: Request, res: Response) => {
-    const { contractId } = req.params;
+  const { contractId } = req.params;
+
+  logger.info("Fetching job", { contractId });
+
+  const validation = validateContractId(contractId);
+  if (!validation.valid) {
+    logger.warn("Invalid contractId provided", { contractId });
+    sendError(res, 400, validation.error!);
+    return;
+  }
 
     const requiredApiKey = process.env.API_KEY;
   if (requiredApiKey) {
@@ -159,6 +168,23 @@ router.get(
   "/:contractId/whitelist",
   validateContractIdParams,
   async (req: Request, res: Response) => {
+    const { contractId } = req.params;
+
+    const validation = validateContractId(contractId);
+    if (!validation.valid) {
+      sendError(res, 400, validation.error!);
+      return;
+    }
+
+    const requiredApiKey = process.env.API_KEY;
+    if (requiredApiKey) {
+      const providedKey = req.header("x-api-key");
+      if (providedKey !== requiredApiKey) {
+        sendError(res, 401, "Unauthorized");
+        return;
+      }
+    }
+
     try {
       const { contractId } = req.params;
       const contract = new Contract(contractId as string);
