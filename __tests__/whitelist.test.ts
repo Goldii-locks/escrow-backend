@@ -174,7 +174,7 @@ describe("GET /api/jobs/:contractId/whitelist", () => {
         .get(`/api/jobs/${VALID_CONTRACT}/whitelist`)
         .expect(500);
 
-      expect(res.body).toEqual({ success: false, error: "host unreachable" });
+      expect(res.body).toEqual({ success: false, error: "Internal server error" });
     });
   });
 
@@ -259,6 +259,105 @@ describe("GET /api/jobs/:contractId/whitelist", () => {
         error: "Too many requests, please try again later",
       });
       expect(res.headers["x-ratelimit-remaining"]).toBe("0");
+    });
+  });
+
+  // --- ISSUE #33: Robust try-catch wrapper ---
+  describe("Robust try-catch wrapper (Issue #33)", () => {
+    it("returns generic 500 without leaking the raw RPC error string", async () => {
+      mockSimulateTransaction.mockResolvedValue({
+        error: "soroban rpc internal: secret host detail at 10.0.0.1",
+      });
+
+      const res = await request(buildApp())
+        .get(`/api/jobs/${VALID_CONTRACT}/whitelist`)
+        .expect(500);
+
+      expect(res.body).toEqual({ success: false, error: "Internal server error" });
+      expect(JSON.stringify(res.body)).not.toContain("10.0.0.1");
+      expect(JSON.stringify(res.body)).not.toContain("soroban rpc internal");
+    });
+
+    it("returns generic 500 without leaking the thrown exception message", async () => {
+      mockSimulateTransaction.mockRejectedValue(
+        new Error("DB connection string: postgres://admin:password@localhost/prod")
+      );
+
+      const res = await request(buildApp())
+        .get(`/api/jobs/${VALID_CONTRACT}/whitelist`)
+        .expect(500);
+
+      expect(res.body).toEqual({ success: false, error: "Internal server error" });
+      expect(JSON.stringify(res.body)).not.toContain("postgres://");
+      expect(JSON.stringify(res.body)).not.toContain("password");
+    });
+
+    it("does not include stack trace markers in the 500 response body", async () => {
+      const errWithStack = new Error("some internal failure");
+      mockSimulateTransaction.mockRejectedValue(errWithStack);
+
+      const res = await request(buildApp())
+        .get(`/api/jobs/${VALID_CONTRACT}/whitelist`)
+        .expect(500);
+
+      const body = JSON.stringify(res.body);
+      expect(body).not.toMatch(/at Object\./);
+      expect(body).not.toMatch(/\s+at\s+\w/);
+      expect(body).not.toContain(".ts:");
+      expect(body).not.toContain(".js:");
+    });
+
+    it("returns generic 500 when retval is missing from a successful simulation", async () => {
+      mockSimulateTransaction.mockResolvedValue({ result: {} });
+
+      const res = await request(buildApp())
+        .get(`/api/jobs/${VALID_CONTRACT}/whitelist`)
+        .expect(500);
+
+      expect(res.body).toEqual({ success: false, error: "Internal server error" });
+    });
+
+    it("catches errors thrown before the RPC call and returns clean 500", async () => {
+      mockGetAccount.mockRejectedValue(new Error("account fetch failed: internal token expired"));
+
+      const res = await request(buildApp())
+        .get(`/api/jobs/${VALID_CONTRACT}/whitelist`)
+        .expect(500);
+
+      expect(res.body).toEqual({ success: false, error: "Internal server error" });
+      expect(JSON.stringify(res.body)).not.toContain("account fetch failed");
+    });
+
+    it("still returns 401 for auth errors thrown during RPC (not swallowed by outer catch)", async () => {
+      mockSimulateTransaction.mockRejectedValue(new Error("unauthorized: invalid authentication"));
+
+      const res = await request(buildApp())
+        .get(`/api/jobs/${VALID_CONTRACT}/whitelist`)
+        .expect(401);
+
+      expect(res.body).toEqual({ success: false, error: "Unauthorized" });
+    });
+
+    it("still returns 404 for not-found errors thrown during RPC (not swallowed by outer catch)", async () => {
+      mockSimulateTransaction.mockRejectedValue(new Error("contract not found on chain"));
+
+      const res = await request(buildApp())
+        .get(`/api/jobs/${VALID_CONTRACT}/whitelist`)
+        .expect(404);
+
+      expect(res.body).toEqual({ success: false, error: "Job not found" });
+    });
+
+    it("response body contains only success flag and error string — no stack or extra fields", async () => {
+      mockSimulateTransaction.mockRejectedValue(new Error("unexpected"));
+
+      const res = await request(buildApp())
+        .get(`/api/jobs/${VALID_CONTRACT}/whitelist`)
+        .expect(500);
+
+      expect(Object.keys(res.body)).toEqual(["success", "error"]);
+      expect(res.body.success).toBe(false);
+      expect(typeof res.body.error).toBe("string");
     });
   });
 });
