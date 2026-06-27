@@ -204,7 +204,7 @@ router.get(
         // The error from simulation will have a message indicating contract error #2
         const errorMsg = String(result.error);
         if (errorMsg.includes("contract error #2") || errorMsg.includes("NotInitialized")) {
-          // Return empty tokens array for uninitialized contracts
+          logger.info("Whitelisted tokens fetched successfully", { contractId, tokenCount: 0 });
           sendSuccess(res, { tokens: [] });
           return;
         }
@@ -212,6 +212,7 @@ router.get(
           /not found|NotFound|contract not found/i.test(errorMsg) ||
           /contract error #1\b/i.test(errorMsg)
         ) {
+          logger.warn("Job not found", { contractId });
           sendError(res, 404, "Job not found");
           return;
         }
@@ -230,6 +231,7 @@ router.get(
         if (typeof vec.forEach === "function") {
           vec.forEach((token: any) => tokens.push(token.toString()));
         }
+        logger.info("Whitelisted tokens fetched successfully", { contractId, tokenCount: tokens.length });
         sendSuccess(res, { tokens });
       } else {
         logger.error("Failed to fetch whitelisted tokens", { contractId, error: "unexpected empty retval" });
@@ -238,10 +240,12 @@ router.get(
     } catch (err: any) {
       const message = err?.message ?? "Internal server error";
       if (/unauthorized|authentication|401/i.test(message)) {
+        logger.error("Failed to fetch whitelisted tokens", { contractId, error: message });
         sendError(res, 401, "Unauthorized");
         return;
       }
       if (/not found|404/i.test(message)) {
+        logger.error("Failed to fetch whitelisted tokens", { contractId, error: message });
         sendError(res, 404, "Job not found");
         return;
       }

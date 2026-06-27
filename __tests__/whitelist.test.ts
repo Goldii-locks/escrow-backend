@@ -9,6 +9,18 @@ const VALID_CONTRACT =
 const mockGetAccount = jest.fn<() => Promise<unknown>>();
 const mockSimulateTransaction = jest.fn<() => Promise<unknown>>();
 
+const mockLoggerInfo = jest.fn();
+const mockLoggerWarn = jest.fn();
+const mockLoggerError = jest.fn();
+
+jest.unstable_mockModule("../src/utils/logger.js", () => ({
+  default: {
+    info: mockLoggerInfo,
+    warn: mockLoggerWarn,
+    error: mockLoggerError,
+  },
+}));
+
 jest.unstable_mockModule("@stellar/stellar-sdk/rpc", () => ({
   Server: class MockServer {
     getAccount = mockGetAccount;
@@ -34,6 +46,9 @@ describe("GET /api/jobs/:contractId/whitelist", () => {
   beforeEach(() => {
     mockGetAccount.mockReset();
     mockSimulateTransaction.mockReset();
+    mockLoggerInfo.mockReset();
+    mockLoggerWarn.mockReset();
+    mockLoggerError.mockReset();
     resetJobWhitelistRateLimitBuckets();
 
     delete process.env.API_KEY;
