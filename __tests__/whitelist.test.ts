@@ -28,7 +28,7 @@ jest.unstable_mockModule("@stellar/stellar-sdk/rpc", () => ({
   },
 }));
 
-const { default: router } = await import("../src/routes/jobs.js");
+const { default: router, resetWhitelistCache } = await import("../src/routes/jobs.js");
 
 function buildApp() {
   const app = express();
@@ -50,6 +50,7 @@ describe("GET /api/jobs/:contractId/whitelist", () => {
     mockLoggerWarn.mockReset();
     mockLoggerError.mockReset();
     resetJobWhitelistRateLimitBuckets();
+    resetWhitelistCache();
 
     delete process.env.API_KEY;
     delete process.env.JOB_WHITELIST_RATE_MAX;
@@ -481,6 +482,82 @@ describe("GET /api/jobs/:contractId/whitelist", () => {
 
       expect(mockGetAccount).not.toHaveBeenCalled();
       expect(mockSimulateTransaction).not.toHaveBeenCalled();
+  // --- ISSUE #50: Node-Cache in-memory caching ---
+  describe("Node-Cache in-memory caching (Issue #50)", () => {
+    it("returns tokens from RPC on first request", async () => {
+      const vec = {
+        forEach: (fn: (item: unknown) => void) => ["TOKENA"].forEach(fn),
+      };
+      mockSimulateTransaction.mockResolvedValue({ result: { retval: vec } });
+
+      const res = await request(buildApp())
+        .get(`/api/jobs/${VALID_CONTRACT}/whitelist`)
+        .expect(200);
+
+      expect(res.body.data.tokens).toEqual(["TOKENA"]);
+      expect(mockSimulateTransaction).toHaveBeenCalledTimes(1);
+    });
+
+    it("serves subsequent requests from cache without calling RPC again", async () => {
+      const vec = {
+        forEach: (fn: (item: unknown) => void) => ["TOKENA"].forEach(fn),
+      };
+      mockSimulateTransaction.mockResolvedValue({ result: { retval: vec } });
+
+      const app = buildApp();
+      await request(app).get(`/api/jobs/${VALID_CONTRACT}/whitelist`).expect(200);
+      await request(app).get(`/api/jobs/${VALID_CONTRACT}/whitelist`).expect(200);
+
+      // RPC only called once; second hit served from cache
+      expect(mockSimulateTransaction).toHaveBeenCalledTimes(1);
+    });
+
+    it("returns cached tokens correctly on cache hit", async () => {
+      const vec = {
+        forEach: (fn: (item: unknown) => void) =>
+          ["TOKEN1", "TOKEN2"].forEach(fn),
+      };
+      mockSimulateTransaction.mockResolvedValue({ result: { retval: vec } });
+
+      const app = buildApp();
+      await request(app).get(`/api/jobs/${VALID_CONTRACT}/whitelist`);
+      const cached = await request(app)
+        .get(`/api/jobs/${VALID_CONTRACT}/whitelist`)
+        .expect(200);
+
+      expect(cached.body).toEqual({ success: true, data: { tokens: ["TOKEN1", "TOKEN2"] } });
+    });
+
+    it("caches different contractIds independently", async () => {
+      const SECOND_CONTRACT =
+        "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC";
+
+      const vec1 = { forEach: (fn: (item: unknown) => void) => ["A"].forEach(fn) };
+      const vec2 = { forEach: (fn: (item: unknown) => void) => ["B"].forEach(fn) };
+      mockSimulateTransaction
+        .mockResolvedValueOnce({ result: { retval: vec1 } })
+        .mockResolvedValueOnce({ result: { retval: vec2 } });
+
+      const app = buildApp();
+      const r1 = await request(app).get(`/api/jobs/${VALID_CONTRACT}/whitelist`).expect(200);
+      const r2 = await request(app).get(`/api/jobs/${SECOND_CONTRACT}/whitelist`).expect(200);
+
+      expect(r1.body.data.tokens).toEqual(["A"]);
+      expect(r2.body.data.tokens).toEqual(["B"]);
+      expect(mockSimulateTransaction).toHaveBeenCalledTimes(2);
+    });
+
+    it("caches empty token list for uninitialized contracts", async () => {
+      mockSimulateTransaction.mockResolvedValue({ error: "contract error #2" });
+
+      const app = buildApp();
+      await request(app).get(`/api/jobs/${VALID_CONTRACT}/whitelist`);
+      const cached = await request(app)
+        .get(`/api/jobs/${VALID_CONTRACT}/whitelist`)
+        .expect(200);
+
+      expect(cached.body).toEqual({ success: true, data: { tokens: [] } });
+      expect(mockSimulateTransaction).toHaveBeenCalledTimes(1);
     });
   });
 });

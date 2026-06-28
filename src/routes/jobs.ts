@@ -9,6 +9,7 @@ import {
   Address,
 } from "@stellar/stellar-sdk";
 import { Server } from "@stellar/stellar-sdk/rpc";
+import NodeCache from "node-cache";
 import { getJobsByWallet } from "../indexer/db.js";
 import {
   jobContractRateLimit,
@@ -21,6 +22,8 @@ import {
 import { sendError, sendSuccess } from "../utils/api-response.js";
 import { validateContractId } from "../utils/validation.js";
 import { validateRequest, contractIdParamSchema } from "../middleware/validate-request.js";
+import { validate } from "../middleware/validate.js";
+import { contractIdParamsSchema } from "../schemas/jobs.js";
 import { strictLimiter } from "../middleware/rateLimiter.js";
 import logger from "../utils/logger.js";
 
@@ -28,6 +31,10 @@ const router = Router();
 const CONTRACT_ID = process.env.CONTRACT_ID || "";
 const RPC_URL = "https://soroban-testnet.stellar.org";
 const server = new Server(RPC_URL);
+
+const WHITELIST_TTL = parseInt(process.env.WHITELIST_CACHE_TTL_S || "60", 10);
+export const whitelistCache = new NodeCache({ stdTTL: WHITELIST_TTL, useClones: false });
+export function resetWhitelistCache(): void { whitelistCache.flushAll(); }
 
 // Helper function to parse job from RPC result
 const parseJobFromResult = (result: any, contractId: string) => {
@@ -85,17 +92,13 @@ router.get(
   jobContractCors,
   jobContractSecurityHeaders,
   jobContractRateLimit,
+  validate(contractIdParamsSchema, "params", (req) =>
+    logger.warn("Invalid contractId provided", { contractId: req.params.contractId }),
+  ),
   async (req: Request, res: Response) => {
   const { contractId } = req.params;
 
   logger.info("Fetching job", { contractId });
-
-  const validation = validateContractId(contractId);
-  if (!validation.valid) {
-    logger.warn("Invalid contractId provided", { contractId });
-    sendError(res, 400, validation.error!);
-    return;
-  }
 
   const requiredApiKey = process.env.API_KEY;
   if (requiredApiKey) {
@@ -131,7 +134,7 @@ router.get(
         return;
       }
       logger.error("Failed to fetch job", { contractId, error: errorMsg });
-      sendError(res, 500, errorMsg);
+      sendError(res, 500, "Internal server error");
       return;
     }
 
@@ -146,7 +149,7 @@ router.get(
     sendSuccess(res, job);
   } catch (err: any) {
     const message = err?.message ?? "Internal server error";
-    if (/unauthorized|authentication|401/i.test(message)) {
+    if (/unauthorized|401/i.test(message)) {
       logger.error("Failed to fetch job", { contractId, error: message });
       sendError(res, 401, "Unauthorized");
       return;
@@ -157,7 +160,7 @@ router.get(
       return;
     }
     logger.error("Failed to fetch job", { contractId, error: message });
-    sendError(res, 500, message);
+    sendError(res, 500, "Internal server error");
   }
   }
 );
@@ -170,7 +173,7 @@ router.get(
   jobWhitelistRateLimit,
   validateRequest({ params: contractIdParamSchema }),
   async (req: Request, res: Response) => {
-    const { contractId } = req.params;
+    const contractId = req.params.contractId as string;
 
     try {
       const requiredApiKey = process.env.API_KEY;
@@ -180,6 +183,13 @@ router.get(
           sendError(res, 401, "Unauthorized");
           return;
         }
+      }
+
+      const cached = whitelistCache.get<string[]>(contractId);
+      if (cached !== undefined) {
+        logger.info("Whitelisted tokens served from cache", { contractId, tokenCount: cached.length });
+        sendSuccess(res, { tokens: cached });
+        return;
       }
 
       const contract = new Contract(contractId as string);
@@ -200,6 +210,7 @@ router.get(
         // The error from simulation will have a message indicating contract error #2
         const errorMsg = String(result.error);
         if (errorMsg.includes("contract error #2") || errorMsg.includes("NotInitialized")) {
+          whitelistCache.set(contractId, []);
           logger.info("Whitelisted tokens fetched successfully", { contractId, tokenCount: 0 });
           sendSuccess(res, { tokens: [] });
           return;
@@ -227,6 +238,7 @@ router.get(
         if (typeof vec.forEach === "function") {
           vec.forEach((token: any) => tokens.push(token.toString()));
         }
+        whitelistCache.set(contractId, tokens);
         logger.info("Whitelisted tokens fetched successfully", { contractId, tokenCount: tokens.length });
         sendSuccess(res, { tokens });
       } else {
@@ -235,7 +247,7 @@ router.get(
       }
     } catch (err: any) {
       const message = err?.message ?? "Internal server error";
-      if (/unauthorized|authentication|401/i.test(message)) {
+      if (/unauthorized|401/i.test(message)) {
         logger.error("Failed to fetch whitelisted tokens", { contractId, error: message });
         sendError(res, 401, "Unauthorized");
         return;
@@ -301,7 +313,8 @@ router.post("/build-tx", strictLimiter, async (req: Request, res: Response) => {
     const prepared = await server.prepareTransaction(tx);
     res.json({ success: true, xdr: prepared.toXDR() });
   } catch (err: any) {
-    res.status(500).json({ success: false, error: err.message });
+    logger.error("Failed to build transaction", { error: err?.message });
+    res.status(500).json({ success: false, error: "Internal server error" });
   }
 });
 
