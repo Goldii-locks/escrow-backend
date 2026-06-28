@@ -21,7 +21,8 @@
     "express": "^5.2.1",
     "express-rate-limit": "^8.5.2",
     "node-cache": "^5.1.2",
-    "winston": "^3.19.0"
+    "winston": "^3.19.0",
+    "zod": "^3.24.4"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",

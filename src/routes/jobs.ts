@@ -20,7 +20,6 @@ import {
   jobContractSecurityHeaders,
 } from "../middleware/job-contract-security.js";
 import { sendError, sendSuccess } from "../utils/api-response.js";
-import { validateContractId } from "../utils/validation.js";
 import { validate } from "../middleware/validate.js";
 import { contractIdParamsSchema } from "../schemas/jobs.js";
 import { strictLimiter } from "../middleware/rateLimiter.js";
@@ -170,16 +169,13 @@ router.get(
   jobContractCors,
   jobContractSecurityHeaders,
   jobWhitelistRateLimit,
+  validate(contractIdParamsSchema, "params", (req) =>
+    logger.warn("Invalid contractId provided", { contractId: req.params.contractId }),
+  ),
   async (req: Request, res: Response) => {
     const contractId = req.params.contractId as string;
 
     try {
-      const validation = validateContractId(contractId);
-      if (!validation.valid) {
-        sendError(res, 400, validation.error!);
-        return;
-      }
-
       const requiredApiKey = process.env.API_KEY;
       if (requiredApiKey) {
         const providedKey = req.header("x-api-key");
