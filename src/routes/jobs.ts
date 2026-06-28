@@ -172,6 +172,9 @@ router.get(
   jobContractSecurityHeaders,
   jobWhitelistRateLimit,
   validateRequest({ params: contractIdParamSchema }),
+  validate(contractIdParamsSchema, "params", (req) =>
+    logger.warn("Invalid contractId provided", { contractId: req.params.contractId }),
+  ),
   async (req: Request, res: Response) => {
     const contractId = req.params.contractId as string;
 
