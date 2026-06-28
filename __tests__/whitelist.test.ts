@@ -455,4 +455,162 @@ describe("GET /api/jobs/:contractId/whitelist", () => {
       expect(mockSimulateTransaction).toHaveBeenCalledTimes(1);
     });
   });
+
+  // --- ISSUE #48: Winston Logger Traces ---
+  describe("Winston Logger Traces (Issue #48)", () => {
+    it("logs info with contractId at the start of every request", async () => {
+      const vec = { forEach: () => {} };
+      mockSimulateTransaction.mockResolvedValue({ result: { retval: vec } });
+
+      await request(buildApp()).get(`/api/jobs/${VALID_CONTRACT}/whitelist`);
+
+      expect(mockLoggerInfo).toHaveBeenCalledWith("Fetching whitelisted tokens", {
+        contractId: VALID_CONTRACT,
+      });
+    });
+
+    it("logs warn with contractId when contractId is invalid", async () => {
+      await request(buildApp())
+        .get("/api/jobs/not-a-valid-contract/whitelist")
+        .expect(400);
+
+      expect(mockLoggerInfo).toHaveBeenCalledWith("Fetching whitelisted tokens", {
+        contractId: "not-a-valid-contract",
+      });
+      expect(mockLoggerWarn).toHaveBeenCalledWith("Invalid contractId provided", {
+        contractId: "not-a-valid-contract",
+      });
+    });
+
+    it("logs warn with contractId when the request is unauthorized", async () => {
+      process.env.API_KEY = "secret-key";
+
+      await request(buildApp())
+        .get(`/api/jobs/${VALID_CONTRACT}/whitelist`)
+        .expect(401);
+
+      expect(mockLoggerWarn).toHaveBeenCalledWith("Unauthorized request", {
+        contractId: VALID_CONTRACT,
+      });
+    });
+
+    it("logs warn with contractId when contract/job is not found", async () => {
+      mockSimulateTransaction.mockResolvedValue({
+        error: "contract not found on network",
+      });
+
+      await request(buildApp())
+        .get(`/api/jobs/${VALID_CONTRACT}/whitelist`)
+        .expect(404);
+
+      expect(mockLoggerWarn).toHaveBeenCalledWith("Job not found", {
+        contractId: VALID_CONTRACT,
+      });
+    });
+
+    it("logs info with tokenCount: 0 for uninitialized contract (contract error #2)", async () => {
+      mockSimulateTransaction.mockResolvedValue({ error: "contract error #2" });
+
+      await request(buildApp())
+        .get(`/api/jobs/${VALID_CONTRACT}/whitelist`)
+        .expect(200);
+
+      expect(mockLoggerInfo).toHaveBeenCalledWith(
+        "Whitelisted tokens fetched successfully",
+        { contractId: VALID_CONTRACT, tokenCount: 0 }
+      );
+    });
+
+    it("logs error with contractId and error message on simulation failure", async () => {
+      mockSimulateTransaction.mockResolvedValue({ error: "host unreachable" });
+
+      await request(buildApp())
+        .get(`/api/jobs/${VALID_CONTRACT}/whitelist`)
+        .expect(500);
+
+      expect(mockLoggerError).toHaveBeenCalledWith(
+        "Failed to fetch whitelisted tokens",
+        { contractId: VALID_CONTRACT, error: "host unreachable" }
+      );
+    });
+
+    it("logs info with contractId and correct tokenCount on successful fetch", async () => {
+      const vec = {
+        forEach: (fn: (item: unknown) => void) => {
+          ["TOKEN_A", "TOKEN_B", "TOKEN_C"].forEach(fn);
+        },
+      };
+      mockSimulateTransaction.mockResolvedValue({ result: { retval: vec } });
+
+      await request(buildApp())
+        .get(`/api/jobs/${VALID_CONTRACT}/whitelist`)
+        .expect(200);
+
+      expect(mockLoggerInfo).toHaveBeenCalledWith(
+        "Whitelisted tokens fetched successfully",
+        { contractId: VALID_CONTRACT, tokenCount: 3 }
+      );
+    });
+
+    it("logs error with contractId when retval is missing from result", async () => {
+      mockSimulateTransaction.mockResolvedValue({ result: {} });
+
+      await request(buildApp())
+        .get(`/api/jobs/${VALID_CONTRACT}/whitelist`)
+        .expect(500);
+
+      expect(mockLoggerError).toHaveBeenCalledWith(
+        "Failed to fetch whitelisted tokens",
+        { contractId: VALID_CONTRACT, error: "unexpected empty retval" }
+      );
+    });
+
+    it("logs error with contractId and message when an exception is thrown", async () => {
+      mockSimulateTransaction.mockRejectedValue(new Error("Network exploded"));
+
+      await request(buildApp())
+        .get(`/api/jobs/${VALID_CONTRACT}/whitelist`)
+        .expect(500);
+
+      expect(mockLoggerError).toHaveBeenCalledWith(
+        "Failed to fetch whitelisted tokens",
+        { contractId: VALID_CONTRACT, error: "Network exploded" }
+      );
+    });
+
+    it("log metadata is JSON-serializable and contains the required tracking fields", async () => {
+      const vec = {
+        forEach: (fn: (item: unknown) => void) => ["TOKEN_X"].forEach(fn),
+      };
+      mockSimulateTransaction.mockResolvedValue({ result: { retval: vec } });
+
+      await request(buildApp())
+        .get(`/api/jobs/${VALID_CONTRACT}/whitelist`)
+        .expect(200);
+
+      const infoCalls = mockLoggerInfo.mock.calls as Array<[string, Record<string, unknown>]>;
+      const successCall = infoCalls.find(([msg]) => msg === "Whitelisted tokens fetched successfully");
+      expect(successCall).toBeDefined();
+
+      const [, meta] = successCall!;
+      expect(() => JSON.stringify(meta)).not.toThrow();
+      expect(meta).toMatchObject({ contractId: VALID_CONTRACT, tokenCount: 1 });
+    });
+
+    it("entry log contains contractId in JSON-serializable format", async () => {
+      mockSimulateTransaction.mockResolvedValue({ error: "contract error #2" });
+
+      await request(buildApp())
+        .get(`/api/jobs/${VALID_CONTRACT}/whitelist`)
+        .expect(200);
+
+      const infoCalls = mockLoggerInfo.mock.calls as Array<[string, Record<string, unknown>]>;
+      const entryCall = infoCalls.find(([msg]) => msg === "Fetching whitelisted tokens");
+      expect(entryCall).toBeDefined();
+
+      const [, meta] = entryCall!;
+      expect(() => JSON.stringify(meta)).not.toThrow();
+      expect(JSON.stringify(meta)).toContain(VALID_CONTRACT);
+    });
+  });
 });

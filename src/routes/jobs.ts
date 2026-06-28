@@ -174,8 +174,11 @@ router.get(
     const contractId = req.params.contractId as string;
 
     try {
+      logger.info("Fetching whitelisted tokens", { contractId });
+
       const validation = validateContractId(contractId);
       if (!validation.valid) {
+        logger.warn("Invalid contractId provided", { contractId });
         sendError(res, 400, validation.error!);
         return;
       }
@@ -184,6 +187,7 @@ router.get(
       if (requiredApiKey) {
         const providedKey = req.header("x-api-key");
         if (providedKey !== requiredApiKey) {
+          logger.warn("Unauthorized request", { contractId });
           sendError(res, 401, "Unauthorized");
           return;
         }
