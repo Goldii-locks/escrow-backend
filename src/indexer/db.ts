@@ -191,6 +191,54 @@ export function getJobsByWallet(
   return { jobs, total, page: safePage, limit: safeLimit };
 }
 
+export interface EventRow {
+  id: number;
+  contract_id: string;
+  event_type: string;
+  ledger_sequence: number;
+  timestamp: number;
+  data_json: string;
+  created_at: string;
+}
+
+export interface PaginatedEvents {
+  events: EventRow[];
+  total: number;
+  page: number;
+  limit: number;
+}
+
+export function getEventsByContract(
+  contractId: string,
+  page: number = 1,
+  limit: number = 10
+): PaginatedEvents {
+  const db = getDb();
+  const safePage = Math.max(1, page);
+  const safeLimit = Math.max(1, Math.min(100, limit));
+  const offset = (safePage - 1) * safeLimit;
+
+  const totalRow = db
+    .prepare("SELECT COUNT(*) as count FROM events WHERE contract_id = ?")
+    .get(contractId) as { count: number };
+
+  const rows = db
+    .prepare(
+      `SELECT * FROM events
+       WHERE contract_id = ?
+       ORDER BY ledger_sequence ASC
+       LIMIT ? OFFSET ?`
+    )
+    .all(contractId, safeLimit, offset) as EventRow[];
+
+  return {
+    events: rows,
+    total: totalRow.count,
+    page: safePage,
+    limit: safeLimit,
+  };
+}
+
 export interface IndexerStatusData {
   lastIndexedLedger: number;
   totalEvents: number;
