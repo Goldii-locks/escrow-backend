@@ -180,7 +180,7 @@ describe("Webhook delivery", () => {
   const CONTRACT_A = "CA3D5K7UXYZ123456789012345678901234567890123456789012345678901";
   const WEBHOOK_URL = "https://webhook-test.local/event";
 
-  let mockFetch: jest.Mock;
+  let mockFetch: jest.Mock<(...args: any[]) => any>;
 
   beforeAll(() => {
     mockFetch = jest.fn();
