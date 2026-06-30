@@ -10,10 +10,11 @@ import {
 } from "@stellar/stellar-sdk";
 import { Server } from "@stellar/stellar-sdk/rpc";
 import NodeCache from "node-cache";
-import { getJobsByWallet } from "../indexer/db.js";
+import { getJobsByWallet, getEventsByContract } from "../indexer/db.js";
 import {
   jobContractRateLimit,
   jobWhitelistRateLimit,
+  partialReleaseRateLimit,
 } from "../middleware/job-contract-rate-limit.js";
 import {
   jobContractCors,
@@ -21,14 +22,7 @@ import {
 } from "../middleware/job-contract-security.js";
 import { sendError, sendSuccess } from "../utils/api-response.js";
 import { validate } from "../middleware/validate.js";
-import {
-  contractIdParamsSchema,
-  contractMilestoneParamsSchema,
-  buildTxBodySchema,
-  submitBodySchema,
-  partialReleaseBodySchema,
-  claimAutoReleaseBodySchema,
-} from "../schemas/jobs.js";
+import { contractIdParamsSchema, partialReleaseParamsSchema, partialReleaseBodySchema } from "../schemas/jobs.js";
 import { strictLimiter } from "../middleware/rateLimiter.js";
 import logger from "../utils/logger.js";
 
@@ -42,7 +36,11 @@ const server = new Server(RPC_URL);
 
 const WHITELIST_TTL = parseInt(process.env.WHITELIST_CACHE_TTL_S || "60", 10);
 export const whitelistCache = new NodeCache({ stdTTL: WHITELIST_TTL, useClones: false });
-export function resetWhitelistCache(): void { whitelistCache.flushAll(); }
+const inFlightWhitelistRequests = new Map<string, Promise<string[]>>();
+export function resetWhitelistCache(): void {
+  whitelistCache.flushAll();
+  inFlightWhitelistRequests.clear();
+}
 
 // ---------------------------------------------------------------------------
 // Simulation error helpers  (#83)
@@ -137,9 +135,34 @@ router.get("/by-wallet/:address", (req: Request, res: Response) => {
   }
 });
 
-// ---------------------------------------------------------------------------
-// GET /api/jobs/:contractId – get job state
-// ---------------------------------------------------------------------------
+// GET /api/jobs/:contractId/history - event timeline for a single job
+router.get("/:contractId/history", (req: Request, res: Response) => {
+  try {
+    const contractId = req.params.contractId as string;
+    const page = parseInt((req.query.page as string) || "1", 10);
+    const limit = parseInt((req.query.limit as string) || "10", 10);
+
+    if (!contractId || contractId.trim() === "") {
+      res.status(400).json({ success: false, error: "contractId is required" });
+      return;
+    }
+    if (isNaN(page) || page < 1) {
+      res.status(400).json({ success: false, error: "page must be a positive integer" });
+      return;
+    }
+    if (isNaN(limit) || limit < 1 || limit > 100) {
+      res.status(400).json({ success: false, error: "limit must be between 1 and 100" });
+      return;
+    }
+
+    const result = getEventsByContract(contractId, page, limit);
+    res.json({ success: true, ...result });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// GET /api/jobs/:contractId - get job state
 router.get(
   "/:contractId",
   jobContractCors,
@@ -243,51 +266,68 @@ router.get(
         return;
       }
 
-      const contract = new Contract(contractId);
-      const account = await server.getAccount(process.env.DEPLOYER_ADDRESS || "");
-      const tx = new TransactionBuilder(account, {
-        fee: BASE_FEE,
-        networkPassphrase: NETWORK_PASSPHRASE,
-      })
-        .addOperation(contract.call("get_whitelisted_tokens"))
-        .setTimeout(30)
-        .build();
-
-      const result = await server.simulateTransaction(tx);
-
-      if ("error" in result) {
-        const errorMsg = String(result.error);
-        // NotInitialized (contract error #2) means empty whitelist, not an error
-        if (errorMsg.includes("contract error #2") || errorMsg.includes("NotInitialized")) {
-          whitelistCache.set(contractId, []);
-          logger.info("Whitelisted tokens fetched successfully", { contractId, tokenCount: 0 });
-          sendSuccess(res, { tokens: [] });
-          return;
-        }
-        const { status } = classifySimError(errorMsg);
-        if (status === 404) {
-          logger.warn("Job not found", { contractId });
-          sendError(res, 404, "Job not found");
-          return;
-        }
-        logger.error("Failed to fetch whitelisted tokens", { contractId, error: errorMsg });
-        sendError(res, 500, "Internal server error");
+      const inFlight = inFlightWhitelistRequests.get(contractId);
+      if (inFlight) {
+        const tokens = await inFlight;
+        logger.info("Whitelisted tokens served from in-flight cache", { contractId, tokenCount: tokens.length });
+        sendSuccess(res, { tokens });
         return;
       }
 
-      if ("result" in result && result.result?.retval) {
-        const tokens: string[] = [];
-        const vec = result.result.retval as any;
-        if (typeof vec.forEach === "function") {
-          vec.forEach((token: any) => tokens.push(token.toString()));
+      const requestPromise = (async (): Promise<string[]> => {
+        const contract = new Contract(contractId as string);
+        const account = await server.getAccount(process.env.DEPLOYER_ADDRESS || "");
+        const tx = new TransactionBuilder(account, {
+          fee: BASE_FEE,
+          networkPassphrase: Networks.TESTNET,
+        })
+          .addOperation(contract.call("get_whitelisted_tokens"))
+          .setTimeout(30)
+          .build();
+
+        const result = await server.simulateTransaction(tx);
+
+        if ("error" in result) {
+          const errorMsg = String(result.error);
+          if (errorMsg.includes("contract error #2") || errorMsg.includes("NotInitialized")) {
+            whitelistCache.set(contractId, []);
+            logger.info("Whitelisted tokens fetched successfully", { contractId, tokenCount: 0 });
+            return [];
+          }
+          if (
+            /not found|NotFound|contract not found/i.test(errorMsg) ||
+            /contract error #1\b/i.test(errorMsg)
+          ) {
+            throw new Error("not found");
+          }
+          logger.error("Failed to fetch whitelisted tokens", { contractId, error: errorMsg });
+          throw new Error("InternalServerError");
         }
-        whitelistCache.set(contractId, tokens);
-        logger.info("Whitelisted tokens fetched successfully", { contractId, tokenCount: tokens.length });
-        sendSuccess(res, { tokens });
-      } else {
-        logger.error("Unexpected empty retval fetching whitelist", { contractId });
-        sendError(res, 500, "Internal server error");
+
+        if ("result" in result && result.result?.retval) {
+          const tokens: string[] = [];
+          const vec = result.result.retval as any;
+          if (typeof vec.forEach === "function") {
+            vec.forEach((token: any) => tokens.push(token.toString()));
+          }
+          whitelistCache.set(contractId, tokens);
+          logger.info("Whitelisted tokens fetched successfully", { contractId, tokenCount: tokens.length });
+          return tokens;
+        }
+
+        logger.error("Failed to fetch whitelisted tokens", { contractId, error: "unexpected empty retval" });
+        throw new Error("InternalServerError");
+      })();
+
+      inFlightWhitelistRequests.set(contractId, requestPromise);
+      let tokens: string[];
+      try {
+        tokens = await requestPromise;
+      } finally {
+        inFlightWhitelistRequests.delete(contractId);
       }
+
+      sendSuccess(res, { tokens });
     } catch (err: any) {
       const message = err?.message ?? "Internal server error";
       if (/unauthorized|401/i.test(message)) {
@@ -352,64 +392,39 @@ router.post(
         return nativeToScVal(a.value);
       });
 
-      const tx = new TransactionBuilder(account, {
-        fee: BASE_FEE,
-        networkPassphrase: NETWORK_PASSPHRASE,
-      })
-        .addOperation(contract.call(method, ...scArgs))
-        .setTimeout(30)
-        .build();
-
-      const prepared = await server.prepareTransaction(tx);
-      res.json({ success: true, xdr: prepared.toXDR() });
-    } catch (err: any) {
-      logger.error("Failed to build transaction", { error: err?.message });
-      res.status(500).json({ success: false, error: "Internal server error" });
-    }
-  },
-);
-
-// ---------------------------------------------------------------------------
 // POST /api/jobs/:contractId/milestones/:index/partial-release
-// ---------------------------------------------------------------------------
 router.post(
   "/:contractId/milestones/:index/partial-release",
-  validate(contractMilestoneParamsSchema, "params", (req) =>
-    logger.warn("Invalid params for partial-release", { params: req.params }),
-  ),
-  validate(partialReleaseBodySchema, "body", (req) =>
-    logger.warn("Invalid body for partial-release", { body: req.body }),
-  ),
+  partialReleaseRateLimit,
+  validate(partialReleaseParamsSchema, "params"),
+  validate(partialReleaseBodySchema, "body"),
   async (req: Request, res: Response) => {
     try {
       const { contractId, index } = req.params;
       const { amount, sourceAddress } = req.body;
-      const contract = new Contract(contractId);
+      const contract = new Contract(contractId as string);
       const account = await server.getAccount(sourceAddress as string);
+      const amountNum = BigInt(amount);
 
-      const amountNum = BigInt(amount as string);
       const tx = new TransactionBuilder(account, {
         fee: BASE_FEE,
-        networkPassphrase: NETWORK_PASSPHRASE,
+        networkPassphrase: Networks.TESTNET,
       })
-        .addOperation(
-          contract.call(
-            "approve_partial",
-            Address.fromString(sourceAddress).toScVal(),
-            nativeToScVal(Number(index), { type: "u32" }),
-            nativeToScVal(amountNum, { type: "i128" }),
-          ),
-        )
+        .addOperation(contract.call(
+          "approve_partial",
+          Address.fromString(sourceAddress).toScVal(),
+          nativeToScVal(parseInt(index as string), { type: "u32" }),
+          nativeToScVal(amountNum, { type: "i128" })
+        ))
         .setTimeout(30)
         .build();
 
       const prepared = await server.prepareTransaction(tx);
       res.json({ success: true, xdr: prepared.toXDR() });
     } catch (err: any) {
-      logger.error("Failed to build partial-release tx", { error: err?.message });
-      res.status(500).json({ success: false, error: "Internal server error" });
+      res.status(500).json({ success: false, error: err.message });
     }
-  },
+  }
 );
 
 // ---------------------------------------------------------------------------
