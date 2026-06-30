@@ -1,6 +1,7 @@
 import { Server } from "@stellar/stellar-sdk/rpc";
 import { scValToNative } from "@stellar/stellar-sdk";
 import { getLastIndexedLedger, setLastIndexedLedger, insertEvent } from "./db.js";
+import { deliverWebhooks } from "./webhook-delivery.js";
 
 const RPC_URL = "https://soroban-testnet.stellar.org";
 const server = new Server(RPC_URL);
@@ -31,12 +32,14 @@ export async function pollEvents() {
     const currentLedger = (await server.getLatestLedger()).sequence;
     if (currentLedger <= lastLedger) return;
 
+    const startLedger = lastLedger + 1;
+
     console.log(
-      `Polling events from ledger ${lastLedger + 1} to ${currentLedger}`
+      `Polling events from ledger ${startLedger} to ${currentLedger}`
     );
 
     const events = await server.getEvents({
-      startLedger: lastLedger + 1,
+      startLedger,
       filters: [
         {
           type: "contract",
@@ -66,6 +69,10 @@ export async function pollEvents() {
     setLastIndexedLedger(currentLedger);
     console.log(
       `Successfully processed ${events.events.length} events, up to ledger ${currentLedger}`
+    );
+
+    deliverWebhooks(startLedger, currentLedger).catch((err) =>
+      console.error("Error delivering webhooks:", err)
     );
   } catch (err) {
     console.error("Error polling events:", err);
