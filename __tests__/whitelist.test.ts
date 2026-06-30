@@ -377,6 +377,111 @@ describe("GET /api/jobs/:contractId/whitelist", () => {
     });
   });
 
+  // --- ISSUE #49: Zod schema middleware validation ---
+  describe("Zod schema middleware validation (Issue #49)", () => {
+    // ── Invalid contractId formats ────────────────────────────────────────
+
+    it("returns 400 with a field-level error for a completely invalid contractId", async () => {
+      const res = await request(buildApp())
+        .get("/api/jobs/not-a-contract/whitelist")
+        .expect(400);
+
+      expect(res.body.success).toBe(false);
+      expect(res.body.error).toMatch(/contractId/);
+      expect(res.body.error).toMatch(/valid Stellar contract address/i);
+    });
+
+    it("returns 400 when contractId is a Stellar account address (G…)", async () => {
+      const res = await request(buildApp())
+        .get(
+          "/api/jobs/GAODBHVR63Z56MVQRBEJSYM2H5423LJ4WAPUUBOFG4JYY72S6ROKVZRX/whitelist"
+        )
+        .expect(400);
+
+      expect(res.body.success).toBe(false);
+      expect(res.body.error).toMatch(/contractId/);
+      expect(res.body.error).toMatch(/valid Stellar contract address/i);
+    });
+
+    it("returns 400 when contractId is too short (< 56 chars)", async () => {
+      const short = "C" + "A".repeat(40); // 41 chars
+      const res = await request(buildApp())
+        .get(`/api/jobs/${short}/whitelist`)
+        .expect(400);
+
+      expect(res.body.success).toBe(false);
+      expect(res.body.error).toMatch(/contractId/);
+    });
+
+    it("returns 400 when contractId is too long (> 56 chars)", async () => {
+      const long = "C" + "A".repeat(60); // 61 chars
+      const res = await request(buildApp())
+        .get(`/api/jobs/${long}/whitelist`)
+        .expect(400);
+
+      expect(res.body.success).toBe(false);
+      expect(res.body.error).toMatch(/contractId/);
+    });
+
+    it("returns 400 for an empty-looking contractId segment", async () => {
+      const res = await request(buildApp())
+        .get("/api/jobs/INVALID/whitelist")
+        .expect(400);
+
+      expect(res.body.success).toBe(false);
+      expect(res.body.error).toMatch(/contractId/);
+    });
+
+    // ── Response shape assertions ─────────────────────────────────────────
+
+    it("error body has exactly {success, error} keys — no extra fields", async () => {
+      const res = await request(buildApp())
+        .get("/api/jobs/bad-id/whitelist")
+        .expect(400);
+
+      expect(Object.keys(res.body)).toEqual(["success", "error"]);
+      expect(res.body.success).toBe(false);
+      expect(typeof res.body.error).toBe("string");
+    });
+
+    it("error message is a non-empty string (not an array or object)", async () => {
+      const res = await request(buildApp())
+        .get("/api/jobs/bad-id/whitelist")
+        .expect(400);
+
+      expect(typeof res.body.error).toBe("string");
+      expect(res.body.error.length).toBeGreaterThan(0);
+    });
+
+    it("error message contains the field name for easy client-side parsing", async () => {
+      const res = await request(buildApp())
+        .get("/api/jobs/bad-id/whitelist")
+        .expect(400);
+
+      // The middleware formats Zod issues as "field: message"
+      expect(res.body.error).toMatch(/contractId/);
+    });
+
+    // ── Valid contractId passes Zod and reaches the route handler ─────────
+
+    it("does NOT return 400 for a syntactically valid contractId", async () => {
+      const vec = { forEach: () => {} };
+      mockSimulateTransaction.mockResolvedValue({ result: { retval: vec } });
+
+      const res = await request(buildApp()).get(
+        `/api/jobs/${VALID_CONTRACT}/whitelist`
+      );
+
+      expect(res.status).not.toBe(400);
+    });
+
+    it("Zod middleware runs before the route handler (RPC is never called on invalid input)", async () => {
+      await request(buildApp())
+        .get("/api/jobs/INVALID_ID/whitelist")
+        .expect(400);
+
+      expect(mockGetAccount).not.toHaveBeenCalled();
+      expect(mockSimulateTransaction).not.toHaveBeenCalled();
   // --- ISSUE #50: Node-Cache in-memory caching ---
   describe("Node-Cache in-memory caching (Issue #50)", () => {
     it("returns tokens from RPC on first request", async () => {
