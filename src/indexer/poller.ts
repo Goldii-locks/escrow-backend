@@ -2,7 +2,8 @@ import { Server } from "@stellar/stellar-sdk/rpc";
 import { scValToNative } from "@stellar/stellar-sdk";
 import { getLastIndexedLedger, setLastIndexedLedger, insertEvent } from "./db.js";
 
-const RPC_URL = "https://soroban-testnet.stellar.org";
+const RPC_URL =
+  process.env.SOROBAN_RPC_URL || "https://soroban-testnet.stellar.org";
 const server = new Server(RPC_URL);
 const CONTRACT_ID = process.env.CONTRACT_ID || "";
 const POLL_INTERVAL_MS = parseInt(process.env.POLL_INTERVAL_MS || "15000", 10);

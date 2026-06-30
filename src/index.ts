@@ -1,6 +1,7 @@
 import express from "express";
 import type { Request, Response, NextFunction } from "express";
 import cors from "cors";
+import helmet from "helmet";
 import dotenv from "dotenv";
 import jobRoutes from "./routes/jobs.js";
 import adminRoutes from "./routes/admin.js";
@@ -17,6 +18,7 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 
 app.use(cors());
+app.use(helmet());
 app.use(express.json());
 
 app.get("/health", (req, res) => {
