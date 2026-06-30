@@ -32,7 +32,11 @@ const server = new Server(RPC_URL);
 
 const WHITELIST_TTL = parseInt(process.env.WHITELIST_CACHE_TTL_S || "60", 10);
 export const whitelistCache = new NodeCache({ stdTTL: WHITELIST_TTL, useClones: false });
-export function resetWhitelistCache(): void { whitelistCache.flushAll(); }
+const inFlightWhitelistRequests = new Map<string, Promise<string[]>>();
+export function resetWhitelistCache(): void {
+  whitelistCache.flushAll();
+  inFlightWhitelistRequests.clear();
+}
 
 // Helper function to parse job from RPC result
 const parseJobFromResult = (result: any, contractId: string) => {
@@ -219,59 +223,68 @@ router.get(
         return;
       }
 
-      const contract = new Contract(contractId as string);
-      const account = await server.getAccount(process.env.DEPLOYER_ADDRESS || "");
-      const tx = new TransactionBuilder(account, {
-        fee: BASE_FEE,
-        networkPassphrase: Networks.TESTNET,
-      })
-        .addOperation(contract.call("get_whitelisted_tokens"))
-        .setTimeout(30)
-        .build();
-
-      const result = await server.simulateTransaction(tx);
-
-      // Check if simulation resulted in an error
-      if ("error" in result) {
-        // Check if it's the NotInitialized error (Error::NotInitialized = 2)
-        // The error from simulation will have a message indicating contract error #2
-        const errorMsg = String(result.error);
-        if (errorMsg.includes("contract error #2") || errorMsg.includes("NotInitialized")) {
-          whitelistCache.set(contractId, []);
-          logger.info("Whitelisted tokens fetched successfully", { contractId, tokenCount: 0 });
-          sendSuccess(res, { tokens: [] });
-          return;
-        }
-        if (
-          /not found|NotFound|contract not found/i.test(errorMsg) ||
-          /contract error #1\b/i.test(errorMsg)
-        ) {
-          logger.warn("Job not found", { contractId });
-          sendError(res, 404, "Job not found");
-          return;
-        }
-        logger.error("Failed to fetch whitelisted tokens", { contractId, error: errorMsg });
-        sendError(res, 500, "Internal server error");
+      const inFlight = inFlightWhitelistRequests.get(contractId);
+      if (inFlight) {
+        const tokens = await inFlight;
+        logger.info("Whitelisted tokens served from in-flight cache", { contractId, tokenCount: tokens.length });
+        sendSuccess(res, { tokens });
         return;
       }
 
-      if ("result" in result && result.result?.retval) {
-        // Handle Vec<Address> correctly by iterating (using type assertions)
-        const tokens: string[] = [];
-        const vec = result.result.retval as any;
+      const requestPromise = (async (): Promise<string[]> => {
+        const contract = new Contract(contractId as string);
+        const account = await server.getAccount(process.env.DEPLOYER_ADDRESS || "");
+        const tx = new TransactionBuilder(account, {
+          fee: BASE_FEE,
+          networkPassphrase: Networks.TESTNET,
+        })
+          .addOperation(contract.call("get_whitelisted_tokens"))
+          .setTimeout(30)
+          .build();
 
-        // Since it's a Vec from the contract, it should have a map/forEach method
-        // like val.milestones() in parseJobFromResult
-        if (typeof vec.forEach === "function") {
-          vec.forEach((token: any) => tokens.push(token.toString()));
+        const result = await server.simulateTransaction(tx);
+
+        if ("error" in result) {
+          const errorMsg = String(result.error);
+          if (errorMsg.includes("contract error #2") || errorMsg.includes("NotInitialized")) {
+            whitelistCache.set(contractId, []);
+            logger.info("Whitelisted tokens fetched successfully", { contractId, tokenCount: 0 });
+            return [];
+          }
+          if (
+            /not found|NotFound|contract not found/i.test(errorMsg) ||
+            /contract error #1\b/i.test(errorMsg)
+          ) {
+            throw new Error("not found");
+          }
+          logger.error("Failed to fetch whitelisted tokens", { contractId, error: errorMsg });
+          throw new Error("InternalServerError");
         }
-        whitelistCache.set(contractId, tokens);
-        logger.info("Whitelisted tokens fetched successfully", { contractId, tokenCount: tokens.length });
-        sendSuccess(res, { tokens });
-      } else {
+
+        if ("result" in result && result.result?.retval) {
+          const tokens: string[] = [];
+          const vec = result.result.retval as any;
+          if (typeof vec.forEach === "function") {
+            vec.forEach((token: any) => tokens.push(token.toString()));
+          }
+          whitelistCache.set(contractId, tokens);
+          logger.info("Whitelisted tokens fetched successfully", { contractId, tokenCount: tokens.length });
+          return tokens;
+        }
+
         logger.error("Failed to fetch whitelisted tokens", { contractId, error: "unexpected empty retval" });
-        sendError(res, 500, "Internal server error");
+        throw new Error("InternalServerError");
+      })();
+
+      inFlightWhitelistRequests.set(contractId, requestPromise);
+      let tokens: string[];
+      try {
+        tokens = await requestPromise;
+      } finally {
+        inFlightWhitelistRequests.delete(contractId);
       }
+
+      sendSuccess(res, { tokens });
     } catch (err: any) {
       const message = err?.message ?? "Internal server error";
       if (/unauthorized|401/i.test(message)) {
