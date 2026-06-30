@@ -95,6 +95,15 @@ export function runMigrations(): void {
       description TEXT NOT NULL,
       applied_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
+
+    CREATE TABLE IF NOT EXISTS webhook_subscriptions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      contract_id TEXT NOT NULL,
+      webhook_url TEXT NOT NULL,
+      event_types TEXT NOT NULL DEFAULT '*',
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(contract_id, webhook_url)
+    );
   `);
 
   for (const migration of MIGRATIONS) {
@@ -364,55 +373,104 @@ export function getJobsByWallet(
   return { jobs, total, page: safePage, limit: safeLimit };
 }
 
-// ---------------------------------------------------------------------------
-// Monitored contracts (#85)
-// ---------------------------------------------------------------------------
-
-/**
- * Register a new contract address for polling.
- * If the contract is already registered, mark it active (idempotent).
- */
-export function registerContract(contractId: string, label?: string): void {
-  const db = getDb();
-  db.prepare(
-    `INSERT INTO monitored_contracts (contract_id, label, active)
-     VALUES (?, ?, 1)
-     ON CONFLICT(contract_id) DO UPDATE SET active = 1`
-  ).run(contractId, label ?? null);
-  logger.info("Contract registered for indexing", { contractId, label });
+export interface EventRow {
+  id: number;
+  contract_id: string;
+  event_type: string;
+  ledger_sequence: number;
+  timestamp: number;
+  data_json: string;
+  created_at: string;
 }
 
-/**
- * Deactivate a contract so the poller stops fetching its events.
- */
-export function deregisterContract(contractId: string): void {
-  const db = getDb();
-  db.prepare(
-    "UPDATE monitored_contracts SET active = 0 WHERE contract_id = ?"
-  ).run(contractId);
-  logger.info("Contract deregistered from indexing", { contractId });
+export interface PaginatedEvents {
+  events: EventRow[];
+  total: number;
+  page: number;
+  limit: number;
 }
 
-/**
- * Return all currently active contract IDs.
- */
-export function getActiveContractIds(): string[] {
+export function getEventsByContract(
+  contractId: string,
+  page: number = 1,
+  limit: number = 10
+): PaginatedEvents {
   const db = getDb();
+  const safePage = Math.max(1, page);
+  const safeLimit = Math.max(1, Math.min(100, limit));
+  const offset = (safePage - 1) * safeLimit;
+
+  const totalRow = db
+    .prepare("SELECT COUNT(*) as count FROM events WHERE contract_id = ?")
+    .get(contractId) as { count: number };
+
   const rows = db
-    .prepare("SELECT contract_id FROM monitored_contracts WHERE active = 1")
-    .all() as Array<{ contract_id: string }>;
-  return rows.map((r) => r.contract_id);
-}
+    .prepare(
+      `SELECT * FROM events
+       WHERE contract_id = ?
+       ORDER BY ledger_sequence ASC
+       LIMIT ? OFFSET ?`
+    )
+    .all(contractId, safeLimit, offset) as EventRow[];
 
-// ---------------------------------------------------------------------------
-// Admin / status helpers
-// ---------------------------------------------------------------------------
+  return {
+    events: rows,
+    total: totalRow.count,
+    page: safePage,
+    limit: safeLimit,
+  };
+}
 
 export interface IndexerStatusData {
   lastIndexedLedger: number;
   totalEvents: number;
   lastEventAt: string | null;
   eventsByType: Record<string, number>;
+}
+
+export interface WebhookSubscription {
+  id: number;
+  contract_id: string;
+  webhook_url: string;
+  event_types: string;
+  created_at: string;
+}
+
+export function addSubscription(
+  contractId: string,
+  webhookUrl: string,
+  eventTypes: string[]
+): WebhookSubscription {
+  const db = getDb();
+  const stmt = db.prepare(`
+    INSERT OR IGNORE INTO webhook_subscriptions
+    (contract_id, webhook_url, event_types)
+    VALUES (?, ?, ?)
+  `);
+  stmt.run(contractId, webhookUrl, JSON.stringify(eventTypes));
+  return db
+    .prepare("SELECT * FROM webhook_subscriptions WHERE contract_id = ? AND webhook_url = ?")
+    .get(contractId, webhookUrl) as WebhookSubscription;
+}
+
+export function removeSubscription(contractId: string, webhookUrl: string): boolean {
+  const db = getDb();
+  const result = db
+    .prepare("DELETE FROM webhook_subscriptions WHERE contract_id = ? AND webhook_url = ?")
+    .run(contractId, webhookUrl);
+  return result.changes > 0;
+}
+
+export function getSubscriptions(): WebhookSubscription[] {
+  const db = getDb();
+  return db.prepare("SELECT * FROM webhook_subscriptions").all() as WebhookSubscription[];
+}
+
+export function getSubscriptionsForContract(contractId: string): WebhookSubscription[] {
+  const db = getDb();
+  return db
+    .prepare("SELECT * FROM webhook_subscriptions WHERE contract_id = ?")
+    .all(contractId) as WebhookSubscription[];
 }
 
 export function getIndexerStatusData(): IndexerStatusData {

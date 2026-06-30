@@ -1,13 +1,7 @@
 import { Server } from "@stellar/stellar-sdk/rpc";
 import { scValToNative } from "@stellar/stellar-sdk";
-import {
-  getLastIndexedLedger,
-  insertEventBatch,
-  getActiveContractIds,
-  registerContract,
-  type EventRow,
-} from "./db.js";
-import logger from "../utils/logger.js";
+import { getLastIndexedLedger, setLastIndexedLedger, insertEvent } from "./db.js";
+import { deliverWebhooks } from "./webhook-delivery.js";
 
 const RPC_URL = "https://soroban-testnet.stellar.org";
 const server = new Server(RPC_URL);
@@ -53,14 +47,14 @@ export async function pollEvents() {
     const currentLedger = (await server.getLatestLedger()).sequence;
     if (currentLedger <= lastLedger) return;
 
-    logger.info("Polling events", {
-      fromLedger: lastLedger + 1,
-      toLedger: currentLedger,
-      contractCount: contractIds.length,
-    });
+    const startLedger = lastLedger + 1;
+
+    console.log(
+      `Polling events from ledger ${startLedger} to ${currentLedger}`
+    );
 
     const events = await server.getEvents({
-      startLedger: lastLedger + 1,
+      startLedger,
       filters: [
         {
           type: "contract",
@@ -82,14 +76,14 @@ export async function pollEvents() {
       dataJson: JSON.stringify(event.value),
     }));
 
-    // Atomic write: all events + ledger pointer advance in one transaction (#84).
-    // If this throws, nothing is committed and the pointer stays at lastLedger.
-    insertEventBatch(batch, currentLedger);
+    setLastIndexedLedger(currentLedger);
+    console.log(
+      `Successfully processed ${events.events.length} events, up to ledger ${currentLedger}`
+    );
 
-    logger.info("Poll complete", {
-      eventsProcessed: batch.length,
-      newLedger: currentLedger,
-    });
+    deliverWebhooks(startLedger, currentLedger).catch((err) =>
+      console.error("Error delivering webhooks:", err)
+    );
   } catch (err) {
     logger.error("Error polling events", {
       error: err instanceof Error ? err.message : String(err),
