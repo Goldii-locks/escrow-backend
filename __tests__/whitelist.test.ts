@@ -486,6 +486,25 @@ describe("GET /api/jobs/:contractId/whitelist", () => {
       expect(cached.body).toEqual({ success: true, data: { tokens: ["TOKEN1", "TOKEN2"] } });
     });
 
+    it("deduplicates concurrent whitelist requests with one RPC call", async () => {
+      const vec = {
+        forEach: (fn: (item: unknown) => void) => ["TOKEN1", "TOKEN2"].forEach(fn),
+      };
+      mockSimulateTransaction.mockResolvedValue({ result: { retval: vec } });
+
+      const app = buildApp();
+      const requests = await Promise.all([
+        request(app).get(`/api/jobs/${VALID_CONTRACT}/whitelist`),
+        request(app).get(`/api/jobs/${VALID_CONTRACT}/whitelist`),
+      ]);
+
+      expect(requests[0].status).toBe(200);
+      expect(requests[1].status).toBe(200);
+      expect(requests[0].body).toEqual({ success: true, data: { tokens: ["TOKEN1", "TOKEN2"] } });
+      expect(requests[1].body).toEqual({ success: true, data: { tokens: ["TOKEN1", "TOKEN2"] } });
+      expect(mockSimulateTransaction).toHaveBeenCalledTimes(1);
+    });
+
     it("caches different contractIds independently", async () => {
       const SECOND_CONTRACT =
         "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC";
