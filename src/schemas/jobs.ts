@@ -11,6 +11,16 @@ export const contractIdParamsSchema = z.object({
 
 export type ContractIdParams = z.infer<typeof contractIdParamsSchema>;
 
+export const whitelistParamsSchema = z.object({
+  contractId: z
+    .string({ required_error: "contractId is required" })
+    .refine(isValidStellarContractId, {
+      message: "contractId must be a valid Stellar contract address (C...)",
+    }),
+});
+
+export type WhitelistParams = z.infer<typeof whitelistParamsSchema>;
+
 export const partialReleaseParamsSchema = z.object({
   contractId: z
     .string({ required_error: "contractId is required" })

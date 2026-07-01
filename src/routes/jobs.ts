@@ -22,7 +22,12 @@ import {
 } from "../middleware/job-contract-security.js";
 import { sendError, sendSuccess } from "../utils/api-response.js";
 import { validate } from "../middleware/validate.js";
-import { contractIdParamsSchema, partialReleaseParamsSchema, partialReleaseBodySchema } from "../schemas/jobs.js";
+import {
+  contractIdParamsSchema,
+  whitelistParamsSchema,
+  partialReleaseParamsSchema,
+  partialReleaseBodySchema,
+} from "../schemas/jobs.js";
 import { strictLimiter } from "../middleware/rateLimiter.js";
 import logger from "../utils/logger.js";
 
