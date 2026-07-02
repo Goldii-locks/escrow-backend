@@ -9,6 +9,18 @@ const VALID_CONTRACT =
 const mockGetAccount = jest.fn<() => Promise<unknown>>();
 const mockSimulateTransaction = jest.fn<() => Promise<unknown>>();
 
+const mockLoggerInfo = jest.fn();
+const mockLoggerWarn = jest.fn();
+const mockLoggerError = jest.fn();
+
+jest.unstable_mockModule("../src/utils/logger.js", () => ({
+  default: {
+    info: mockLoggerInfo,
+    warn: mockLoggerWarn,
+    error: mockLoggerError,
+  },
+}));
+
 jest.unstable_mockModule("@stellar/stellar-sdk/rpc", () => ({
   Server: class MockServer {
     getAccount = mockGetAccount;
@@ -16,7 +28,7 @@ jest.unstable_mockModule("@stellar/stellar-sdk/rpc", () => ({
   },
 }));
 
-const { default: router } = await import("../src/routes/jobs.js");
+const { default: router, resetWhitelistCache } = await import("../src/routes/jobs.js");
 
 function buildApp() {
   const app = express();
@@ -34,7 +46,11 @@ describe("GET /api/jobs/:contractId/whitelist", () => {
   beforeEach(() => {
     mockGetAccount.mockReset();
     mockSimulateTransaction.mockReset();
+    mockLoggerInfo.mockReset();
+    mockLoggerWarn.mockReset();
+    mockLoggerError.mockReset();
     resetJobWhitelistRateLimitBuckets();
+    resetWhitelistCache();
 
     delete process.env.API_KEY;
     delete process.env.JOB_WHITELIST_RATE_MAX;
@@ -72,9 +88,9 @@ describe("GET /api/jobs/:contractId/whitelist", () => {
     }
   });
 
-  // --- ISSUE #44: Address Validation ---
-  describe("Address Validation (Issue #44)", () => {
-    it("returns 400 for an invalid contractId", async () => {
+  // --- ISSUE #88 / #89: Schema validation and Stellar address format ---
+  describe("Schema and Stellar address validation (Issues #88, #89)", () => {
+    it("returns 400 for a garbage contractId", async () => {
       const res = await request(buildApp())
         .get("/api/jobs/not-a-valid-contract/whitelist")
         .expect(400);
@@ -94,6 +110,43 @@ describe("GET /api/jobs/:contractId/whitelist", () => {
 
       expect(res.body.success).toBe(false);
       expect(res.body.error).toMatch(/valid Stellar contract address/i);
+    });
+
+    it("returns 400 for a contractId that is too short", async () => {
+      const short = "C" + "A".repeat(40);
+      const res = await request(buildApp())
+        .get(`/api/jobs/${short}/whitelist`)
+        .expect(400);
+
+      expect(res.body.success).toBe(false);
+      expect(res.body.error).toMatch(/valid Stellar contract address/i);
+    });
+
+    it("returns 400 for a contractId that is too long", async () => {
+      const long = "C" + "A".repeat(60);
+      const res = await request(buildApp())
+        .get(`/api/jobs/${long}/whitelist`)
+        .expect(400);
+
+      expect(res.body.success).toBe(false);
+      expect(res.body.error).toMatch(/valid Stellar contract address/i);
+    });
+
+    it("returns standardised error shape for all invalid contractId inputs", async () => {
+      const res = await request(buildApp())
+        .get("/api/jobs/bad/whitelist")
+        .expect(400);
+
+      expect(res.body).toMatchObject({ success: false, error: expect.any(String) });
+    });
+
+    it("does not return 400 for a syntactically valid contractId", async () => {
+      mockSimulateTransaction.mockResolvedValue({
+        error: "contract not found on network",
+      });
+
+      const res = await request(buildApp()).get(`/api/jobs/${VALID_CONTRACT}/whitelist`);
+      expect(res.status).not.toBe(400);
     });
   });
 
@@ -174,7 +227,7 @@ describe("GET /api/jobs/:contractId/whitelist", () => {
         .get(`/api/jobs/${VALID_CONTRACT}/whitelist`)
         .expect(500);
 
-      expect(res.body).toEqual({ success: false, error: "host unreachable" });
+      expect(res.body).toEqual({ success: false, error: "Internal server error" });
     });
   });
 
@@ -226,8 +279,8 @@ describe("GET /api/jobs/:contractId/whitelist", () => {
     });
   });
 
-  // --- ISSUE #47: Custom Rate Limiting ---
-  describe("Custom Rate Limiting (Issue #47)", () => {
+  // --- ISSUE #90: Custom Rate Limiting ---
+  describe("Custom Rate Limiting (Issue #90)", () => {
     it("allows requests up to the configured threshold", async () => {
       process.env.JOB_WHITELIST_RATE_MAX = "2";
       const vec = { forEach: () => {} };
@@ -259,6 +312,229 @@ describe("GET /api/jobs/:contractId/whitelist", () => {
         error: "Too many requests, please try again later",
       });
       expect(res.headers["x-ratelimit-remaining"]).toBe("0");
+    });
+
+    it("decrements X-RateLimit-Remaining with each request", async () => {
+      process.env.JOB_WHITELIST_RATE_MAX = "3";
+      const vec = { forEach: () => {} };
+      mockSimulateTransaction.mockResolvedValue({ result: { retval: vec } });
+
+      const app = buildApp();
+      const r1 = await request(app).get(`/api/jobs/${VALID_CONTRACT}/whitelist`).expect(200);
+      const r2 = await request(app).get(`/api/jobs/${VALID_CONTRACT}/whitelist`).expect(200);
+      const r3 = await request(app).get(`/api/jobs/${VALID_CONTRACT}/whitelist`).expect(200);
+
+      expect(r1.headers["x-ratelimit-remaining"]).toBe("2");
+      expect(r2.headers["x-ratelimit-remaining"]).toBe("1");
+      expect(r3.headers["x-ratelimit-remaining"]).toBe("0");
+    });
+
+    it("sets X-RateLimit-Reset as a Unix timestamp in the future", async () => {
+      const vec = { forEach: () => {} };
+      mockSimulateTransaction.mockResolvedValue({ result: { retval: vec } });
+
+      const before = Math.floor(Date.now() / 1000);
+      const res = await request(buildApp()).get(`/api/jobs/${VALID_CONTRACT}/whitelist`).expect(200);
+      const reset = Number(res.headers["x-ratelimit-reset"]);
+
+      expect(reset).toBeGreaterThanOrEqual(before);
+    });
+  });
+
+  // --- ISSUE #33: Robust try-catch wrapper ---
+  describe("Robust try-catch wrapper (Issue #33)", () => {
+    it("returns generic 500 without leaking the raw RPC error string", async () => {
+      mockSimulateTransaction.mockResolvedValue({
+        error: "soroban rpc internal: secret host detail at 10.0.0.1",
+      });
+
+      const res = await request(buildApp())
+        .get(`/api/jobs/${VALID_CONTRACT}/whitelist`)
+        .expect(500);
+
+      expect(res.body).toEqual({ success: false, error: "Internal server error" });
+      expect(JSON.stringify(res.body)).not.toContain("10.0.0.1");
+      expect(JSON.stringify(res.body)).not.toContain("soroban rpc internal");
+    });
+
+    it("returns generic 500 without leaking the thrown exception message", async () => {
+      mockSimulateTransaction.mockRejectedValue(
+        new Error("DB connection string: postgres://admin:password@localhost/prod")
+      );
+
+      const res = await request(buildApp())
+        .get(`/api/jobs/${VALID_CONTRACT}/whitelist`)
+        .expect(500);
+
+      expect(res.body).toEqual({ success: false, error: "Internal server error" });
+      expect(JSON.stringify(res.body)).not.toContain("postgres://");
+      expect(JSON.stringify(res.body)).not.toContain("password");
+    });
+
+    it("does not include stack trace markers in the 500 response body", async () => {
+      const errWithStack = new Error("some internal failure");
+      mockSimulateTransaction.mockRejectedValue(errWithStack);
+
+      const res = await request(buildApp())
+        .get(`/api/jobs/${VALID_CONTRACT}/whitelist`)
+        .expect(500);
+
+      const body = JSON.stringify(res.body);
+      expect(body).not.toMatch(/at Object\./);
+      expect(body).not.toMatch(/\s+at\s+\w/);
+      expect(body).not.toContain(".ts:");
+      expect(body).not.toContain(".js:");
+    });
+
+    it("returns generic 500 when retval is missing from a successful simulation", async () => {
+      mockSimulateTransaction.mockResolvedValue({ result: {} });
+
+      const res = await request(buildApp())
+        .get(`/api/jobs/${VALID_CONTRACT}/whitelist`)
+        .expect(500);
+
+      expect(res.body).toEqual({ success: false, error: "Internal server error" });
+    });
+
+    it("catches errors thrown before the RPC call and returns clean 500", async () => {
+      mockGetAccount.mockRejectedValue(new Error("account fetch failed: internal token expired"));
+
+      const res = await request(buildApp())
+        .get(`/api/jobs/${VALID_CONTRACT}/whitelist`)
+        .expect(500);
+
+      expect(res.body).toEqual({ success: false, error: "Internal server error" });
+      expect(JSON.stringify(res.body)).not.toContain("account fetch failed");
+    });
+
+    it("still returns 401 for auth errors thrown during RPC (not swallowed by outer catch)", async () => {
+      mockSimulateTransaction.mockRejectedValue(new Error("unauthorized: invalid authentication"));
+
+      const res = await request(buildApp())
+        .get(`/api/jobs/${VALID_CONTRACT}/whitelist`)
+        .expect(401);
+
+      expect(res.body).toEqual({ success: false, error: "Unauthorized" });
+    });
+
+    it("still returns 404 for not-found errors thrown during RPC (not swallowed by outer catch)", async () => {
+      mockSimulateTransaction.mockRejectedValue(new Error("contract not found on chain"));
+
+      const res = await request(buildApp())
+        .get(`/api/jobs/${VALID_CONTRACT}/whitelist`)
+        .expect(404);
+
+      expect(res.body).toEqual({ success: false, error: "Job not found" });
+    });
+
+    it("response body contains only success flag and error string — no stack or extra fields", async () => {
+      mockSimulateTransaction.mockRejectedValue(new Error("unexpected"));
+
+      const res = await request(buildApp())
+        .get(`/api/jobs/${VALID_CONTRACT}/whitelist`)
+        .expect(500);
+
+      expect(Object.keys(res.body)).toEqual(["success", "error"]);
+      expect(res.body.success).toBe(false);
+      expect(typeof res.body.error).toBe("string");
+    });
+  });
+
+  // --- ISSUE #50: Node-Cache in-memory caching ---
+  describe("Node-Cache in-memory caching (Issue #50)", () => {
+    it("returns tokens from RPC on first request", async () => {
+      const vec = {
+        forEach: (fn: (item: unknown) => void) => ["TOKENA"].forEach(fn),
+      };
+      mockSimulateTransaction.mockResolvedValue({ result: { retval: vec } });
+
+      const res = await request(buildApp())
+        .get(`/api/jobs/${VALID_CONTRACT}/whitelist`)
+        .expect(200);
+
+      expect(res.body.data.tokens).toEqual(["TOKENA"]);
+      expect(mockSimulateTransaction).toHaveBeenCalledTimes(1);
+    });
+
+    it("serves subsequent requests from cache without calling RPC again", async () => {
+      const vec = {
+        forEach: (fn: (item: unknown) => void) => ["TOKENA"].forEach(fn),
+      };
+      mockSimulateTransaction.mockResolvedValue({ result: { retval: vec } });
+
+      const app = buildApp();
+      await request(app).get(`/api/jobs/${VALID_CONTRACT}/whitelist`).expect(200);
+      await request(app).get(`/api/jobs/${VALID_CONTRACT}/whitelist`).expect(200);
+
+      // RPC only called once; second hit served from cache
+      expect(mockSimulateTransaction).toHaveBeenCalledTimes(1);
+    });
+
+    it("returns cached tokens correctly on cache hit", async () => {
+      const vec = {
+        forEach: (fn: (item: unknown) => void) =>
+          ["TOKEN1", "TOKEN2"].forEach(fn),
+      };
+      mockSimulateTransaction.mockResolvedValue({ result: { retval: vec } });
+
+      const app = buildApp();
+      await request(app).get(`/api/jobs/${VALID_CONTRACT}/whitelist`);
+      const cached = await request(app)
+        .get(`/api/jobs/${VALID_CONTRACT}/whitelist`)
+        .expect(200);
+
+      expect(cached.body).toEqual({ success: true, data: { tokens: ["TOKEN1", "TOKEN2"] } });
+    });
+
+    it("deduplicates concurrent whitelist requests with one RPC call", async () => {
+      const vec = {
+        forEach: (fn: (item: unknown) => void) => ["TOKEN1", "TOKEN2"].forEach(fn),
+      };
+      mockSimulateTransaction.mockResolvedValue({ result: { retval: vec } });
+
+      const app = buildApp();
+      const requests = await Promise.all([
+        request(app).get(`/api/jobs/${VALID_CONTRACT}/whitelist`),
+        request(app).get(`/api/jobs/${VALID_CONTRACT}/whitelist`),
+      ]);
+
+      expect(requests[0].status).toBe(200);
+      expect(requests[1].status).toBe(200);
+      expect(requests[0].body).toEqual({ success: true, data: { tokens: ["TOKEN1", "TOKEN2"] } });
+      expect(requests[1].body).toEqual({ success: true, data: { tokens: ["TOKEN1", "TOKEN2"] } });
+      expect(mockSimulateTransaction).toHaveBeenCalledTimes(1);
+    });
+
+    it("caches different contractIds independently", async () => {
+      const SECOND_CONTRACT =
+        "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC";
+
+      const vec1 = { forEach: (fn: (item: unknown) => void) => ["A"].forEach(fn) };
+      const vec2 = { forEach: (fn: (item: unknown) => void) => ["B"].forEach(fn) };
+      mockSimulateTransaction
+        .mockResolvedValueOnce({ result: { retval: vec1 } })
+        .mockResolvedValueOnce({ result: { retval: vec2 } });
+
+      const app = buildApp();
+      const r1 = await request(app).get(`/api/jobs/${VALID_CONTRACT}/whitelist`).expect(200);
+      const r2 = await request(app).get(`/api/jobs/${SECOND_CONTRACT}/whitelist`).expect(200);
+
+      expect(r1.body.data.tokens).toEqual(["A"]);
+      expect(r2.body.data.tokens).toEqual(["B"]);
+      expect(mockSimulateTransaction).toHaveBeenCalledTimes(2);
+    });
+
+    it("caches empty token list for uninitialized contracts", async () => {
+      mockSimulateTransaction.mockResolvedValue({ error: "contract error #2" });
+
+      const app = buildApp();
+      await request(app).get(`/api/jobs/${VALID_CONTRACT}/whitelist`);
+      const cached = await request(app)
+        .get(`/api/jobs/${VALID_CONTRACT}/whitelist`)
+        .expect(200);
+
+      expect(cached.body).toEqual({ success: true, data: { tokens: [] } });
+      expect(mockSimulateTransaction).toHaveBeenCalledTimes(1);
     });
   });
 });

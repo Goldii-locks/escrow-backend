@@ -1,63 +1,46 @@
-import { Router, type Request, type Response } from "express";
-import {
-  addWebhookSubscription,
-  removeWebhookSubscription,
-} from "../indexer/db.js";
-import { sendError, sendSuccess } from "../utils/api-response.js";
+import { Router } from "express";
+import { addSubscription, removeSubscription } from "../indexer/db.js";
+import { sendSuccess, sendError } from "../utils/api-response.js";
 
 const router = Router();
 
-function isValidWebhookUrl(url: string): boolean {
-  try {
-    const parsed = new URL(url);
-    return parsed.protocol === "http:" || parsed.protocol === "https:";
-  } catch {
-    return false;
-  }
-}
+router.post("/subscribe", (req, res) => {
+  const { contract_id, webhook_url, event_types } = req.body;
 
-router.post("/subscribe", (req: Request, res: Response) => {
-  const { url } = req.body as { url?: string };
-
-  if (!url || typeof url !== "string") {
-    return sendError(res, 400, "url is required");
+  if (!contract_id || !webhook_url) {
+    return sendError(res, 400, "contract_id and webhook_url are required");
   }
 
-  if (!isValidWebhookUrl(url)) {
-    return sendError(res, 400, "url must be a valid http or https URL");
+  if (typeof contract_id !== "string" || typeof webhook_url !== "string") {
+    return sendError(res, 400, "contract_id and webhook_url must be strings");
   }
 
-  try {
-    const subscription = addWebhookSubscription(url);
-    return sendSuccess(res, {
-      id: subscription.id,
-      url: subscription.url,
-    });
-  } catch (err: unknown) {
-    if (
-      err instanceof Error &&
-      "code" in err &&
-      (err as { code: string }).code === "SQLITE_CONSTRAINT_UNIQUE"
-    ) {
-      return sendError(res, 409, "A subscription for this URL already exists");
-    }
-    return sendError(res, 500, "Failed to create webhook subscription");
+  let types: string[];
+  if (!event_types || event_types === "*") {
+    types = ["*"];
+  } else if (Array.isArray(event_types)) {
+    types = event_types;
+  } else {
+    return sendError(res, 400, "event_types must be an array of strings or '*'");
   }
+
+  const subscription = addSubscription(contract_id, webhook_url, types);
+  sendSuccess(res, { subscription });
 });
 
-router.post("/unsubscribe", (req: Request, res: Response) => {
-  const { url } = req.body as { url?: string };
+router.post("/unsubscribe", (req, res) => {
+  const { contract_id, webhook_url } = req.body;
 
-  if (!url || typeof url !== "string") {
-    return sendError(res, 400, "url is required");
+  if (!contract_id || !webhook_url) {
+    return sendError(res, 400, "contract_id and webhook_url are required");
   }
 
-  const removed = removeWebhookSubscription(url);
+  const removed = removeSubscription(contract_id, webhook_url);
   if (!removed) {
-    return sendError(res, 404, "No subscription found for this URL");
+    return sendError(res, 404, "Subscription not found");
   }
 
-  return sendSuccess(res, { url });
+  sendSuccess(res, { message: "Unsubscribed successfully" });
 });
 
 export default router;

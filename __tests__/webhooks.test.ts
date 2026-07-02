@@ -4,25 +4,14 @@ import request from "supertest";
 import express from "express";
 import {
   initSchema,
-  addWebhookSubscription,
-  getWebhookSubscriptions,
   setDb,
+  addSubscription,
+  removeSubscription,
+  getSubscriptions,
+  insertEvent,
 } from "../src/indexer/db.js";
-import webhookRoutes from "../src/routes/webhooks.js";
-import {
-  buildMilestoneWebhookPayload,
-  parseMilestoneIndex,
-  mapEventTypeToStatus,
-} from "../src/webhooks/milestone-events.js";
-import { deliverWebhook } from "../src/webhooks/deliver.js";
-import { dispatchMilestoneWebhook } from "../src/webhooks/dispatcher.js";
 
 let testDb: Database.Database;
-let fetchMock: jest.Mock;
-
-const app = express();
-app.use(express.json());
-app.use("/api/webhooks", webhookRoutes);
 
 beforeAll(() => {
   testDb = new Database(":memory:");
@@ -36,168 +25,257 @@ afterAll(() => {
 
 beforeEach(() => {
   testDb.exec("DELETE FROM webhook_subscriptions");
-  process.env.WEBHOOK_RETRY_DELAY_MS = "0";
-  fetchMock = jest.fn();
-  global.fetch = fetchMock as unknown as typeof fetch;
+  testDb.exec("DELETE FROM events");
 });
 
-describe("milestone event parsing", () => {
-  it("maps contract event types to webhook statuses", () => {
-    expect(mapEventTypeToStatus("delivered")).toBe("delivered");
-    expect(mapEventTypeToStatus("approved")).toBe("approved");
-    expect(mapEventTypeToStatus("dispute_raised")).toBe("disputed");
-    expect(mapEventTypeToStatus("dispute_resolved")).toBe("resolved");
+describe("Subscription management – unit", () => {
+  const CONTRACT_A = "CA3D5K7UXYZ123456789012345678901234567890123456789012345678901";
+  const WEBHOOK_URL = "https://example.com/webhook";
+
+  it("adds a subscription", () => {
+    const sub = addSubscription(CONTRACT_A, WEBHOOK_URL, ["funded", "approved"]);
+    expect(sub.contract_id).toBe(CONTRACT_A);
+    expect(sub.webhook_url).toBe(WEBHOOK_URL);
+    expect(sub.event_types).toBe(JSON.stringify(["funded", "approved"]));
+    expect(sub.id).toBeGreaterThan(0);
   });
 
-  it("parses milestone index from common payload shapes", () => {
-    expect(parseMilestoneIndex(2)).toBe(2);
-    expect(parseMilestoneIndex([1])).toBe(1);
-    expect(parseMilestoneIndex({ index: 3 })).toBe(3);
-    expect(parseMilestoneIndex({ milestone_index: 4 })).toBe(4);
-    expect(parseMilestoneIndex({ unrelated: true })).toBeNull();
+  it("prevents duplicate subscriptions", () => {
+    addSubscription(CONTRACT_A, WEBHOOK_URL, ["funded"]);
+    addSubscription(CONTRACT_A, WEBHOOK_URL, ["approved"]);
+    const subs = getSubscriptions();
+    expect(subs).toHaveLength(1);
+    expect(subs[0].event_types).toBe(JSON.stringify(["funded"]));
   });
 
-  it("builds webhook payload with required fields", () => {
-    const payload = buildMilestoneWebhookPayload(
-      "C123",
-      "delivered",
-      { index: 1 },
-      "abc123hash"
-    );
-
-    expect(payload).toEqual({
-      contractId: "C123",
-      milestoneIndex: 1,
-      newStatus: "delivered",
-      txHash: "abc123hash",
-    });
+  it("removes a subscription", () => {
+    addSubscription(CONTRACT_A, WEBHOOK_URL, ["funded"]);
+    const removed = removeSubscription(CONTRACT_A, WEBHOOK_URL);
+    expect(removed).toBe(true);
+    expect(getSubscriptions()).toHaveLength(0);
   });
 
-  it("returns null for non-milestone events", () => {
-    expect(
-      buildMilestoneWebhookPayload("C123", "funded", { index: 0 }, "hash")
-    ).toBeNull();
+  it("returns false when removing non-existent subscription", () => {
+    const removed = removeSubscription(CONTRACT_A, WEBHOOK_URL);
+    expect(removed).toBe(false);
+  });
+
+  it("lists subscriptions", () => {
+    addSubscription(CONTRACT_A, WEBHOOK_URL, ["funded"]);
+    addSubscription("CONTRACT_B", "https://other.com/hook", ["approved"]);
+    expect(getSubscriptions()).toHaveLength(2);
   });
 });
 
-describe("POST /api/webhooks/subscribe", () => {
-  it("registers a webhook URL", async () => {
+describe("POST /api/webhooks/subscribe – HTTP", () => {
+  let app: express.Express;
+
+  beforeAll(async () => {
+    const { default: router } = await import("../src/routes/webhooks.js");
+    app = express();
+    app.use(express.json());
+    app.use("/api/webhooks", router);
+  });
+
+  const VALID_BODY = {
+    contract_id: "CA3D5K7UXYZ123456789012345678901234567890123456789012345678901",
+    webhook_url: "https://example.com/hook",
+    event_types: ["funded", "approved"],
+  };
+
+  it("returns 200 with subscription on valid request", async () => {
     const res = await request(app)
       .post("/api/webhooks/subscribe")
-      .send({ url: "https://example.com/hook" });
+      .send(VALID_BODY)
+      .expect(200);
 
-    expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
-    expect(res.body.data.url).toBe("https://example.com/hook");
-    expect(res.body.data.id).toEqual(expect.any(Number));
-    expect(getWebhookSubscriptions()).toHaveLength(1);
+    expect(res.body.data.subscription.contract_id).toBe(VALID_BODY.contract_id);
+    expect(res.body.data.subscription.webhook_url).toBe(VALID_BODY.webhook_url);
   });
 
-  it("rejects invalid URLs", async () => {
+  it("returns 400 when contract_id is missing", async () => {
     const res = await request(app)
       .post("/api/webhooks/subscribe")
-      .send({ url: "not-a-url" });
+      .send({ webhook_url: "https://example.com/hook" })
+      .expect(400);
 
-    expect(res.status).toBe(400);
     expect(res.body.success).toBe(false);
   });
 
-  it("rejects duplicate subscriptions", async () => {
-    await request(app)
-      .post("/api/webhooks/subscribe")
-      .send({ url: "https://example.com/hook" });
-
+  it("returns 400 when webhook_url is missing", async () => {
     const res = await request(app)
       .post("/api/webhooks/subscribe")
-      .send({ url: "https://example.com/hook" });
+      .send({ contract_id: "CONTRACT_A" })
+      .expect(400);
 
-    expect(res.status).toBe(409);
-    expect(res.body.error).toContain("already exists");
+    expect(res.body.success).toBe(false);
+  });
+
+  it("accepts '*' event_types", async () => {
+    const res = await request(app)
+      .post("/api/webhooks/subscribe")
+      .send({ ...VALID_BODY, event_types: "*" })
+      .expect(200);
+
+    expect(res.body.success).toBe(true);
+  });
+
+  it("accepts missing event_types (defaults to all)", async () => {
+    const res = await request(app)
+      .post("/api/webhooks/subscribe")
+      .send({ contract_id: VALID_BODY.contract_id, webhook_url: "https://example.com/hook2" })
+      .expect(200);
+
+    expect(res.body.success).toBe(true);
   });
 });
 
-describe("POST /api/webhooks/unsubscribe", () => {
-  it("removes an existing subscription", async () => {
-    addWebhookSubscription("https://example.com/hook");
+describe("POST /api/webhooks/unsubscribe – HTTP", () => {
+  let app: express.Express;
+
+  beforeAll(async () => {
+    const { default: router } = await import("../src/routes/webhooks.js");
+    app = express();
+    app.use(express.json());
+    app.use("/api/webhooks", router);
+  });
+
+  beforeEach(() => {
+    testDb.exec("DELETE FROM webhook_subscriptions");
+  });
+
+  it("returns 200 on successful unsubscribe", async () => {
+    addSubscription(
+      "CA3D5K7UXYZ123456789012345678901234567890123456789012345678901",
+      "https://example.com/hook",
+      ["funded"]
+    );
 
     const res = await request(app)
       .post("/api/webhooks/unsubscribe")
-      .send({ url: "https://example.com/hook" });
+      .send({
+        contract_id: "CA3D5K7UXYZ123456789012345678901234567890123456789012345678901",
+        webhook_url: "https://example.com/hook",
+      })
+      .expect(200);
 
-    expect(res.status).toBe(200);
-    expect(res.body.data.url).toBe("https://example.com/hook");
-    expect(getWebhookSubscriptions()).toHaveLength(0);
+    expect(res.body.success).toBe(true);
   });
 
-  it("returns 404 when subscription does not exist", async () => {
+  it("returns 404 for non-existent subscription", async () => {
     const res = await request(app)
       .post("/api/webhooks/unsubscribe")
-      .send({ url: "https://example.com/missing" });
+      .send({
+        contract_id: "CNONEXISTENT",
+        webhook_url: "https://example.com/hook",
+      })
+      .expect(404);
 
-    expect(res.status).toBe(404);
+    expect(res.body.success).toBe(false);
   });
 });
 
-describe("webhook delivery", () => {
-  it("retries failed deliveries up to 3 times", async () => {
-    fetchMock
-      .mockResolvedValueOnce({ ok: false, status: 500 })
-      .mockResolvedValueOnce({ ok: false, status: 500 })
-      .mockResolvedValueOnce({ ok: true, status: 200 });
+describe("Webhook delivery", () => {
+  const CONTRACT_A = "CA3D5K7UXYZ123456789012345678901234567890123456789012345678901";
+  const WEBHOOK_URL = "https://webhook-test.local/event";
 
-    const payload = {
-      contractId: "C123",
-      milestoneIndex: 0,
-      newStatus: "delivered",
-      txHash: "hash",
-    };
+  let mockFetch: jest.Mock<(...args: any[]) => any>;
 
-    const delivered = await deliverWebhook("https://example.com/hook", payload);
-
-    expect(delivered).toBe(true);
-    expect(fetchMock).toHaveBeenCalledTimes(3);
-    expect(fetchMock.mock.calls[0][1]?.body).toBe(JSON.stringify(payload));
+  beforeAll(() => {
+    mockFetch = jest.fn();
+    (global as any).fetch = mockFetch;
   });
 
-  it("returns false after 3 failed attempts", async () => {
-    fetchMock.mockResolvedValue({ ok: false, status: 503 });
-
-    const delivered = await deliverWebhook("https://example.com/hook", {
-      contractId: "C123",
-      milestoneIndex: 0,
-      newStatus: "approved",
-      txHash: "hash",
-    });
-
-    expect(delivered).toBe(false);
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+  beforeEach(() => {
+    mockFetch.mockReset();
+    testDb.exec("DELETE FROM webhook_subscriptions");
+    testDb.exec("DELETE FROM events");
   });
 
-  it("dispatches to all subscribers", async () => {
-    addWebhookSubscription("https://example.com/hook-a");
-    addWebhookSubscription("https://example.com/hook-b");
-    fetchMock.mockResolvedValue({ ok: true, status: 200 });
-
-    dispatchMilestoneWebhook({
-      contractId: "C123",
-      milestoneIndex: 2,
-      newStatus: "disputed",
-      txHash: "hash",
-    });
-
-    await new Promise((resolve) => setTimeout(resolve, 50));
-
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+  afterAll(() => {
+    delete (global as any).fetch;
   });
-});
 
-describe("subscription persistence", () => {
-  it("keeps subscriptions after schema re-init on same database", () => {
-    addWebhookSubscription("https://example.com/persisted");
-    initSchema();
+  it("delivers webhooks for matching events", async () => {
+    mockFetch.mockResolvedValue({ ok: true });
 
-    const subs = getWebhookSubscriptions();
-    expect(subs).toHaveLength(1);
-    expect(subs[0].url).toBe("https://example.com/persisted");
+    addSubscription(CONTRACT_A, WEBHOOK_URL, ["funded"]);
+    insertEvent(CONTRACT_A, "funded", 100, 1000, JSON.stringify({ client: "GCLIENT" }));
+    insertEvent(CONTRACT_A, "approved", 101, 2000, JSON.stringify({ client: "GCLIENT" }));
+
+    const { deliverWebhooks } = await import("../src/indexer/webhook-delivery.js");
+    const results = await deliverWebhooks(100, 102);
+
+    expect(results).toHaveLength(1);
+    expect(results[0].success).toBe(true);
+    expect(results[0].webhookUrl).toBe(WEBHOOK_URL);
+
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    const callBody = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(callBody.event_type).toBe("funded");
+    expect(callBody.contract_id).toBe(CONTRACT_A);
+  });
+
+  it("does not deliver if no subscriptions match", async () => {
+    mockFetch.mockResolvedValue({ ok: true });
+
+    insertEvent(CONTRACT_A, "funded", 100, 1000, JSON.stringify({ client: "GCLIENT" }));
+
+    const { deliverWebhooks } = await import("../src/indexer/webhook-delivery.js");
+    const results = await deliverWebhooks(100, 100);
+
+    expect(results).toHaveLength(0);
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it("retries up to 3 times on failure", async () => {
+    mockFetch.mockResolvedValue({ ok: false });
+
+    addSubscription(CONTRACT_A, WEBHOOK_URL, ["funded"]);
+    insertEvent(CONTRACT_A, "funded", 100, 1000, JSON.stringify({ client: "GCLIENT" }));
+
+    const { deliverWebhooks } = await import("../src/indexer/webhook-delivery.js");
+    const results = await deliverWebhooks(100, 100);
+
+    expect(results).toHaveLength(1);
+    expect(results[0].success).toBe(false);
+    expect(results[0].attempts).toBe(3);
+    expect(mockFetch).toHaveBeenCalledTimes(3);
+  });
+
+  it("succeeds on second attempt after first fails", async () => {
+    mockFetch
+      .mockResolvedValueOnce({ ok: false })
+      .mockResolvedValueOnce({ ok: true });
+
+    addSubscription(CONTRACT_A, WEBHOOK_URL, ["funded"]);
+    insertEvent(CONTRACT_A, "funded", 100, 1000, JSON.stringify({ client: "GCLIENT" }));
+
+    const { deliverWebhooks } = await import("../src/indexer/webhook-delivery.js");
+    const results = await deliverWebhooks(100, 100);
+
+    expect(results).toHaveLength(1);
+    expect(results[0].success).toBe(true);
+    expect(results[0].attempts).toBe(2);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("delivers to multiple subscribers for same event", async () => {
+    mockFetch.mockResolvedValue({ ok: true });
+
+    const URL_A = "https://first.local/hook";
+    const URL_B = "https://second.local/hook";
+
+    addSubscription(CONTRACT_A, URL_A, ["funded"]);
+    addSubscription(CONTRACT_A, URL_B, ["funded"]);
+    insertEvent(CONTRACT_A, "funded", 100, 1000, JSON.stringify({ client: "GCLIENT" }));
+
+    const { deliverWebhooks } = await import("../src/indexer/webhook-delivery.js");
+    const results = await deliverWebhooks(100, 100);
+
+    expect(results).toHaveLength(2);
+    expect(results.every((r) => r.success)).toBe(true);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
   });
 });

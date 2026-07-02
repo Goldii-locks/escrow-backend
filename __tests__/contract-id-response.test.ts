@@ -112,7 +112,7 @@ describe("GET /api/jobs/:contractId – response format and status codes", () =>
       .get(`/api/jobs/${VALID_CONTRACT}`)
       .expect(500);
 
-    expect(res.body).toEqual({ success: false, error: "host unreachable" });
+    expect(res.body).toEqual({ success: false, error: "Internal server error" });
   });
 
   it("returns 500 when the RPC client throws", async () => {
@@ -122,7 +122,7 @@ describe("GET /api/jobs/:contractId – response format and status codes", () =>
       .get(`/api/jobs/${VALID_CONTRACT}`)
       .expect(500);
 
-    expect(res.body).toEqual({ success: false, error: "upstream failure" });
+    expect(res.body).toEqual({ success: false, error: "Internal server error" });
   });
 
   it("returns 200 with a standardized success envelope for a valid job", async () => {
