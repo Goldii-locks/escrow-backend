@@ -104,6 +104,12 @@ export function runMigrations(): void {
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       UNIQUE(contract_id, webhook_url)
     );
+
+    CREATE TABLE IF NOT EXISTS webhook_subscriptions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      url TEXT NOT NULL UNIQUE,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
   `);
 
   for (const migration of MIGRATIONS) {
@@ -224,14 +230,55 @@ export function insertEvent(
   ledgerSequence: number,
   timestamp: number,
   dataJson: string
-) {
+): boolean {
   const db = getDb();
   const stmt = db.prepare(`
     INSERT OR IGNORE INTO events 
     (contract_id, event_type, ledger_sequence, timestamp, data_json)
     VALUES (?, ?, ?, ?, ?)
   `);
-  stmt.run(contractId, eventType, ledgerSequence, timestamp, dataJson);
+  const result = stmt.run(
+    contractId,
+    eventType,
+    ledgerSequence,
+    timestamp,
+    dataJson
+  );
+  return result.changes > 0;
+}
+
+export interface WebhookSubscription {
+  id: number;
+  url: string;
+  created_at: string;
+}
+
+export function addWebhookSubscription(url: string): WebhookSubscription {
+  const db = getDb();
+  const result = db
+    .prepare("INSERT INTO webhook_subscriptions (url) VALUES (?)")
+    .run(url);
+  const row = db
+    .prepare(
+      "SELECT id, url, created_at FROM webhook_subscriptions WHERE id = ?"
+    )
+    .get(result.lastInsertRowid);
+  return row as WebhookSubscription;
+}
+
+export function removeWebhookSubscription(url: string): boolean {
+  const db = getDb();
+  const result = db
+    .prepare("DELETE FROM webhook_subscriptions WHERE url = ?")
+    .run(url);
+  return result.changes > 0;
+}
+
+export function getWebhookSubscriptions(): WebhookSubscription[] {
+  const db = getDb();
+  return db
+    .prepare("SELECT id, url, created_at FROM webhook_subscriptions ORDER BY id")
+    .all() as WebhookSubscription[];
 }
 
 export interface EventRow {
