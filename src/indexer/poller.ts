@@ -5,7 +5,6 @@ import { deliverWebhooks } from "./webhook-delivery.js";
 
 const RPC_URL = "https://soroban-testnet.stellar.org";
 const server = new Server(RPC_URL);
-const CONTRACT_ID = process.env.CONTRACT_ID || "";
 const POLL_INTERVAL_MS = parseInt(process.env.POLL_INTERVAL_MS || "15000", 10);
 
 const EVENT_TYPES = [
@@ -21,9 +20,25 @@ const EVENT_TYPES = [
   "token_removed",
 ];
 
+/**
+ * Poll events for all active contract IDs stored in monitored_contracts (#85).
+ * All events fetched in a single poll are written atomically together with the
+ * ledger pointer update (#84) – so a mid-poll crash cannot advance the pointer
+ * without committing the accompanying events.
+ */
 export async function pollEvents() {
-  if (!CONTRACT_ID) {
-    console.log("No CONTRACT_ID set, skipping indexer polling");
+  // --- Resolve active contract IDs from the DB (#85) ---
+  let contractIds: string[] = getActiveContractIds();
+
+  // Fall back to the legacy single CONTRACT_ID env var so existing deployments
+  // keep working without any DB seed step.
+  if (contractIds.length === 0 && process.env.CONTRACT_ID) {
+    registerContract(process.env.CONTRACT_ID, "default");
+    contractIds = [process.env.CONTRACT_ID];
+  }
+
+  if (contractIds.length === 0) {
+    logger.debug("No CONTRACT_IDs configured – skipping indexer poll");
     return;
   }
 
@@ -43,28 +58,23 @@ export async function pollEvents() {
       filters: [
         {
           type: "contract",
-          contractIds: [CONTRACT_ID],
+          contractIds,
           topics: [[...EVENT_TYPES]],
         },
       ],
       limit: 100,
     });
 
-    for (const event of events.events) {
-      const eventType = scValToNative(event.topic[0]) as string;
-      const ledgerSequence = event.ledger;
-      const timestamp = event.ledgerClosedAt
+    // Build the batch to be written atomically (#84)
+    const batch: EventRow[] = events.events.map((event) => ({
+      contractId: event.contractId ?? contractIds[0],
+      eventType: scValToNative(event.topic[0]) as string,
+      ledgerSequence: event.ledger,
+      timestamp: event.ledgerClosedAt
         ? Math.floor(new Date(event.ledgerClosedAt).getTime() / 1000)
-        : Math.floor(Date.now() / 1000);
-      const dataJson = JSON.stringify(event.value);
-      insertEvent(
-        CONTRACT_ID,
-        eventType,
-        ledgerSequence,
-        timestamp,
-        dataJson
-      );
-    }
+        : Math.floor(Date.now() / 1000),
+      dataJson: JSON.stringify(event.value),
+    }));
 
     setLastIndexedLedger(currentLedger);
     console.log(
@@ -75,7 +85,9 @@ export async function pollEvents() {
       console.error("Error delivering webhooks:", err)
     );
   } catch (err) {
-    console.error("Error polling events:", err);
+    logger.error("Error polling events", {
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
 }
 
@@ -83,7 +95,7 @@ let pollerInterval: NodeJS.Timeout | null = null;
 
 export function startPoller() {
   if (pollerInterval) return;
-  console.log("Starting event indexer poller");
+  logger.info("Starting event indexer poller", { intervalMs: POLL_INTERVAL_MS });
   pollEvents();
   pollerInterval = setInterval(pollEvents, POLL_INTERVAL_MS);
 }
