@@ -10,7 +10,8 @@ import {
 import { deliverWebhooks } from "./webhook-delivery.js";
 import logger from "../utils/logger.js";
 
-const RPC_URL = "https://soroban-testnet.stellar.org";
+const RPC_URL =
+  process.env.SOROBAN_RPC_URL || "https://soroban-testnet.stellar.org";
 const server = new Server(RPC_URL);
 const POLL_INTERVAL_MS = parseInt(process.env.POLL_INTERVAL_MS || "15000", 10);
 
