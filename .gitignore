@@ -3,3 +3,6 @@ dist/
 .env
 *.log
 data/
+.agents/
+issue.md
+skills-lock.json
