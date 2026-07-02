@@ -440,6 +440,69 @@ describe("GET /api/jobs/:contractId/whitelist", () => {
     });
   });
 
+  // --- Error Interceptor: non-Error throwables ---
+  describe("Error interceptor — non-Error throwables", () => {
+    it("returns clean 500 when a string is thrown", async () => {
+      mockSimulateTransaction.mockRejectedValue("raw string error: secret=abc123");
+
+      const res = await request(buildApp())
+        .get(`/api/jobs/${VALID_CONTRACT}/whitelist`)
+        .expect(500);
+
+      expect(res.body).toEqual({ success: false, error: "Internal server error" });
+      expect(JSON.stringify(res.body)).not.toContain("secret");
+      expect(JSON.stringify(res.body)).not.toContain("abc123");
+    });
+
+    it("returns clean 500 when null is thrown", async () => {
+      mockSimulateTransaction.mockRejectedValue(null);
+
+      const res = await request(buildApp())
+        .get(`/api/jobs/${VALID_CONTRACT}/whitelist`)
+        .expect(500);
+
+      expect(res.body).toEqual({ success: false, error: "Internal server error" });
+    });
+
+    it("returns clean 500 when a plain object with sensitive data is thrown", async () => {
+      mockSimulateTransaction.mockRejectedValue({
+        code: 500,
+        detail: "postgres://admin:password@db-host/prod",
+        stack: "Error\n    at Object.<anonymous> (jobs.ts:99:5)",
+      });
+
+      const res = await request(buildApp())
+        .get(`/api/jobs/${VALID_CONTRACT}/whitelist`)
+        .expect(500);
+
+      expect(res.body).toEqual({ success: false, error: "Internal server error" });
+      expect(JSON.stringify(res.body)).not.toContain("postgres://");
+      expect(JSON.stringify(res.body)).not.toContain("password");
+      expect(JSON.stringify(res.body)).not.toContain("db-host");
+    });
+
+    it("returns clean 500 when undefined is thrown", async () => {
+      mockSimulateTransaction.mockRejectedValue(undefined);
+
+      const res = await request(buildApp())
+        .get(`/api/jobs/${VALID_CONTRACT}/whitelist`)
+        .expect(500);
+
+      expect(res.body).toEqual({ success: false, error: "Internal server error" });
+    });
+
+    it("response body has exactly two keys (success, error) for all 500s from non-Error throws", async () => {
+      mockSimulateTransaction.mockRejectedValue({ hidden: "secret-value" });
+
+      const res = await request(buildApp())
+        .get(`/api/jobs/${VALID_CONTRACT}/whitelist`)
+        .expect(500);
+
+      expect(Object.keys(res.body)).toEqual(["success", "error"]);
+      expect(JSON.stringify(res.body)).not.toContain("secret-value");
+    });
+  });
+
   // --- ISSUE #50: Node-Cache in-memory caching ---
   describe("Node-Cache in-memory caching (Issue #50)", () => {
     it("returns tokens from RPC on first request", async () => {

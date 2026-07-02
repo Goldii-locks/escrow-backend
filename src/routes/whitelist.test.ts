@@ -90,10 +90,12 @@ describe("GET /api/jobs/:contractId/whitelist", () => {
     expect(res.body.success).toBe(false);
   });
 
-  it("returns 500 on unexpected JS exception", async () => {
+  it("returns 500 on unexpected JS exception without leaking the raw error", async () => {
     simulateMock.mockRejectedValueOnce(new Error("Network exploded"));
     const res = await request(app).get("/api/jobs/VALID_CONTRACT_ID/whitelist");
     expect(res.status).toBe(500);
-    expect(res.body.error).toBe("Network exploded");
+    expect(res.body.success).toBe(false);
+    expect(res.body.error).toBe("Internal server error");
+    expect(JSON.stringify(res.body)).not.toContain("Network exploded");
   });
 });
