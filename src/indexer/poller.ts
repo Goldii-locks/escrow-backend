@@ -1,7 +1,14 @@
 import { Server } from "@stellar/stellar-sdk/rpc";
 import { scValToNative } from "@stellar/stellar-sdk";
-import { getLastIndexedLedger, setLastIndexedLedger, insertEvent } from "./db.js";
+import {
+  getLastIndexedLedger,
+  insertEventBatch,
+  getActiveContractIds,
+  registerContract,
+  type EventRow,
+} from "./db.js";
 import { deliverWebhooks } from "./webhook-delivery.js";
+import logger from "../utils/logger.js";
 
 const RPC_URL = "https://soroban-testnet.stellar.org";
 const server = new Server(RPC_URL);
@@ -49,9 +56,7 @@ export async function pollEvents() {
 
     const startLedger = lastLedger + 1;
 
-    console.log(
-      `Polling events from ledger ${startLedger} to ${currentLedger}`
-    );
+    logger.info("Polling events", { startLedger, currentLedger });
 
     const events = await server.getEvents({
       startLedger,
@@ -67,7 +72,7 @@ export async function pollEvents() {
 
     // Build the batch to be written atomically (#84)
     const batch: EventRow[] = events.events.map((event) => ({
-      contractId: event.contractId ?? contractIds[0],
+      contractId: event.contractId?.contractId() ?? contractIds[0],
       eventType: scValToNative(event.topic[0]) as string,
       ledgerSequence: event.ledger,
       timestamp: event.ledgerClosedAt
@@ -76,13 +81,17 @@ export async function pollEvents() {
       dataJson: JSON.stringify(event.value),
     }));
 
-    setLastIndexedLedger(currentLedger);
-    console.log(
-      `Successfully processed ${events.events.length} events, up to ledger ${currentLedger}`
-    );
+    // Persist the batch and advance the ledger pointer atomically (#84)
+    insertEventBatch(batch, currentLedger);
+    logger.info("Processed indexer poll", {
+      eventCount: events.events.length,
+      upToLedger: currentLedger,
+    });
 
     deliverWebhooks(startLedger, currentLedger).catch((err) =>
-      console.error("Error delivering webhooks:", err)
+      logger.error("Error delivering webhooks", {
+        error: err instanceof Error ? err.message : String(err),
+      })
     );
   } catch (err) {
     logger.error("Error polling events", {

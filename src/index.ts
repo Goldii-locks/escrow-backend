@@ -5,7 +5,7 @@ import dotenv from "dotenv";
 import jobRoutes from "./routes/jobs.js";
 import adminRoutes from "./routes/admin.js";
 import webhookRoutes from "./routes/webhooks.js";
-import { initSchema } from "./indexer/db.js";
+import { runMigrations } from "./indexer/db.js";
 import { generalLimiter } from "./middleware/rateLimiter.js";
 import { startPoller } from "./indexer/poller.js";
 import { markIndexerStarted } from "./indexer/status.js";

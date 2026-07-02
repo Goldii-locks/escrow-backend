@@ -1,4 +1,4 @@
-import { getDb, getSubscriptions, EventRow } from "./db.js";
+import { getDb, getSubscriptions, EventDbRow } from "./db.js";
 import logger from "../utils/logger.js";
 
 const MAX_RETRIES = 3;
@@ -19,7 +19,7 @@ function sleep(ms: number): Promise<void> {
 
 async function deliverToUrl(
   webhookUrl: string,
-  event: EventRow
+  event: EventDbRow
 ): Promise<boolean> {
   const payload = {
     event_type: event.event_type,
@@ -43,7 +43,7 @@ async function deliverToUrl(
 
 async function deliverEventToSubscriber(
   webhookUrl: string,
-  event: EventRow,
+  event: EventDbRow,
   subscriptionId: number
 ): Promise<DeliveryResult> {
   let success = false;
@@ -104,7 +104,7 @@ export async function deliverWebhooks(
        WHERE ledger_sequence >= ? AND ledger_sequence <= ?
        ORDER BY ledger_sequence ASC`
     )
-    .all(startLedger, endLedger) as EventRow[];
+    .all(startLedger, endLedger) as EventDbRow[];
 
   if (events.length === 0) return [];
 

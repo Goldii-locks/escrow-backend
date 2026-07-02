@@ -170,6 +170,48 @@ export function setLastIndexedLedger(seq: number) {
 }
 
 // ---------------------------------------------------------------------------
+// Monitored contracts (#85)
+// ---------------------------------------------------------------------------
+
+/**
+ * Registers a contract for polling, or re-activates it if it was previously
+ * deregistered. Idempotent - calling this repeatedly for the same
+ * contract_id never creates duplicate rows.
+ */
+export function registerContract(contractId: string, label?: string): void {
+  const db = getDb();
+  db.prepare(
+    `INSERT INTO monitored_contracts (contract_id, label, active)
+     VALUES (?, ?, 1)
+     ON CONFLICT(contract_id) DO UPDATE SET
+       active = 1,
+       label = COALESCE(excluded.label, monitored_contracts.label)`
+  ).run(contractId, label ?? null);
+}
+
+/**
+ * Marks a contract inactive so it's excluded from getActiveContractIds()
+ * without deleting its historical event data.
+ */
+export function deregisterContract(contractId: string): void {
+  const db = getDb();
+  db.prepare(
+    "UPDATE monitored_contracts SET active = 0 WHERE contract_id = ?"
+  ).run(contractId);
+}
+
+/**
+ * Returns the contract_ids currently marked active for polling.
+ */
+export function getActiveContractIds(): string[] {
+  const db = getDb();
+  const rows = db
+    .prepare("SELECT contract_id FROM monitored_contracts WHERE active = 1")
+    .all() as Array<{ contract_id: string }>;
+  return rows.map((row) => row.contract_id);
+}
+
+// ---------------------------------------------------------------------------
 // Event insertion with atomic transactions (#84)
 // ---------------------------------------------------------------------------
 
@@ -373,7 +415,7 @@ export function getJobsByWallet(
   return { jobs, total, page: safePage, limit: safeLimit };
 }
 
-export interface EventRow {
+export interface EventDbRow {
   id: number;
   contract_id: string;
   event_type: string;
@@ -384,7 +426,7 @@ export interface EventRow {
 }
 
 export interface PaginatedEvents {
-  events: EventRow[];
+  events: EventDbRow[];
   total: number;
   page: number;
   limit: number;
@@ -411,7 +453,7 @@ export function getEventsByContract(
        ORDER BY ledger_sequence ASC
        LIMIT ? OFFSET ?`
     )
-    .all(contractId, safeLimit, offset) as EventRow[];
+    .all(contractId, safeLimit, offset) as EventDbRow[];
 
   return {
     events: rows,
