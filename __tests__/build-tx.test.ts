@@ -167,6 +167,7 @@ describe("POST /api/jobs/build-tx — Stellar address validation", () => {
 
   it("accepts valid address-type args", async () => {
     mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==" });
+    
     const validBodyWithArgs = {
       ...VALID_BODY,
       method: "add_whitelisted_token",
