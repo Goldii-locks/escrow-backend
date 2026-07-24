@@ -1,12 +1,14 @@
 import Database from "better-sqlite3";
 import request from "supertest";
 import express from "express";
+import { jest } from "@jest/globals";
 import {
   initSchema,
   insertEvent,
   setDb,
   getJobsByWallet,
 } from "../src/indexer/db.js";
+import { resetByWalletRateLimitBuckets } from "../src/middleware/job-contract-rate-limit.js";
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -266,13 +268,36 @@ describe("getJobsByWallet() – unit", () => {
 
 describe("GET /api/jobs/by-wallet/:address – HTTP", () => {
   let app: express.Express;
+  const mockLogger = {
+    info: jest.fn(),
+    warn: jest.fn(),
+    error: jest.fn(),
+  };
 
   beforeAll(async () => {
+    jest.unstable_mockModule("../src/middleware/rateLimiter.js", () => ({
+      strictLimiter: (_req: any, _res: any, next: any) => next(),
+      generalLimiter: (_req: any, _res: any, next: any) => next(),
+    }));
+
+    jest.unstable_mockModule("@stellar/stellar-sdk/rpc", () => ({
+      Server: class MockServer {},
+    }));
+
+    jest.unstable_mockModule("../src/utils/logger.js", () => ({
+      default: mockLogger,
+    }));
+
     // Dynamically import the router AFTER setDb() so it uses the in-memory DB
     const { default: router } = await import("../src/routes/jobs.js");
     app = express();
     app.use(express.json());
     app.use("/api/jobs", router);
+  });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    resetByWalletRateLimitBuckets();
   });
 
   it("returns success:true with jobs array and pagination fields", async () => {
@@ -352,5 +377,168 @@ describe("GET /api/jobs/by-wallet/:address – HTTP", () => {
       latest_ledger: expect.any(Number),
       latest_timestamp: expect.any(Number),
     });
+  });
+
+  it("returns 429 Too Many Requests after exceeding rate limit", async () => {
+    const addr = "GRATELIMITTEST";
+    const lowLimit = 3;
+    process.env.BY_WALLET_RATE_MAX = String(lowLimit);
+
+    try {
+      // Reset buckets and re-import so the rate limiter picks up new env var
+      resetByWalletRateLimitBuckets();
+      jest.resetModules();
+
+      // Re-setup after resetModules
+      jest.unstable_mockModule("../src/middleware/rateLimiter.js", () => ({
+        strictLimiter: (_req: any, _res: any, next: any) => next(),
+        generalLimiter: (_req: any, _res: any, next: any) => next(),
+      }));
+      jest.unstable_mockModule("@stellar/stellar-sdk/rpc", () => ({
+        Server: class MockServer {},
+      }));
+      jest.unstable_mockModule("../src/utils/logger.js", () => ({
+        default: mockLogger,
+      }));
+      const { default: freshRouter } = await import("../src/routes/jobs.js");
+      const freshApp = express();
+      freshApp.use(express.json());
+      freshApp.use("/api/jobs", freshRouter);
+
+      // Send requests up to the limit - should succeed
+      for (let i = 0; i < lowLimit; i++) {
+        const res = await request(freshApp)
+          .get(`/api/jobs/by-wallet/${addr}`)
+          .expect(200);
+        expect(res.body.success).toBe(true);
+      }
+
+      // Next request should be 429
+      const res = await request(freshApp)
+        .get(`/api/jobs/by-wallet/${addr}`)
+        .expect(429);
+      expect(res.body.success).toBe(false);
+      expect(res.body.error).toContain("Too many requests");
+    } finally {
+      delete process.env.BY_WALLET_RATE_MAX;
+    }
+  });
+
+  it("emits structured trace logs on successful request with address and result count", async () => {
+    const addr = "GLOGGINGTEST";
+    seedEvent(testDb, {
+      contractId: "LOG-C1",
+      eventType: "initialized",
+      ledger: 1,
+      timestamp: 100,
+      dataJson: JSON.stringify({ client: addr }),
+    });
+
+    await request(app)
+      .get(`/api/jobs/by-wallet/${addr}?page=1&limit=10`)
+      .expect(200);
+
+    expect(mockLogger.info).toHaveBeenCalledWith(
+      "Handling by-wallet request",
+      expect.objectContaining({
+        address: addr,
+        queryParams: expect.objectContaining({
+          page: "1",
+          limit: "10",
+        }),
+        method: "GET",
+        path: expect.stringContaining("/by-wallet/" + addr),
+      })
+    );
+
+    expect(mockLogger.info).toHaveBeenCalledWith(
+      "by-wallet request completed successfully",
+      expect.objectContaining({
+        address: addr,
+        status: 200,
+        resultCount: expect.any(Number),
+        totalCount: expect.any(Number),
+        durationMs: expect.any(Number),
+      })
+    );
+  });
+
+  it("emits warn log with address and status for invalid request", async () => {
+    await request(app)
+      .get("/api/jobs/by-wallet/GINVALID?page=-1")
+      .expect(400);
+
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      expect.stringContaining("Bad request"),
+      expect.objectContaining({
+        address: "GINVALID",
+        status: 400,
+        durationMs: expect.any(Number),
+      })
+    );
+  });
+
+  it("emits error log with address and error stack on 500 failure", async () => {
+    // Make getJobsByWallet throw an error
+    const originalGetJobsByWallet = getJobsByWallet;
+    try {
+      // We'll test by mocking the module - but since we can't easily mock without reset,
+      // let's check that the error handler path exists by verifying the logger.error call
+      // when an exception is thrown. For simplicity, let's use jest to spy.
+      jest.mock("../src/indexer/db.js", () => {
+        const actual = jest.requireActual("../src/indexer/db.js");
+        return {
+          ...actual,
+          getJobsByWallet: jest.fn(() => {
+            throw new Error("DB failure");
+          }),
+        };
+      });
+
+      // Reset and reimport
+      jest.resetModules();
+      jest.unstable_mockModule("../src/middleware/rateLimiter.js", () => ({
+        strictLimiter: (_req: any, _res: any, next: any) => next(),
+        generalLimiter: (_req: any, _res: any, next: any) => next(),
+      }));
+      jest.unstable_mockModule("@stellar/stellar-sdk/rpc", () => ({
+        Server: class MockServer {},
+      }));
+      jest.unstable_mockModule("../src/utils/logger.js", () => ({
+        default: mockLogger,
+      }));
+      jest.unstable_mockModule("../src/indexer/db.js", () => {
+        const actual = jest.requireActual("../src/indexer/db.js");
+        return {
+          ...actual,
+          getJobsByWallet: jest.fn(() => {
+            throw new Error("DB failure test");
+          }),
+        };
+      });
+
+      const { default: freshRouter } = await import("../src/routes/jobs.js");
+      const freshApp = express();
+      freshApp.use(express.json());
+      freshApp.use("/api/jobs", freshRouter);
+
+      await request(freshApp)
+        .get("/api/jobs/by-wallet/GERRORTEST")
+        .expect(500);
+
+      expect(mockLogger.error).toHaveBeenCalledWith(
+        "Failed to handle by-wallet request",
+        expect.objectContaining({
+          address: "GERRORTEST",
+          status: 500,
+          durationMs: expect.any(Number),
+          errorMessage: "DB failure test",
+          errorStack: expect.any(String),
+        })
+      );
+    } finally {
+      jest.unmock("../src/indexer/db.js");
+      originalGetJobsByWallet;
+    }
   });
 });

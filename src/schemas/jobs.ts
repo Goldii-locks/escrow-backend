@@ -101,7 +101,17 @@ export const buildTxBodySchema = z.object({
 export const submitBodySchema = z.object({
   signedXdr: z
     .string({ required_error: "signedXdr is required" })
-    .min(1, "signedXdr cannot be empty"),
+    .min(1, "signedXdr cannot be empty")
+    .refine(
+      (s) => {
+        try {
+          return Buffer.from(s, "base64").toString("base64") === s;
+        } catch {
+          return false;
+        }
+      },
+      { message: "signedXdr must be a valid base64 string" },
+    ),
 });
 
 /**

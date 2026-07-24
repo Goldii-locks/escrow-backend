@@ -15,6 +15,7 @@ import {
   jobContractRateLimit,
   jobWhitelistRateLimit,
   partialReleaseRateLimit,
+  byWalletRateLimit,
 } from "../middleware/job-contract-rate-limit.js";
 import {
   jobContractCors,
@@ -116,31 +117,76 @@ const parseJobFromResult = (result: any, contractId: string) => {
 // the client, freelancer, or arbiter.
 // Query params: ?page=1&limit=10
 // ---------------------------------------------------------------------------
-router.get("/by-wallet/:address", (req: Request, res: Response) => {
-  try {
+router.get(
+  "/by-wallet/:address",
+  byWalletRateLimit,
+  (req: Request, res: Response) => {
+    const startTime = Date.now();
     const address = req.params.address as string;
     const page = parseInt((req.query.page as string) || "1", 10);
     const limit = parseInt((req.query.limit as string) || "10", 10);
+    const trace = {
+      address,
+      queryParams: {
+        page: req.query.page,
+        limit: req.query.limit,
+      },
+      method: req.method,
+      path: req.path,
+    };
 
-    if (!address || address.trim() === "") {
-      res.status(400).json({ success: false, error: "address is required" });
-      return;
-    }
-    if (isNaN(page) || page < 1) {
-      res.status(400).json({ success: false, error: "page must be a positive integer" });
-      return;
-    }
-    if (isNaN(limit) || limit < 1 || limit > 100) {
-      res.status(400).json({ success: false, error: "limit must be between 1 and 100" });
-      return;
-    }
+    logger.info("Handling by-wallet request", trace);
 
-    const result = getJobsByWallet(address, page, limit);
-    res.json({ success: true, ...result });
-  } catch (err: any) {
-    res.status(500).json({ success: false, error: "Internal server error" });
-  }
-});
+    try {
+      if (!address || address.trim() === "") {
+        logger.warn("Bad request: missing address", {
+          ...trace,
+          status: 400,
+          durationMs: Date.now() - startTime,
+        });
+        res.status(400).json({ success: false, error: "address is required" });
+        return;
+      }
+      if (isNaN(page) || page < 1) {
+        logger.warn("Bad request: invalid page", {
+          ...trace,
+          status: 400,
+          durationMs: Date.now() - startTime,
+        });
+        res.status(400).json({ success: false, error: "page must be a positive integer" });
+        return;
+      }
+      if (isNaN(limit) || limit < 1 || limit > 100) {
+        logger.warn("Bad request: invalid limit", {
+          ...trace,
+          status: 400,
+          durationMs: Date.now() - startTime,
+        });
+        res.status(400).json({ success: false, error: "limit must be between 1 and 100" });
+        return;
+      }
+
+      const result = getJobsByWallet(address, page, limit);
+      logger.info("by-wallet request completed successfully", {
+        ...trace,
+        status: 200,
+        durationMs: Date.now() - startTime,
+        resultCount: (result as any)?.jobs?.length ?? 0,
+        totalCount: (result as any)?.total ?? 0,
+      });
+      res.json({ success: true, ...result });
+    } catch (err: any) {
+      logger.error("Failed to handle by-wallet request", {
+        ...trace,
+        status: 500,
+        durationMs: Date.now() - startTime,
+        errorMessage: err?.message ?? "unknown error",
+        errorStack: err?.stack,
+      });
+      res.status(500).json({ success: false, error: "Internal server error" });
+    }
+  },
+);
 
 // GET /api/jobs/:contractId/history - event timeline for a single job
 router.get("/:contractId/history", (req: Request, res: Response) => {
