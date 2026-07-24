@@ -95,3 +95,88 @@ describe("POST /api/jobs/build-tx — error sanitization (#70)", () => {
     expect(typeof res.body.error).toBe("string");
   });
 });
+
+describe("POST /api/jobs/build-tx — Stellar address validation", () => {
+  beforeEach(() => {
+    mockGetAccount.mockReset();
+    mockPrepareTransaction.mockReset();
+    mockGetAccount.mockResolvedValue({
+      accountId: () => VALID_BODY.sourceAddress,
+      sequenceNumber: () => "1",
+      incrementSequenceNumber: () => {},
+    });
+  });
+
+  it("returns 400 for invalid sourceAddress (not starting with G)", async () => {
+    const invalidBody = {
+      ...VALID_BODY,
+      sourceAddress: "SAODBHVR63Z56MVQRBEJSYM2H5423LJ4WAPUUBOFG4JYY72S6ROKVZRX", // starts with S (secret seed)
+    };
+
+    const res = await request(app).post("/api/jobs/build-tx").send(invalidBody).expect(400);
+    expect(res.body.success).toBe(false);
+  });
+
+  it("returns 400 for invalid sourceAddress (too short)", async () => {
+    const invalidBody = {
+      ...VALID_BODY,
+      sourceAddress: "GAODBHVR63Z56MVQRBEJSYM2H5423LJ4WAPUUBOFG4JYY72S6ROKV", // too short
+    };
+
+    const res = await request(app).post("/api/jobs/build-tx").send(invalidBody).expect(400);
+    expect(res.body.success).toBe(false);
+  });
+
+  it("returns 400 for invalid sourceAddress (completely invalid string)", async () => {
+    const invalidBody = {
+      ...VALID_BODY,
+      sourceAddress: "invalid_address",
+    };
+
+    const res = await request(app).post("/api/jobs/build-tx").send(invalidBody).expect(400);
+    expect(res.body.success).toBe(false);
+  });
+
+  it("returns 400 for invalid address-type arg (starts with S)", async () => {
+    const invalidBody = {
+      ...VALID_BODY,
+      method: "add_whitelisted_token",
+      args: [
+        { type: "address", value: "SAODBHVR63Z56MVQRBEJSYM2H5423LJ4WAPUUBOFG4JYY72S6ROKVZRX" },
+        { type: "address", value: "GAODBHVR63Z56MVQRBEJSYM2H5423LJ4WAPUUBOFG4JYY72S6ROKVZRX" },
+      ],
+    };
+
+    const res = await request(app).post("/api/jobs/build-tx").send(invalidBody).expect(400);
+    expect(res.body.success).toBe(false);
+  });
+
+  it("returns 400 for invalid address-type arg (completely invalid)", async () => {
+    const invalidBody = {
+      ...VALID_BODY,
+      method: "add_whitelisted_token",
+      args: [
+        { type: "address", value: "GAODBHVR63Z56MVQRBEJSYM2H5423LJ4WAPUUBOFG4JYY72S6ROKVZRX" },
+        { type: "address", value: "invalid_token_address" },
+      ],
+    };
+
+    const res = await request(app).post("/api/jobs/build-tx").send(invalidBody).expect(400);
+    expect(res.body.success).toBe(false);
+  });
+
+  it("accepts valid address-type args", async () => {
+    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==" });
+    const validBodyWithArgs = {
+      ...VALID_BODY,
+      method: "add_whitelisted_token",
+      args: [
+        { type: "address", value: "GAODBHVR63Z56MVQRBEJSYM2H5423LJ4WAPUUBOFG4JYY72S6ROKVZRX" },
+        { type: "address", value: "GBBDRHVR63Z56MVQRBEJSYM2H5423LJ4WAPUUBOFG4JYY72S6ROKVZRX" },
+      ],
+    };
+
+    const res = await request(app).post("/api/jobs/build-tx").send(validBodyWithArgs).expect(200);
+    expect(res.body).toEqual({ success: true, xdr: "AAAAAQ==" });
+  });
+});

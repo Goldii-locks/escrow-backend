@@ -72,11 +72,28 @@ export const contractMilestoneParamsSchema = z.object({
   index: milestoneIndexSchema,
 });
 
+const argSchema = z.object({
+  type: z.string(),
+  value: z.any(),
+}).passthrough();
+
+const buildTxArgSchema = argSchema.refine(
+  (arg) => {
+    if (arg.type === "address") {
+      return StrKey.isValidEd25519PublicKey(arg.value);
+    }
+    return true;
+  },
+  (arg) => ({
+    message: `Argument of type "address" must be a valid Stellar account address (G…, 56 chars), got ${JSON.stringify(arg.value)}`,
+  }),
+);
+
 /** POST /build-tx body */
 export const buildTxBodySchema = z.object({
   contractId: contractIdSchema,
   method: z.string({ required_error: "method is required" }).min(1, "method cannot be empty"),
-  args: z.array(z.any()).optional().default([]),
+  args: z.array(buildTxArgSchema).optional().default([]),
   sourceAddress: stellarAddressSchema,
 });
 
