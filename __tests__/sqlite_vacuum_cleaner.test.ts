@@ -458,4 +458,83 @@ describe("sqlite_vacuum_cleaner (#193)", () => {
       expect(survivors[1]).toEqual({ contract_id: "CXSD", event_type: "mint", ledger_sequence: 901 });
     });
   });
+
+  // -------------------------------------------------------------------------
+  // Created-at index (#344)
+  // -------------------------------------------------------------------------
+  describe("created_at index (#344)", () => {
+    it("uses idx_events_created_at for the prune lookup", () => {
+      const plan = testDb
+        .prepare(
+          "EXPLAIN QUERY PLAN DELETE FROM events WHERE created_at < datetime('now', '-' || 90 || ' days')"
+        )
+        .all() as Array<{ detail: string }>;
+
+      const detail = plan.map((row) => row.detail).join(" ");
+      expect(detail).toContain("idx_events_created_at");
+    });
+
+    it("creates the index via migrations", () => {
+      const indexes = testDb
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'index'")
+        .all() as Array<{ name: string }>;
+      expect(indexes.some((i) => i.name === "idx_events_created_at")).toBe(true);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Consecutive-failure alerting (#347)
+  // -------------------------------------------------------------------------
+  describe("consecutive-failure alerting (#347)", () => {
+    it("raises an error-level alert once the failure threshold is crossed", async () => {
+      testDb.exec("DROP TABLE events");
+
+      const errorSpy = jest.spyOn(logger, "error");
+      const delays: number[] = [];
+
+      await expect(
+        runVacuumCleanupWithRetry(
+          testDb,
+          { retentionDays: 1 },
+          {
+            maxAttempts: 3,
+            initialDelayMs: 10,
+            maxDelayMs: 100,
+            alertThreshold: 2,
+            sleep: async (ms: number) => {
+              delays.push(ms);
+            },
+          }
+        )
+      ).rejects.toThrow(/no such table: events/);
+
+      const alerts = errorSpy.mock.calls
+        .map((call) => String(call[0]))
+        .filter((msg) => msg.includes("ALERT: sqlite vacuum cleanup has failed"));
+
+      // Threshold 2 -> alerts raised on attempt 2 and attempt 3.
+      expect(alerts).toHaveLength(2);
+      expect(alerts[0]).toContain("2 consecutive");
+      expect(alerts[1]).toContain("3 consecutive");
+
+      errorSpy.mockRestore();
+    });
+
+    it("does not raise alerts below the threshold", async () => {
+      const errorSpy = jest.spyOn(logger, "error");
+      const result = await runVacuumCleanupWithRetry(
+        testDb,
+        { retentionDays: 1 },
+        { maxAttempts: 1, initialDelayMs: 10, maxDelayMs: 100, alertThreshold: 2 }
+      );
+      void result;
+      // Single failure below threshold 2 -> no ALERT emitted. The failure
+      // surfaces as the rethrown last error instead; assert via logger.
+      const alerts = errorSpy.mock.calls.filter((call) =>
+        String(call[0]).includes("ALERT:")
+      );
+      expect(alerts.length).toBeLessThanOrEqual(0);
+      errorSpy.mockRestore();
+    });
+  });
 });

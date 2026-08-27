@@ -122,6 +122,9 @@ const MIGRATIONS: Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_events_ledger_sequence
         ON events (ledger_sequence);
 
+      CREATE INDEX IF NOT EXISTS idx_events_created_at
+        ON events (created_at);
+
       CREATE INDEX IF NOT EXISTS idx_events_contract_ledger
         ON events (contract_id, ledger_sequence);
 

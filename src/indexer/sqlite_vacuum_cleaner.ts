@@ -185,6 +185,8 @@ export function runVacuumCleanup(
 export const DEFAULT_RETRY_MAX_ATTEMPTS = 4;
 export const DEFAULT_RETRY_INITIAL_DELAY_MS = 200;
 export const DEFAULT_RETRY_MAX_DELAY_MS = 8000;
+/** (#347) Consecutive failures before an alert is raised. */
+export const DEFAULT_RETRY_ALERT_THRESHOLD = 2;
 
 export interface VacuumRetryOptions {
   /** Total attempts (first try + retries). Defaults to 4. */
@@ -195,6 +197,11 @@ export interface VacuumRetryOptions {
   maxDelayMs?: number;
   /** Injectable delay so tests can observe the backoff without real waits. */
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * Consecutive failures before an alert is raised (#347). Defaults to 2.
+   * Set to a value larger than maxAttempts to disable alerting.
+   */
+  alertThreshold?: number;
 }
 
 export interface VacuumCleanupRetryResult extends VacuumCleanupResult {
@@ -260,6 +267,20 @@ export async function runVacuumCleanupWithRetry(
         delayMs,
         error: err instanceof Error ? err.message : String(err),
       });
+
+      // (#347) Threshold alerting: once the operation has failed
+      // consecutively past the configured threshold, raise an explicit
+      // error-level alert so on-call tooling can page on it.
+      const alertThreshold =
+        retryOptions.alertThreshold ?? DEFAULT_RETRY_ALERT_THRESHOLD;
+      if (attempt >= alertThreshold) {
+        logger.error(
+          `ALERT: sqlite vacuum cleanup has failed ${attempt} consecutive ` +
+            `times (threshold: ${alertThreshold}). Disk-space reclamation ` +
+            `is stalled — inspect the indexer RPC connection.`
+        );
+      }
+
       if (attempt < maxAttempts) {
         await sleep(delayMs);
       }
