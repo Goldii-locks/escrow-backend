@@ -1,4 +1,3 @@
-import { Server } from "@stellar/stellar-sdk/rpc";
 import { scValToNative } from "@stellar/stellar-sdk";
 import {
   getLastIndexedLedger,
@@ -7,14 +6,39 @@ import {
   registerContract,
   adjustPollerInterval,
   getCurrentPollIntervalMs,
+  verifySchemaUpToDate,
   type EventRow,
 } from "./db.js";
 import { deliverWebhooks } from "./webhook-delivery.js";
+import { RpcPollerClient } from "./rpc-poller-client.js";
 import logger from "../utils/logger.js";
 
 const RPC_URL =
   process.env.SOROBAN_RPC_URL || "https://soroban-testnet.stellar.org";
-const server = new Server(RPC_URL);
+
+// ---------------------------------------------------------------------------
+// RPC exponential backoff retry (#249)
+// ---------------------------------------------------------------------------
+// All RPC calls in the indexer poll loop go through RpcPollerClient, which
+// retries transient failures (timeouts, connection resets, rate limits, 5xx)
+// with a doubling backoff up to maxRetries, then resets on success.
+const rpcRetryConfig = {
+  maxRetries: parseInt(process.env.INDEXER_RPC_MAX_RETRIES || "5", 10),
+  initialBackoffMs: parseInt(
+    process.env.INDEXER_RPC_INITIAL_BACKOFF_MS || "1000",
+    10,
+  ),
+  backoffMultiplier: parseInt(
+    process.env.INDEXER_RPC_BACKOFF_MULTIPLIER || "2",
+    10,
+  ),
+  maxBackoffMs: parseInt(
+    process.env.INDEXER_RPC_MAX_BACKOFF_MS || "30000",
+    10,
+  ),
+};
+
+const rpcClient = new RpcPollerClient(RPC_URL, rpcRetryConfig);
 
 // ---------------------------------------------------------------------------
 // Alerting thresholds (#271)
@@ -107,11 +131,11 @@ export async function pollEvents(): Promise<boolean> {
     verifySchemaUpToDate();
 
     const lastLedger = getLastIndexedLedger();
-    const currentLedger = (await server.getLatestLedger()).sequence;
+    const currentLedger = (await rpcClient.getLatestLedger()).sequence;
     if (currentLedger <= lastLedger) {
       // --- Dynamic throttling: idle cycle (#265) ---
       adjustPollerInterval(0);
-      return;
+      return false;
     }
 
     const startLedger = lastLedger + 1;
@@ -119,7 +143,7 @@ export async function pollEvents(): Promise<boolean> {
     logger.info("Polling events", { startLedger, currentLedger });
 
     const eventsStart = performance.now();
-    const events = await server.getEvents({
+    const events: { events: any[] } = await rpcClient.getEvents({
       startLedger,
       filters: [
         {
@@ -195,6 +219,7 @@ export async function pollEvents(): Promise<boolean> {
         lastSuccessAt: lastSuccessfulPollAt,
       });
     }
+    return false;
   }
 }
 
