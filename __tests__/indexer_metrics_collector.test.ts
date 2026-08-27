@@ -58,6 +58,17 @@ describe("verifyIndexerSchema (#340)", () => {
 // collectIndexerMetricsInRange (#339)
 // -------------------------------------------------------------------------
 describe("collectIndexerMetricsInRange (#339)", () => {
+
+    beforeEach(() => {
+      // 清掉同文件其他测试插入的事件，避免共享 :memory: 库的数据泄漏
+      testDb.exec("DROP TABLE IF EXISTS events");
+      testDb.exec("DROP TABLE IF EXISTS indexer_state");
+      testDb.exec("DROP TABLE IF EXISTS monitored_contracts");
+      testDb.exec("DROP TABLE IF EXISTS webhook_subscriptions");
+      testDb.exec("DROP TABLE IF EXISTS schema_migrations");
+      runMigrations();
+    });
+
   it("restricts metrics to the inclusive ledger range", () => {
     setLastIndexedLedger(500);
     insertEvent("contract-9", "job_created", 90, 1600000000, "{}");
@@ -68,8 +79,9 @@ describe("collectIndexerMetricsInRange (#339)", () => {
 
     expect(metrics.startLedger).toBe(95);
     expect(metrics.endLedger).toBe(115);
-    expect(metrics.totalEvents).toBe(1); // only ledger 110 is inside
-    expect(metrics.eventsByType["transfer"]).toBe(1);
+    // Ledgers 100 and 110 are both inside [95, 115]; ledger 90 is outside.
+    expect(metrics.totalEvents).toBe(2);
+    expect(metrics.eventsByType).toEqual({ transfer: 2 });
   });
 
   it("rejects endLedger < startLedger", () => {
@@ -83,6 +95,16 @@ describe("collectIndexerMetricsInRange (#339)", () => {
 // computeDynamicPollInterval (#341)
 // -------------------------------------------------------------------------
 describe("computeDynamicPollInterval (#341)", () => {
+
+    beforeEach(() => {
+      // 清掉同文件其他测试插入的事件，避免共享 :memory: 库的数据泄漏
+      testDb.exec("DROP TABLE IF EXISTS events");
+      testDb.exec("DROP TABLE IF EXISTS indexer_state");
+      testDb.exec("DROP TABLE IF EXISTS monitored_contracts");
+      testDb.exec("DROP TABLE IF EXISTS webhook_subscriptions");
+      runMigrations();
+    });
+
   it("uses the base interval on an empty ledger", () => {
     const { intervalMs } = computeDynamicPollInterval({
       lastIndexedLedger: 0,
@@ -138,6 +160,17 @@ describe("computeDynamicPollInterval (#341)", () => {
 // Simulated RPC events (#342)
 // -------------------------------------------------------------------------
 describe("simulated RPC events (#342)", () => {
+
+    beforeEach(() => {
+      // 清掉同文件其他测试插入的事件，避免共享 :memory: 库的数据泄漏
+      testDb.exec("DROP TABLE IF EXISTS events");
+      testDb.exec("DROP TABLE IF EXISTS indexer_state");
+      testDb.exec("DROP TABLE IF EXISTS monitored_contracts");
+      testDb.exec("DROP TABLE IF EXISTS webhook_subscriptions");
+      testDb.exec("DROP TABLE IF EXISTS schema_migrations");
+      runMigrations();
+    });
+
   it("writes simulated RPC batches and captures them in range metrics", () => {
     // Simulate two RPC deliveries writing through the production path.
     insertEvent("contract-42", "transfer", 300, 1700000100, "{}");
@@ -164,4 +197,5 @@ describe("simulated RPC events (#342)", () => {
       "CREATE TABLE IF NOT EXISTS webhook_subscriptions (id INTEGER PRIMARY KEY AUTOINCREMENT, contract_id TEXT NOT NULL, webhook_url TEXT NOT NULL, event_types TEXT NOT NULL DEFAULT '*', created_at DATETIME DEFAULT CURRENT_TIMESTAMP, UNIQUE(contract_id, webhook_url))"
     );
   });
+});
 });
