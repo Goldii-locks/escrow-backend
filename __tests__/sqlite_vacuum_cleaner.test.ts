@@ -1,13 +1,17 @@
 import Database from "better-sqlite3";
-import { runMigrations, setDb } from "../src/indexer/db.js";
+import { runMigrations, setDb, insertEventBatch } from "../src/indexer/db.js";
 import {
   validateRetentionDays,
   pruneOldEvents,
   runVacuum,
   runVacuumCleanup,
+  runVacuumCleanupWithRetry,
+  computeBackoffDelayMs,
   ERROR_CODES,
   DEFAULT_RETENTION_DAYS,
 } from "../src/indexer/sqlite_vacuum_cleaner.js";
+import { jest } from "@jest/globals";
+import logger from "../src/utils/logger.js";
 
 describe("sqlite_vacuum_cleaner (#193)", () => {
   let testDb: Database.Database;
@@ -282,6 +286,176 @@ describe("sqlite_vacuum_cleaner (#193)", () => {
         testDb.prepare("SELECT COUNT(*) as cnt FROM events").get() as { cnt: number }
       ).cnt;
       expect(count).toBe(1);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // runVacuumCleanupWithRetry (#343)
+  // -------------------------------------------------------------------------
+  describe("runVacuumCleanupWithRetry (#343)", () => {
+    const recoverSql = `CREATE TABLE events (${[
+      "id INTEGER PRIMARY KEY AUTOINCREMENT",
+      "contract_id TEXT NOT NULL",
+      "event_type TEXT NOT NULL",
+      "ledger_sequence INTEGER NOT NULL",
+      "timestamp INTEGER NOT NULL",
+      "data_json TEXT NOT NULL",
+      "created_at DATETIME DEFAULT CURRENT_TIMESTAMP",
+      "UNIQUE(contract_id, ledger_sequence, event_type)",
+    ].join(", ")})`;
+
+    it("retries with increasing exponential delays until the dropout recovers", async () => {
+      // Simulate a connection dropout: the events table is unavailable while
+      // the RPC is down, and comes back after the second backoff wait.
+      testDb.exec("DROP TABLE events");
+
+      const delays: number[] = [];
+      const sleep = async (ms: number) => {
+        delays.push(ms);
+        if (delays.length === 2) {
+          // Connection recovered mid-backoff — restore the schema.
+          testDb.exec(recoverSql);
+        }
+      };
+
+      const result = await runVacuumCleanupWithRetry(
+        testDb,
+        { retentionDays: 1 },
+        { maxAttempts: 5, initialDelayMs: 100, maxDelayMs: 1000, sleep }
+      );
+
+      expect(result.attempts).toBe(3);
+      expect(delays).toEqual([100, 200]); // 100 -> 200: exponential growth
+      expect(result.vacuumed).toBe(true);
+    });
+
+    it("caps the backoff delay at maxDelayMs", async () => {
+      testDb.exec("DROP TABLE events");
+
+      const delays: number[] = [];
+      const sleep = async (ms: number) => {
+        delays.push(ms);
+        if (delays.length === 3) {
+          testDb.exec(recoverSql);
+        }
+      };
+
+      const result = await runVacuumCleanupWithRetry(
+        testDb,
+        { retentionDays: 1 },
+        { maxAttempts: 4, initialDelayMs: 100, maxDelayMs: 300, sleep }
+      );
+
+      // 100 -> 200 -> 300: the cap kicks in at attempt 3 (100 * 2^2 = 400
+      // would exceed maxDelayMs). The table recovers after the third wait,
+      // so attempt 4 succeeds.
+      expect(delays).toEqual([100, 200, 300]);
+      expect(result.attempts).toBe(4);
+    });
+
+    it("rethrows the last real error after exhausting max attempts", async () => {
+      testDb.exec("DROP TABLE events");
+
+      const delays: number[] = [];
+      await expect(
+        runVacuumCleanupWithRetry(
+          testDb,
+          { retentionDays: 1 },
+          {
+            maxAttempts: 3,
+            initialDelayMs: 10,
+            maxDelayMs: 100,
+            sleep: async (ms: number) => {
+              delays.push(ms);
+            },
+          }
+        )
+      ).rejects.toThrow(/no such table: events/);
+
+      // N attempts produce N-1 waits, and each wait grows exponentially.
+      expect(delays).toEqual([10, 20]);
+    });
+
+    it("does not retry when the first attempt succeeds", async () => {
+      const delays: number[] = [];
+      const result = await runVacuumCleanupWithRetry(
+        testDb,
+        { retentionDays: 1 },
+        {
+          maxAttempts: 4,
+          initialDelayMs: 10,
+          maxDelayMs: 100,
+          sleep: async (ms: number) => {
+            delays.push(ms);
+          },
+        }
+      );
+
+      expect(result.attempts).toBe(1);
+      expect(delays).toEqual([]);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Diagnostic logging (#346)
+  // -------------------------------------------------------------------------
+  describe("diagnostic logging (#346)", () => {
+    it("logs elapsed time values and payload sizes for every stage", () => {
+      const debugSpy = jest.spyOn(logger, "debug");
+      const infoSpy = jest.spyOn(logger, "info");
+
+      runVacuumCleanup(testDb, { retentionDays: 1 });
+
+      const messages = [...debugSpy.mock.calls, ...infoSpy.mock.calls]
+        .map((call) => String(call[0]))
+        .join("\n");
+
+      // Diagnostic strings must embed elapsed time values and payload sizes.
+      expect(messages).toMatch(/prune poll finished in \d+ms/);
+      expect(messages).toMatch(/payload: \d+ rows pruned/);
+      expect(messages).toMatch(/completed in \d+ms/);
+
+      debugSpy.mockRestore();
+      infoSpy.mockRestore();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Simulated RPC event integration (#351)
+  // -------------------------------------------------------------------------
+  describe("simulated RPC event integration (#351)", () => {
+    it("writes simulated RPC event batches to the schema and vacuums only what expired", () => {
+      // Two stale rows delivered by the "RPC" well before the retention
+      // window, inserted directly with an aged created_at.
+      const insertStale = testDb.prepare(
+        `INSERT INTO events (contract_id, event_type, ledger_sequence, timestamp, data_json, created_at)
+         VALUES ('COLD', 'transfer', ?, 1700000000, '{}', datetime('now', '-120 days'))`
+      );
+      insertStale.run(1);
+      insertStale.run(2);
+
+      // A fresh simulated RPC batch written through the production insert
+      // path (transactional, updates indexer_state).
+      const freshBatch = [
+        { contractId: "CXSD", eventType: "transfer", ledgerSequence: 900, timestamp: 1756000000, dataJson: '{"amount":"10"}' },
+        { contractId: "CXSD", eventType: "mint", ledgerSequence: 901, timestamp: 1756000001, dataJson: '{"amount":"5"}' },
+      ];
+      insertEventBatch(freshBatch, 901);
+
+      const result = runVacuumCleanup(testDb, { retentionDays: 90 });
+
+      // Exactly the two stale rows are pruned; nothing else is touched.
+      expect(result.prunedEvents).toBe(2);
+      expect(result.vacuumed).toBe(true);
+
+      const survivors = testDb
+        .prepare(
+          "SELECT contract_id, event_type, ledger_sequence FROM events ORDER BY ledger_sequence"
+        )
+        .all();
+      expect(survivors).toHaveLength(2);
+      expect(survivors[0]).toEqual({ contract_id: "CXSD", event_type: "transfer", ledger_sequence: 900 });
+      expect(survivors[1]).toEqual({ contract_id: "CXSD", event_type: "mint", ledger_sequence: 901 });
     });
   });
 });

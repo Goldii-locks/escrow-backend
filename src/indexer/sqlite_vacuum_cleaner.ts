@@ -144,14 +144,127 @@ export function runVacuumCleanup(
 
   logger.info("Starting sqlite vacuum cleanup", { retentionDays });
 
+  const startedAt = Date.now();
+
   // Step 1: transactional prune. If this throws, we intentionally do not
   // catch it here — propagate immediately and skip VACUUM entirely.
+  const pruneStartedAt = Date.now();
   const prunedEvents = pruneOldEvents(db, retentionDays);
+  const pruneElapsedMs = Date.now() - pruneStartedAt;
+
+  // (#346) High-frequency diagnostics: poll speed and payload size for the
+  // prune stage. The elapsed time is embedded directly in the message so
+  // plain-string log shipping preserves it too.
+  logger.debug(
+    `sqlite vacuum prune poll finished in ${pruneElapsedMs}ms ` +
+      `(payload: ${prunedEvents} rows pruned)`
+  );
 
   // Step 2: non-transactional VACUUM, only reached once pruning committed.
+  const vacuumStartedAt = Date.now();
   runVacuum(db);
+  const vacuumElapsedMs = Date.now() - vacuumStartedAt;
 
-  logger.info("Completed sqlite vacuum cleanup", { prunedEvents });
+  logger.debug(`sqlite VACUUM finished in ${vacuumElapsedMs}ms`);
+
+  const totalElapsedMs = Date.now() - startedAt;
+  logger.info(
+    `sqlite vacuum cleanup completed in ${totalElapsedMs}ms ` +
+      `(prune ${pruneElapsedMs}ms, vacuum ${vacuumElapsedMs}ms, payload: ${prunedEvents} rows)`
+  );
 
   return { prunedEvents, vacuumed: true };
+}
+
+
+// ---------------------------------------------------------------------------
+// Exponential backoff retry (#343)
+// ---------------------------------------------------------------------------
+
+/** Default retry behaviour for runVacuumCleanupWithRetry. */
+export const DEFAULT_RETRY_MAX_ATTEMPTS = 4;
+export const DEFAULT_RETRY_INITIAL_DELAY_MS = 200;
+export const DEFAULT_RETRY_MAX_DELAY_MS = 8000;
+
+export interface VacuumRetryOptions {
+  /** Total attempts (first try + retries). Defaults to 4. */
+  maxAttempts?: number;
+  /** Delay before the first retry. Defaults to 200ms. */
+  initialDelayMs?: number;
+  /** Upper bound for the exponentially growing delay. Defaults to 8000ms. */
+  maxDelayMs?: number;
+  /** Injectable delay so tests can observe the backoff without real waits. */
+  sleep?: (ms: number) => Promise<void>;
+}
+
+export interface VacuumCleanupRetryResult extends VacuumCleanupResult {
+  /** The attempt on which the cleanup ultimately succeeded. */
+  attempts: number;
+}
+
+/**
+ * Exponential backoff delay for the 1-based ${attempt}: initialDelayMs *
+ * 2^(attempt-1), capped at maxDelayMs — so the retry frequency increases up
+ * to maxAttempts exactly as the connection-dropout recovery rules require.
+ */
+export function computeBackoffDelayMs(
+  attempt: number,
+  initialDelayMs: number,
+  maxDelayMs: number
+): number {
+  return Math.min(initialDelayMs * 2 ** (attempt - 1), maxDelayMs);
+}
+
+/**
+ * Runs a full vacuum-cleanup cycle with exponential backoff so transient
+ * RPC/connection dropouts are retried gracefully instead of aborting the
+ * maintenance pass.
+ *
+ * Attempt 1 runs immediately; every subsequent attempt waits
+ * initialDelayMs * 2^(n-1) ms (capped at maxDelayMs) before running.
+ *
+ * If every attempt fails, the LAST real error is rethrown after the final
+ * attempt — callers see the actual failure, never a synthetic one.
+ */
+export async function runVacuumCleanupWithRetry(
+  db: Database.Database,
+  options: VacuumCleanupOptions = {},
+  retryOptions: VacuumRetryOptions = {}
+): Promise<VacuumCleanupRetryResult> {
+  const maxAttempts =
+    retryOptions.maxAttempts ?? DEFAULT_RETRY_MAX_ATTEMPTS;
+  const initialDelayMs =
+    retryOptions.initialDelayMs ?? DEFAULT_RETRY_INITIAL_DELAY_MS;
+  const maxDelayMs = retryOptions.maxDelayMs ?? DEFAULT_RETRY_MAX_DELAY_MS;
+  const sleep =
+    retryOptions.sleep ??
+    ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
+
+  let lastError: unknown = new Error("vacuum cleanup never ran");
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const result = runVacuumCleanup(db, options);
+      logger.info("sqlite vacuum cleanup succeeded", {
+        attempt,
+        maxAttempts,
+        prunedEvents: result.prunedEvents,
+      });
+      return { ...result, attempts: attempt };
+    } catch (err) {
+      lastError = err;
+      const delayMs = computeBackoffDelayMs(attempt, initialDelayMs, maxDelayMs);
+      logger.warn("sqlite vacuum cleanup attempt failed", {
+        attempt,
+        maxAttempts,
+        delayMs,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      if (attempt < maxAttempts) {
+        await sleep(delayMs);
+      }
+    }
+  }
+
+  throw lastError;
 }
