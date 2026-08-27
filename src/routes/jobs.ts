@@ -37,6 +37,7 @@ import {
 } from "../middleware/job-contract-security.js";
 import { sendError, sendSuccess } from "../utils/api-response.js";
 import { validate, validateWithFields } from "../middleware/validate.js";
+import { createJobDraftValidation } from "../middleware/create-job-draft-validation.js";
 import type { RequestWithValidatedQuery } from "../middleware/validate.js";
 import {
   contractIdParamsSchema,
@@ -48,8 +49,6 @@ import {
   claimAutoReleaseBodySchema,
   byWalletParamsSchema,
   byWalletQuerySchema,
-  createJobDraftBodySchema,
-  createJobDraftLegacyBodySchema,
   type ByWalletQuery,
   type CreateJobDraftBody,
   type CreateJobDraftLegacyBody,
@@ -332,36 +331,15 @@ router.options("/create-job-draft", createJobDraftCors);
  * the first could ever run, so the second PR's rate limiter was dead code and
  * its tests failed. They are collapsed here into one route that honours both
  * contracts: the body is validated against whichever schema matches the field
- * naming used, and the response carries both shapes.
+ * naming used, and the response carries both shapes. The Zod shape validation
+ * itself lives in the reusable `createJobDraftValidation` middleware.
  */
-function createJobDraftRouteValidator(
-  req: Request,
-  res: Response,
-  next: NextFunction,
-): void {
-  const body = req.body as Record<string, unknown> | undefined;
-  const usesAddressSuffix =
-    !!body &&
-    typeof body === "object" &&
-    ["clientAddress", "freelancerAddress", "arbiterAddress", "tokenAddress"].some(
-      (field) => field in body,
-    );
-
-  const schema = usesAddressSuffix
-    ? createJobDraftLegacyBodySchema
-    : createJobDraftBodySchema;
-
-  validate(schema, "body", (r) =>
-    logger.warn("Invalid create-job-draft request body", { body: r.body }),
-  )(req, res, next);
-}
-
 router.post(
   "/create-job-draft",
   createJobDraftCors,
   createJobDraftSecurityHeaders,
   createJobDraftRateLimit,
-  createJobDraftRouteValidator,
+  createJobDraftValidation,
   (req: Request, res: Response) => {
     try {
       const body = req.body as Partial<CreateJobDraftBody> &
