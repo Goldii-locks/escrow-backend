@@ -1,5 +1,7 @@
 import Database from "better-sqlite3";
 import { setDb, runMigrations } from "../src/indexer/db.js";
+import logger from "../src/utils/logger.js";
+import { jest } from "@jest/globals";
 import {
   initializeNodeHealthTables,
   recordNodeHealth,
@@ -248,6 +250,36 @@ describe("FailoverRecovery – RPC Node Failover & Recovery", () => {
       const state = getFailoverState();
       expect(state).toBeTruthy();
       expect(state.totalFailovers).toBeGreaterThanOrEqual(0);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Failover diagnostics (#355)
+  // -------------------------------------------------------------------------
+  describe("failover diagnostics (#355)", () => {
+    it("logs elapsed time and payload sizes when recording failures", async () => {
+      const debugSpy = jest.spyOn(logger, "debug");
+
+      await recordNodeFailure("rpc://node-a", "connection timeout", 5, 2);
+
+      const messages = debugSpy.mock.calls.map((call) => String(call[0])).join("\n");
+      expect(messages).toMatch(/node failure poll for rpc:\/\/node-a recorded in \d+ms/);
+      expect(messages).toMatch(/payload: failure_count=\d+/);
+      expect(messages).toMatch(/backoff_duration_ms=\d+/);
+
+      debugSpy.mockRestore();
+    });
+
+    it("logs success poll diagnostics with consecutive_successes", async () => {
+      const debugSpy = jest.spyOn(logger, "debug");
+
+      await recordNodeSuccess("rpc://node-b");
+
+      const messages = debugSpy.mock.calls.map((call) => String(call[0])).join("\n");
+      expect(messages).toMatch(/node success poll for rpc:\/\/node-b recorded in \d+ms/);
+      expect(messages).toMatch(/consecutive_successes=\d+/);
+
+      debugSpy.mockRestore();
     });
   });
 });

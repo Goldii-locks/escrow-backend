@@ -100,6 +100,15 @@ export function initializeNodeHealthTables(): void {
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (node_url) REFERENCES rpc_node_health(node_url)
     );
+
+    CREATE INDEX IF NOT EXISTS idx_node_failure_events_node_url
+      ON node_failure_events (node_url);
+
+    CREATE INDEX IF NOT EXISTS idx_node_failure_events_created_at
+      ON node_failure_events (created_at);
+
+    CREATE INDEX IF NOT EXISTS idx_rpc_node_health_recovery
+      ON rpc_node_health (is_healthy, next_retry_at);
   `);
 
   db.prepare(
@@ -199,6 +208,8 @@ export async function recordNodeFailure(
   const db = getDb();
 
   try {
+    const startedAt = Date.now();
+
     const write = db.transaction(() => {
       // The audit log references rpc_node_health, so the parent row must exist first.
       ensureNodeRow(nodeUrl);
@@ -245,7 +256,19 @@ export async function recordNodeFailure(
         .get(nodeUrl) as HealthRow;
     });
 
-    return mapHealthRow(write());
+    const mapped = mapHealthRow(write());
+
+    // (#355) Poll diagnostics: elapsed time and payload sizes embedded in the
+    // message so plain-string log shipping preserves them too.
+    const elapsedMs = Date.now() - startedAt;
+    logger.debug(
+      `node failure poll for ${nodeUrl} recorded in ${elapsedMs}ms ` +
+        `(payload: failure_count=${mapped.failureCount}, ` +
+        `backoff_duration_ms=${mapped.backoffDurationMs}, ` +
+        `is_healthy=${mapped.isHealthy})`
+    );
+
+    return mapped;
   } catch (err) {
     logger.error("Failed to record node failure", {
       nodeUrl,
@@ -267,6 +290,8 @@ export async function recordNodeSuccess(
   const db = getDb();
 
   try {
+    const successStartedAt = Date.now();
+
     const write = db.transaction(() => {
       ensureNodeRow(nodeUrl);
 
@@ -307,7 +332,17 @@ export async function recordNodeSuccess(
         .get(nodeUrl) as HealthRow;
     });
 
-    return mapHealthRow(write());
+    const mappedSuccess = mapHealthRow(write());
+
+    // (#355) Poll diagnostics for the success path as well.
+    const successElapsedMs = Date.now() - successStartedAt;
+    logger.debug(
+      `node success poll for ${nodeUrl} recorded in ${successElapsedMs}ms ` +
+        `(payload: consecutive_successes=${mappedSuccess.consecutiveSuccesses}, ` +
+        `failure_count=${mappedSuccess.failureCount})`
+    );
+
+    return mappedSuccess;
   } catch (err) {
     logger.error("Failed to record node success", {
       nodeUrl,
