@@ -54,6 +54,23 @@ describe("SQLite Schema Manager – in-memory integration tests", () => {
       expect(versions).toContain(1);
       expect(versions).toContain(2);
       expect(versions).toContain(3);
+      expect(versions).toContain(4);
+      expect(versions).toContain(5);
+    });
+
+    it("creates all schema-manager lookup indexes (#259)", () => {
+      const indexes = testDb
+        .prepare(
+          `SELECT name FROM sqlite_master
+           WHERE type = 'index' AND name LIKE 'idx_%'
+           ORDER BY name`,
+        )
+        .all() as Array<{ name: string }>;
+      const names = indexes.map((i) => i.name);
+
+      for (const indexName of Object.values(SCHEMA_MANAGER_INDEXES)) {
+        expect(names).toContain(indexName);
+      }
     });
   });
 
@@ -62,7 +79,7 @@ describe("SQLite Schema Manager – in-memory integration tests", () => {
       testDb
         .prepare(
           `INSERT INTO events (contract_id, event_type, ledger_sequence, timestamp, data_json)
-           VALUES (?, ?, ?, ?, ?)`
+           VALUES (?, ?, ?, ?, ?)`,
         )
         .run("C1", "initialized", 1000, 1700000000, '{"key":"value"}');
 
@@ -80,7 +97,7 @@ describe("SQLite Schema Manager – in-memory integration tests", () => {
     it("enforces unique constraint on contract_id + ledger_sequence + event_type", () => {
       const insert = testDb.prepare(
         `INSERT OR IGNORE INTO events (contract_id, event_type, ledger_sequence, timestamp, data_json)
-         VALUES (?, ?, ?, ?, ?)`
+         VALUES (?, ?, ?, ?, ?)`,
       );
 
       insert.run("C1", "initialized", 100, 1000, "{}");
@@ -94,7 +111,7 @@ describe("SQLite Schema Manager – in-memory integration tests", () => {
     it("allows different event types on the same ledger", () => {
       const insert = testDb.prepare(
         `INSERT OR IGNORE INTO events (contract_id, event_type, ledger_sequence, timestamp, data_json)
-         VALUES (?, ?, ?, ?, ?)`
+         VALUES (?, ?, ?, ?, ?)`,
       );
 
       insert.run("C1", "initialized", 100, 1000, "{}");
@@ -107,7 +124,7 @@ describe("SQLite Schema Manager – in-memory integration tests", () => {
     it("allows events across multiple contracts", () => {
       const insert = testDb.prepare(
         `INSERT OR IGNORE INTO events (contract_id, event_type, ledger_sequence, timestamp, data_json)
-         VALUES (?, ?, ?, ?, ?)`
+         VALUES (?, ?, ?, ?, ?)`,
       );
 
       insert.run("C1", "initialized", 100, 1000, "{}");
@@ -130,7 +147,7 @@ describe("SQLite Schema Manager – in-memory integration tests", () => {
       testDb
         .prepare(
           `INSERT INTO events (contract_id, event_type, ledger_sequence, timestamp, data_json)
-           VALUES (?, ?, ?, ?, ?)`
+           VALUES (?, ?, ?, ?, ?)`,
         )
         .run("C1", "initialized", 100, 1000, largeData);
 
@@ -167,7 +184,7 @@ describe("SQLite Schema Manager – in-memory integration tests", () => {
       testDb
         .prepare(
           `INSERT INTO monitored_contracts (contract_id, label, active)
-           VALUES (?, ?, 1)`
+           VALUES (?, ?, 1)`,
         )
         .run("CONTRACT-ALPHA", "alpha");
 
@@ -183,7 +200,7 @@ describe("SQLite Schema Manager – in-memory integration tests", () => {
     it("enforces unique contract_id", () => {
       const insert = testDb.prepare(
         `INSERT OR IGNORE INTO monitored_contracts (contract_id, label, active)
-         VALUES (?, ?, 1)`
+         VALUES (?, ?, 1)`,
       );
 
       insert.run("C1", "first");
@@ -223,7 +240,7 @@ describe("SQLite Schema Manager – in-memory integration tests", () => {
         testDb.transaction(() => {
           testDb
             .prepare(
-              "INSERT INTO events (contract_id, event_type, ledger_sequence, timestamp, data_json) VALUES (?, ?, ?, ?, ?)"
+              "INSERT INTO events (contract_id, event_type, ledger_sequence, timestamp, data_json) VALUES (?, ?, ?, ?, ?)",
             )
             .run("C1", "t", 1, 1, "{}");
           throw new Error("intentional rollback");
@@ -243,12 +260,12 @@ describe("SQLite Schema Manager – in-memory integration tests", () => {
       testDb.transaction(() => {
         testDb
           .prepare(
-            "INSERT INTO events (contract_id, event_type, ledger_sequence, timestamp, data_json) VALUES (?, ?, ?, ?, ?)"
+            "INSERT INTO events (contract_id, event_type, ledger_sequence, timestamp, data_json) VALUES (?, ?, ?, ?, ?)",
           )
           .run("C1", "initialized", 100, 1000, "{}");
         testDb
           .prepare(
-            "INSERT INTO events (contract_id, event_type, ledger_sequence, timestamp, data_json) VALUES (?, ?, ?, ?, ?)"
+            "INSERT INTO events (contract_id, event_type, ledger_sequence, timestamp, data_json) VALUES (?, ?, ?, ?, ?)",
           )
           .run("C1", "funded", 101, 1001, "{}");
         testDb
@@ -270,7 +287,7 @@ describe("SQLite Schema Manager – in-memory integration tests", () => {
     it("running migrations multiple times does not duplicate data", () => {
       testDb
         .prepare(
-          "INSERT INTO monitored_contracts (contract_id, label, active) VALUES (?, ?, 1)"
+          "INSERT INTO monitored_contracts (contract_id, label, active) VALUES (?, ?, 1)",
         )
         .run("C1", "original");
 

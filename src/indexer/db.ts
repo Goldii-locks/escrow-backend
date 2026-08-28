@@ -140,6 +140,20 @@ const MIGRATIONS: Migration[] = [
         ON events (ledger_sequence, event_type);
     `,
   },
+  {
+    version: 5,
+    description: "add sqlite_schema_manager lookup indexes (#259)",
+    up: `
+      CREATE INDEX IF NOT EXISTS idx_monitored_contracts_active
+        ON monitored_contracts (active);
+
+      CREATE INDEX IF NOT EXISTS idx_events_created_at
+        ON events (created_at);
+
+      CREATE INDEX IF NOT EXISTS idx_events_contract_type_ledger
+        ON events (contract_id, event_type, ledger_sequence);
+    `,
+  },
 ];
 
 // ---------------------------------------------------------------------------

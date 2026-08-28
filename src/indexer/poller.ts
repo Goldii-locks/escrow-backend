@@ -9,6 +9,11 @@ import {
   verifySchemaUpToDate,
   type EventRow,
 } from "./db.js";
+import {
+  getHistoricalRangeConfig,
+  processLedgerRange,
+  resolveHistoricalLedgerRange,
+} from "./ledger-range-tracker.js";
 import { deliverWebhooks } from "./webhook-delivery.js";
 import {
   logIndexerRunnerPollDiagnostics,
@@ -141,7 +146,72 @@ export async function pollEvents(): Promise<boolean> {
     verifySchemaUpToDate();
 
     const lastLedger = getLastIndexedLedger();
-    const currentLedger = (await rpcClient.getLatestLedger()).sequence;
+    const currentLedger = (await server.getLatestLedger()).sequence;
+
+    // --- Dynamic historical sync ranges (#254) ---
+    // When LEDGER_RANGE_START / LEDGER_RANGE_END (or either) are configured,
+    // import that inclusive window once without advancing the live pointer.
+    const histConfig = getHistoricalRangeConfig();
+    if (histConfig.startLedger != null || histConfig.endLedger != null) {
+      const range = resolveHistoricalLedgerRange({
+        startLedger: histConfig.startLedger,
+        endLedger: histConfig.endLedger,
+        defaultStart: lastLedger < 1 ? 1 : lastLedger + 1,
+        defaultEnd: currentLedger,
+      });
+
+      logger.info("Running historical ledger range import", {
+        startLedger: range.startLedger,
+        endLedger: range.endLedger,
+        pageSize: histConfig.pageSize,
+      });
+
+      const result = await processLedgerRange({
+        startLedger: range.startLedger,
+        endLedger: range.endLedger,
+        pageSize: histConfig.pageSize,
+        advanceLivePointer: false,
+        fetchEvents: async (page) => {
+          const pageEvents = await server.getEvents({
+            startLedger: page.startLedger,
+            filters: [
+              {
+                type: "contract",
+                contractIds,
+                topics: [[...EVENT_TYPES]],
+              },
+            ],
+            limit: histConfig.pageSize,
+          });
+          return pageEvents.events
+            .filter((event) => event.ledger <= page.endLedger)
+            .map((event) => ({
+              contractId: event.contractId?.contractId() ?? contractIds[0],
+              eventType: scValToNative(event.topic[0]) as string,
+              ledgerSequence: event.ledger,
+              timestamp: event.ledgerClosedAt
+                ? Math.floor(new Date(event.ledgerClosedAt).getTime() / 1000)
+                : Math.floor(Date.now() / 1000),
+              dataJson: JSON.stringify(event.value),
+            }));
+        },
+      });
+
+      consecutiveFailures = 0;
+      lastSuccessfulPollAt = Date.now();
+      adjustPollerInterval(result.eventCount);
+
+      logger.info("Historical ledger range import complete", {
+        startLedger: range.startLedger,
+        endLedger: range.endLedger,
+        eventCount: result.eventCount,
+        insertedCount: result.insertedCount,
+        elapsedMs: Math.round(result.elapsedMs),
+      });
+
+      return result.insertedCount > 0;
+    }
+
     if (currentLedger <= lastLedger) {
       // --- Dynamic throttling: idle cycle (#265) ---
       adjustPollerInterval(0);
