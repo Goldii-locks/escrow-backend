@@ -1,4 +1,3 @@
-// @ts-nocheck
 /** @type {import('ts-jest').JestConfigWithTsJest} */
 export default {
   preset: "ts-jest",
@@ -9,6 +8,7 @@ export default {
     "^.+\\.ts$": ["ts-jest", { useESM: true }]
   },
   testMatch: ["**/__tests__/**/*.test.ts"],
+  setupFilesAfterEnv: ["<rootDir>/jest.setup.ts"],
   moduleNameMapper: {
     "^(\\.{1,2}/.*)\\.js$": "$1"
   }

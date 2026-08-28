@@ -12,10 +12,9 @@ describe('GET /api/jobs/:contractId/whitelist – address validation', () => {
     const res = await request(app)
       .get('/api/jobs/not-a-valid-contract-id/whitelist')
       .expect(400);
-    expect(res.body).toEqual({
-      success: false,
-      error: 'contractId must be a valid Stellar contract address (C...)',
-    });
+    expect(res.body.success).toBe(false);
+    expect(res.body.error).toBe('ValidationError');
+    expect(res.body.details[0].message).toBe('contractId must be a valid Stellar contract address (C...)');
   });
 
   it('returns 400 for a Stellar account address used as contractId', async () => {
@@ -23,7 +22,8 @@ describe('GET /api/jobs/:contractId/whitelist – address validation', () => {
       .get('/api/jobs/GAODBHVR63Z56MVQRBEJSYM2H5423LJ4WAPUUBOFG4JYY72S6ROKVZRX/whitelist')
       .expect(400);
     expect(res.body.success).toBe(false);
-    expect(res.body.error).toMatch(/valid Stellar contract address/i);
+    expect(res.body.error).toBe('ValidationError');
+    expect(res.body.details[0].message).toMatch(/valid Stellar contract address/i);
   });
 
   it('does not return 400 for a syntactically valid contractId', async () => {

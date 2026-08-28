@@ -5,36 +5,46 @@ import {
   insertEventBatch,
   getActiveContractIds,
   registerContract,
-  validateSchemaOrThrow,
+  adjustPollerInterval,
+  getCurrentPollIntervalMs,
+  assertSchemaValid,
+  verifySchemaUpToDate,
   type EventRow,
 } from "./db.js";
 import { deliverWebhooks } from "./webhook-delivery.js";
-import { withRpcBackoff } from "../utils/backoff.js";
+import { withRetry } from "./rpc-poller-client.js";
 import logger from "../utils/logger.js";
 
 const RPC_URL =
   process.env.SOROBAN_RPC_URL || "https://soroban-testnet.stellar.org";
 const server = new Server(RPC_URL);
-const POLL_INTERVAL_MS = parseInt(process.env.POLL_INTERVAL_MS || "15000", 10);
 
-// Consecutive poll-failure threshold alerting (#duplicate-prevention).
-// If the RPC connection keeps timing out (even after backoff retries exhaust
-// within a single poll), we track how many *poll cycles* in a row have
-// failed and log a threshold warning once operations have stalled for too
-// long, so an operator/alerting pipeline can pick it up.
-const POLL_FAILURE_ALERT_THRESHOLD = parseInt(
-  process.env.POLL_FAILURE_ALERT_THRESHOLD || "5",
-  10
+// ---------------------------------------------------------------------------
+// Alerting thresholds (#271)
+// ---------------------------------------------------------------------------
+const CONSECUTIVE_FAILURE_THRESHOLD = parseInt(
+  process.env.POLLER_FAILURE_THRESHOLD || "3",
+  10,
 );
 
-let consecutivePollFailures = 0;
-
-export function getConsecutivePollFailures(): number {
-  return consecutivePollFailures;
+function getStallThresholdMs(): number {
+  return parseInt(process.env.POLLER_STALL_THRESHOLD_MS || "120000", 10);
 }
 
-export function resetConsecutivePollFailures(): void {
-  consecutivePollFailures = 0;
+let consecutiveFailures = 0;
+let lastSuccessfulPollAt: number | null = null;
+
+export function getConsecutiveFailures(): number {
+  return consecutiveFailures;
+}
+
+export function getLastSuccessfulPollAt(): number | null {
+  return lastSuccessfulPollAt;
+}
+
+export function resetFailureState(): void {
+  consecutiveFailures = 0;
+  lastSuccessfulPollAt = null;
 }
 
 const EVENT_TYPES = [
@@ -55,8 +65,11 @@ const EVENT_TYPES = [
  * All events fetched in a single poll are written atomically together with the
  * ledger pointer update (#84) – so a mid-poll crash cannot advance the pointer
  * without committing the accompanying events.
+ *
+ * Returns whether the ledger actually advanced, so startPoller() can throttle
+ * its polling frequency up or down based on ledger processing load (#274).
  */
-export async function pollEvents() {
+export async function pollEvents(): Promise<boolean> {
   // --- Resolve active contract IDs from the DB (#85) ---
   let contractIds: string[] = getActiveContractIds();
 
@@ -69,41 +82,80 @@ export async function pollEvents() {
 
   if (contractIds.length === 0) {
     logger.debug("No CONTRACT_IDs configured – skipping indexer poll");
-    return;
+    return false;
   }
 
+  // --- Diagnostics: stall detection before polling (#270, #271) ---
+  if (lastSuccessfulPollAt) {
+    const stallThresholdMs = getStallThresholdMs();
+    const elapsed = Date.now() - lastSuccessfulPollAt;
+    if (elapsed > stallThresholdMs) {
+      logger.warn("Poller stall detected – no successful poll for threshold period", {
+        elapsedMs: elapsed,
+        stallThresholdMs,
+        consecutiveFailures,
+      });
+    }
+    logger.debug("Poller stall diagnostics", {
+      elapsedMsSinceLastSuccess: elapsed,
+      stallThresholdMs,
+    });
+  }
+
+  const pollStart = performance.now();
+
   try {
+    // Validate the schema before matching events against EVENT_TYPES – a stale
+    // schema must not silently pass through the topic filter (#282).
+    verifySchemaUpToDate();
+
     const lastLedger = getLastIndexedLedger();
 
     // Ledger range tracker: fetch the current chain tip with exponential
     // backoff so a transient RPC connection timeout doesn't fail the poll.
     const currentLedger = (
-      await withRpcBackoff(() => server.getLatestLedger())
+      await withRetry(() => server.getLatestLedger(), {}, "getLatestLedger")
     ).sequence;
     if (currentLedger <= lastLedger) {
-      consecutivePollFailures = 0;
-      return;
+      // --- Dynamic throttling: idle cycle (#265) ---
+      adjustPollerInterval(0);
+      return false;
     }
 
     const startLedger = lastLedger + 1;
 
     logger.info("Polling events", { startLedger, currentLedger });
 
+    const eventsStart = performance.now();
     // Duplicate prevention: fetch the events to be deduped/inserted, also
     // protected by the same exponential backoff on RPC connection timeouts.
-    const events = await withRpcBackoff(() =>
-      server.getEvents({
-        startLedger,
-        filters: [
-          {
-            type: "contract",
-            contractIds,
-            topics: [[...EVENT_TYPES]],
-          },
-        ],
-        limit: 100,
-      })
+    const events = await withRetry(
+      () =>
+        server.getEvents({
+          startLedger,
+          filters: [
+            {
+              type: "contract",
+              contractIds,
+              topics: [[...EVENT_TYPES]],
+            },
+          ],
+          limit: 100,
+        }),
+      {},
+      "getEvents"
     );
+    const eventsElapsed = performance.now() - eventsStart;
+
+    // --- Diagnostics: payload size and timing (#270) ---
+    const payloadSizeBytes = JSON.stringify(events.events).length;
+    logger.debug("RPC getEvents diagnostics", {
+      elapsedMs: Math.round(eventsElapsed),
+      payloadSizeBytes,
+      eventCount: events.events.length,
+      startLedger,
+      currentLedger,
+    });
 
     // Build the batch to be written atomically (#84)
     const batch: EventRow[] = events.events.map((event) => ({
@@ -118,51 +170,81 @@ export async function pollEvents() {
 
     // Persist the batch and advance the ledger pointer atomically (#84)
     insertEventBatch(batch, currentLedger);
+
+    const totalElapsed = performance.now() - pollStart;
+    consecutiveFailures = 0;
+    lastSuccessfulPollAt = Date.now();
+
+    // --- Dynamic poller throttling (#265) ---
+    const throttleState = adjustPollerInterval(events.events.length);
+
     logger.info("Processed indexer poll", {
       eventCount: events.events.length,
       upToLedger: currentLedger,
+      elapsedMs: Math.round(totalElapsed),
+      pollIntervalMs: throttleState.currentIntervalMs,
     });
-    consecutivePollFailures = 0;
 
     deliverWebhooks(startLedger, currentLedger).catch((err) =>
       logger.error("Error delivering webhooks", {
         error: err instanceof Error ? err.message : String(err),
       })
     );
+
+    return true;
   } catch (err) {
-    consecutivePollFailures++;
+    const totalElapsed = performance.now() - pollStart;
+    consecutiveFailures += 1;
+
     logger.error("Error polling events", {
       error: err instanceof Error ? err.message : String(err),
-      consecutiveFailures: consecutivePollFailures,
+      consecutiveFailures,
+      elapsedMs: Math.round(totalElapsed),
     });
 
-    if (consecutivePollFailures >= POLL_FAILURE_ALERT_THRESHOLD) {
-      logger.warn("Indexer poll failure threshold reached", {
-        consecutiveFailures: consecutivePollFailures,
-        threshold: POLL_FAILURE_ALERT_THRESHOLD,
+    // --- Alerting: warn when consecutive failures hit threshold (#271) ---
+    if (consecutiveFailures >= CONSECUTIVE_FAILURE_THRESHOLD) {
+      logger.error("Poller alert: consecutive failure threshold exceeded", {
+        consecutiveFailures,
+        threshold: CONSECUTIVE_FAILURE_THRESHOLD,
+        lastSuccessAt: lastSuccessfulPollAt,
       });
     }
+
+    return false;
   }
 }
 
-let pollerInterval: NodeJS.Timeout | null = null;
+let pollerTimeout: NodeJS.Timeout | null = null;
+let pollerRunning = false;
+
+async function pollLoop() {
+  if (!pollerRunning) return;
+  await pollEvents();
+  const interval = getCurrentPollIntervalMs();
+  pollerTimeout = setTimeout(pollLoop, interval);
+}
 
 /**
  * Starts the poller. Validates the database schema first (duplicate
  * prevention's startup guard) and throws if the schema is out of sync,
- * aborting startup rather than polling against a broken schema.
+ * aborting startup rather than silently polling against a broken schema.
  */
 export function startPoller() {
-  if (pollerInterval) return;
-  validateSchemaOrThrow();
-  logger.info("Starting event indexer poller", { intervalMs: POLL_INTERVAL_MS });
+  if (pollerRunning) return;
+  assertSchemaValid();
+  pollerRunning = true;
+  logger.info("Starting event indexer poller", {
+    intervalMs: getCurrentPollIntervalMs(),
+  });
   pollEvents();
-  pollerInterval = setInterval(pollEvents, POLL_INTERVAL_MS);
+  pollerTimeout = setTimeout(pollLoop, getCurrentPollIntervalMs());
 }
 
 export function stopPoller() {
-  if (pollerInterval) {
-    clearInterval(pollerInterval);
-    pollerInterval = null;
+  pollerRunning = false;
+  if (pollerTimeout) {
+    clearTimeout(pollerTimeout);
+    pollerTimeout = null;
   }
 }

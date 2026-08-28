@@ -59,7 +59,8 @@ describe("POST /api/jobs/:contractId/milestones/:index/partial-release", () => {
       .send(VALID_BODY)
       .expect(400);
     expect(res.body.success).toBe(false);
-    expect(res.body.error).toMatch(/valid Stellar contract address/i);
+    expect(res.body.error).toBe("ValidationError");
+    expect(res.body.details[0].message).toMatch(/valid Stellar contract address/i);
   });
 
   it("returns 400 for a non-numeric index", async () => {
@@ -69,7 +70,14 @@ describe("POST /api/jobs/:contractId/milestones/:index/partial-release", () => {
       .expect(400);
     expect(res.body).toEqual({
       success: false,
-      error: "index must be a non-negative integer",
+      error: "ValidationError",
+      message: "Invalid request parameters",
+      details: [
+        {
+          field: "index",
+          message: "index must be a non-negative integer",
+        },
+      ],
     });
   });
 
@@ -98,7 +106,14 @@ describe("POST /api/jobs/:contractId/milestones/:index/partial-release", () => {
       .expect(400);
     expect(res.body).toEqual({
       success: false,
-      error: "amount must be a positive integer",
+      error: "ValidationError",
+      message: "Invalid request parameters",
+      details: [
+        {
+          field: "amount",
+          message: "amount must be a positive integer",
+        },
+      ],
     });
   });
 
@@ -109,7 +124,14 @@ describe("POST /api/jobs/:contractId/milestones/:index/partial-release", () => {
       .expect(400);
     expect(res.body).toEqual({
       success: false,
-      error: "amount must be a positive integer",
+      error: "ValidationError",
+      message: "Invalid request parameters",
+      details: [
+        {
+          field: "amount",
+          message: "amount must be a positive integer",
+        },
+      ],
     });
   });
 
@@ -120,7 +142,14 @@ describe("POST /api/jobs/:contractId/milestones/:index/partial-release", () => {
       .expect(400);
     expect(res.body).toEqual({
       success: false,
-      error: "amount must be a positive integer",
+      error: "ValidationError",
+      message: "Invalid request parameters",
+      details: [
+        {
+          field: "amount",
+          message: "amount must be a positive integer",
+        },
+      ],
     });
   });
 
@@ -131,7 +160,14 @@ describe("POST /api/jobs/:contractId/milestones/:index/partial-release", () => {
       .expect(400);
     expect(res.body).toEqual({
       success: false,
-      error: "amount must be a positive integer",
+      error: "ValidationError",
+      message: "Invalid request parameters",
+      details: [
+        {
+          field: "amount",
+          message: "amount must be a positive integer",
+        },
+      ],
     });
   });
 
@@ -142,7 +178,14 @@ describe("POST /api/jobs/:contractId/milestones/:index/partial-release", () => {
       .expect(400);
     expect(res.body).toEqual({
       success: false,
-      error: "sourceAddress is required",
+      error: "ValidationError",
+      message: "Invalid request parameters",
+      details: [
+        {
+          field: "sourceAddress",
+          message: "sourceAddress is required",
+        },
+      ],
     });
   });
 
@@ -153,7 +196,14 @@ describe("POST /api/jobs/:contractId/milestones/:index/partial-release", () => {
       .expect(400);
     expect(res.body).toEqual({
       success: false,
-      error: "sourceAddress must be a valid Stellar account address (G...)",
+      error: "ValidationError",
+      message: "Invalid request parameters",
+      details: [
+        {
+          field: "sourceAddress",
+          message: "sourceAddress must be a valid Stellar account address (G...)",
+        },
+      ],
     });
   });
 
@@ -163,7 +213,8 @@ describe("POST /api/jobs/:contractId/milestones/:index/partial-release", () => {
       .send({ amount: "100", sourceAddress: VALID_CONTRACT })
       .expect(400);
     expect(res.body.success).toBe(false);
-    expect(res.body.error).toMatch(/valid Stellar account address/i);
+    expect(res.body.error).toBe("ValidationError");
+    expect(res.body.details[0].message).toMatch(/valid Stellar account address/i);
   });
 
   // ── success path ──────────────────────────────────────────────────────────
@@ -196,7 +247,7 @@ describe("POST /api/jobs/:contractId/milestones/:index/partial-release", () => {
       .expect(404);
     expect(res.body).toEqual({
       success: false,
-      error: "Contract not found on network",
+      error: "Source account not found on network",
     });
   });
 

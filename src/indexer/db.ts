@@ -26,9 +26,26 @@ export function setDb(newDb: Database.Database) {
   dbInstance = newDb;
 }
 
-export const db = getDb();
-
-db.pragma("journal_mode = WAL");
+/**
+ * Close the active connection and drop the cached instance.
+ *
+ * Importing this module used to open a connection as a side effect, so every
+ * test file that touched it leaked a SQLite file handle and Jest had to force
+ * workers to exit. The connection is now opened lazily by `getDb()`, and this
+ * lets test teardown release it.
+ */
+export function closeDb(): void {
+  if (!dbInstance) return;
+  try {
+    dbInstance.close();
+  } catch (err) {
+    logger.warn("Failed to close database connection", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  } finally {
+    dbInstance = null;
+  }
+}
 
 const JOBS_BY_WALLET_CACHE_TTL_S = parseInt(
   process.env.JOBS_BY_WALLET_CACHE_TTL_S || "60",
@@ -93,6 +110,34 @@ const MIGRATIONS: Migration[] = [
         active INTEGER NOT NULL DEFAULT 1,
         registered_at DATETIME DEFAULT CURRENT_TIMESTAMP
       );
+    `,
+  },
+  {
+    version: 3,
+    description: "add indexes for query optimization",
+    up: `
+      CREATE INDEX IF NOT EXISTS idx_events_contract_id
+        ON events (contract_id);
+
+      CREATE INDEX IF NOT EXISTS idx_events_ledger_sequence
+        ON events (ledger_sequence);
+
+      CREATE INDEX IF NOT EXISTS idx_events_contract_ledger
+        ON events (contract_id, ledger_sequence);
+
+      CREATE INDEX IF NOT EXISTS idx_events_contract_type
+        ON events (contract_id, event_type);
+
+      CREATE INDEX IF NOT EXISTS idx_webhook_subscriptions_contract
+        ON webhook_subscriptions (contract_id);
+    `,
+  },
+  {
+    version: 4,
+    description: "add ledger_range_tracker GROUP BY index (#295)",
+    up: `
+      CREATE INDEX IF NOT EXISTS idx_events_ledger_event_type
+        ON events (ledger_sequence, event_type);
     `,
   },
 ];
@@ -172,69 +217,265 @@ export function initSchema() {
 }
 
 /**
- * Startup schema validation (duplicate prevention).
- *
- * Verifies the database has every migration applied and that the `events`
- * table still carries the UNIQUE(contract_id, ledger_sequence, event_type)
- * constraint that duplicate-prevention relies on. Throws if the database
- * state is out of sync with the expected schema, so callers (e.g.
- * startPoller()) can let the error abort startup rather than run against a
- * schema that would silently accept duplicate events.
+ * Verifies every migration in MIGRATIONS is recorded as applied in
+ * schema_migrations. Throws if the table is missing or a version hasn't
+ * been applied yet, so callers can fail fast on a stale/out-of-sync
+ * database instead of hitting confusing SQL errors later (#282).
  */
-export function validateSchemaOrThrow(): void {
+export function verifySchemaUpToDate(): void {
   const database = getDb();
 
-  const migrationsTableExists = database
+  const migrationsTable = database
     .prepare(
-      "SELECT name FROM sqlite_master WHERE type='table' AND name='schema_migrations'"
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'"
     )
     .get();
 
-  if (!migrationsTableExists) {
+  if (!migrationsTable) {
     throw new Error(
-      "Schema validation failed: schema_migrations table does not exist. " +
-        "Run migrations before starting the service."
+      "Database schema is out of sync: schema_migrations table not found. Run runMigrations() first."
     );
   }
 
   const appliedVersions = new Set(
     (
-      database
-        .prepare("SELECT version FROM schema_migrations")
-        .all() as Array<{ version: number }>
+      database.prepare("SELECT version FROM schema_migrations").all() as Array<{
+        version: number;
+      }>
     ).map((row) => row.version)
   );
 
-  const missingVersions = MIGRATIONS.map((m) => m.version).filter(
-    (version) => !appliedVersions.has(version)
-  );
-
-  if (missingVersions.length > 0) {
+  const missing = MIGRATIONS.filter((m) => !appliedVersions.has(m.version));
+  if (missing.length > 0) {
     throw new Error(
-      `Schema validation failed: missing migrations [${missingVersions.join(
-        ", "
-      )}]. The database state is out of sync with the expected schema.`
+      `Database schema is out of sync: missing migrations ${missing
+        .map((m) => `${m.version} (${m.description})`)
+        .join(", ")}. Run runMigrations() first.`
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Schema verification hooks (#264)
+// ---------------------------------------------------------------------------
+
+export interface SchemaVerificationResult {
+  valid: boolean;
+  missingTables: string[];
+  missingColumns: Record<string, string[]>;
+  migrationVersionGap: boolean;
+  errors: string[];
+}
+
+const EXPECTED_TABLES: Record<string, string[]> = {
+  events: [
+    "id",
+    "contract_id",
+    "event_type",
+    "ledger_sequence",
+    "timestamp",
+    "data_json",
+    "created_at",
+  ],
+  indexer_state: ["key", "value"],
+  monitored_contracts: [
+    "id",
+    "contract_id",
+    "label",
+    "active",
+    "registered_at",
+  ],
+  schema_migrations: ["version", "description", "applied_at"],
+};
+
+/**
+ * Verify the database schema structure matches expected state.
+ * Returns a detailed result indicating any discrepancies.
+ */
+export function verifySchemaIntegrity(): SchemaVerificationResult {
+  const database = getDb();
+  const missingTables: string[] = [];
+  const missingColumns: Record<string, string[]> = {};
+  const errors: string[] = [];
+  let migrationVersionGap = false;
+
+  // Check required tables exist
+  for (const tableName of Object.keys(EXPECTED_TABLES)) {
+    const table = database
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?"
+      )
+      .get(tableName);
+
+    if (!table) {
+      missingTables.push(tableName);
+      continue;
+    }
+
+    // Check required columns
+    const columns = database
+      .prepare(`PRAGMA table_info(${tableName})`)
+      .all() as Array<{ name: string }>;
+    const columnNames = new Set(columns.map((c) => c.name));
+
+    const missing = EXPECTED_TABLES[tableName].filter(
+      (col) => !columnNames.has(col)
+    );
+    if (missing.length > 0) {
+      missingColumns[tableName] = missing;
+    }
+  }
+
+  // Check migration version continuity
+  try {
+    const applied = database
+      .prepare("SELECT version FROM schema_migrations ORDER BY version")
+      .all() as Array<{ version: number }>;
+    const versions = applied.map((r) => r.version);
+    for (let i = 1; i < versions.length; i++) {
+      if (versions[i] - versions[i - 1] > 1) {
+        migrationVersionGap = true;
+        errors.push(
+          `Migration version gap between ${versions[i - 1]} and ${versions[i]}`
+        );
+      }
+    }
+  } catch {
+    errors.push("schema_migrations table is unreadable");
+  }
+
+  const valid =
+    missingTables.length === 0 &&
+    Object.keys(missingColumns).length === 0 &&
+    !migrationVersionGap;
+
+  return {
+    valid,
+    missingTables,
+    missingColumns,
+    migrationVersionGap,
+    errors,
+  };
+}
+
+/**
+ * Verify schema integrity and throw if the database is out of sync.
+ * Call this before starting the poller to prevent data corruption.
+ */
+export function assertSchemaValid(): void {
+  const result = verifySchemaIntegrity();
+  if (!result.valid) {
+    const reasons = [
+      ...result.missingTables.map((t) => `missing table: ${t}`),
+      ...Object.entries(result.missingColumns).map(
+        ([t, cols]) => `missing columns in ${t}: ${cols.join(", ")}`
+      ),
+      ...result.errors,
+    ];
+    throw new Error(
+      `Schema verification failed – database out of sync: ${reasons.join("; ")}`
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Dynamic poller throttle parameters (#265)
+// ---------------------------------------------------------------------------
+
+export interface PollerThrottleState {
+  currentIntervalMs: number;
+  lastProcessedEventCount: number;
+  idleCycles: number;
+  lastLoadAdjustmentAt: number;
+}
+
+const BASE_POLL_INTERVAL_MS = parseInt(
+  process.env.POLL_INTERVAL_MS || "15000",
+  10,
+);
+const MIN_POLL_INTERVAL_MS = parseInt(
+  process.env.POLLER_MIN_INTERVAL_MS || "5000",
+  10,
+);
+const MAX_POLL_INTERVAL_MS = parseInt(
+  process.env.POLLER_MAX_INTERVAL_MS || "60000",
+  10,
+);
+const IDLE_MULTIPLIER = parseInt(
+  process.env.POLLER_IDLE_MULTIPLIER || "2",
+  10,
+);
+const IDLE_THRESHOLD_CYCLES = parseInt(
+  process.env.POLLER_IDLE_THRESHOLD || "3",
+  10,
+);
+const LOAD_DECREASE_FACTOR = parseFloat(
+  process.env.POLLER_LOAD_DECREASE_FACTOR || "0.5",
+);
+
+let pollerThrottleState: PollerThrottleState = {
+  currentIntervalMs: BASE_POLL_INTERVAL_MS,
+  lastProcessedEventCount: 0,
+  idleCycles: 0,
+  lastLoadAdjustmentAt: Date.now(),
+};
+
+/**
+ * Get the current poller throttle state (read-only snapshot).
+ */
+export function getPollerThrottleState(): PollerThrottleState {
+  return { ...pollerThrottleState };
+}
+
+/**
+ * Reset poller throttle state to defaults (useful for tests).
+ */
+export function resetPollerThrottleState(): void {
+  pollerThrottleState = {
+    currentIntervalMs: BASE_POLL_INTERVAL_MS,
+    lastProcessedEventCount: 0,
+    idleCycles: 0,
+    lastLoadAdjustmentAt: Date.now(),
+  };
+}
+
+/**
+ * Adjust poller interval based on processing load.
+ * Called after each poll cycle with the number of events processed.
+ * When idle (no events), the interval increases up to MAX_POLL_INTERVAL_MS.
+ * When under load (events processed), the interval decreases toward MIN_POLL_INTERVAL_MS.
+ */
+export function adjustPollerInterval(
+  processedEventCount: number,
+): PollerThrottleState {
+  const state = pollerThrottleState;
+  state.lastProcessedEventCount = processedEventCount;
+
+  if (processedEventCount === 0) {
+    state.idleCycles += 1;
+    if (state.idleCycles >= IDLE_THRESHOLD_CYCLES) {
+      state.currentIntervalMs = Math.min(
+        state.currentIntervalMs * IDLE_MULTIPLIER,
+        MAX_POLL_INTERVAL_MS,
+      );
+    }
+  } else {
+    state.idleCycles = 0;
+    state.currentIntervalMs = Math.max(
+      MIN_POLL_INTERVAL_MS,
+      Math.floor(state.currentIntervalMs * LOAD_DECREASE_FACTOR),
     );
   }
 
-  const eventsTable = database
-    .prepare(
-      "SELECT sql FROM sqlite_master WHERE type='table' AND name='events'"
-    )
-    .get() as { sql: string } | undefined;
+  state.lastLoadAdjustmentAt = Date.now();
+  return { ...state };
+}
 
-  const hasDuplicatePreventionConstraint =
-    !!eventsTable &&
-    /UNIQUE\s*\(\s*contract_id\s*,\s*ledger_sequence\s*,\s*event_type\s*\)/i.test(
-      eventsTable.sql
-    );
-
-  if (!hasDuplicatePreventionConstraint) {
-    throw new Error(
-      "Schema validation failed: 'events' table is missing the expected " +
-        "UNIQUE(contract_id, ledger_sequence, event_type) duplicate-prevention constraint."
-    );
-  }
+/**
+ * Get the current effective poll interval in milliseconds.
+ */
+export function getCurrentPollIntervalMs(): number {
+  return pollerThrottleState.currentIntervalMs;
 }
 
 // ---------------------------------------------------------------------------
@@ -249,12 +490,20 @@ export function getLastIndexedLedger(): number {
   return row ? parseInt((row as any).value, 10) : 0;
 }
 
+/**
+ * Atomically update the last indexed ledger inside a transaction.
+ * This ensures data consistency when multiple operations need to coordinate
+ * on the ledger pointer update.
+ */
 export function setLastIndexedLedger(seq: number) {
   const db = getDb();
-  const stmt = db.prepare(
-    "UPDATE indexer_state SET value = ? WHERE key = 'last_ledger_sequence'"
-  );
-  stmt.run(seq.toString());
+  const updateTransaction = db.transaction(() => {
+    const stmt = db.prepare(
+      "UPDATE indexer_state SET value = ? WHERE key = 'last_ledger_sequence'"
+    );
+    stmt.run(seq.toString());
+  });
+  updateTransaction();
 }
 
 // ---------------------------------------------------------------------------

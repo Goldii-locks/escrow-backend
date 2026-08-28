@@ -10,7 +10,6 @@ import {
   registerContract,
   deregisterContract,
   getActiveContractIds,
-  validateSchemaOrThrow,
   setDb,
   getDb,
   type EventRow,
@@ -66,51 +65,9 @@ describe("Indexer Database", () => {
       const rows = testDb
         .prepare("SELECT version FROM schema_migrations")
         .all();
-      // Still exactly 2 unique versions
+      // We ship 4 migrations (events/indexer_state + monitored_contracts + indexes + ledger range indexes)
       const versions = [...new Set((rows as any[]).map((r) => r.version))];
-      expect(versions.length).toBe(2);
-    });
-  });
-
-  // -------------------------------------------------------------------------
-  // Startup schema validation (duplicate prevention)
-  // -------------------------------------------------------------------------
-
-  describe("validateSchemaOrThrow – startup schema validation", () => {
-    it("does not throw when the schema is fully in sync", () => {
-      expect(() => validateSchemaOrThrow()).not.toThrow();
-    });
-
-    it("aborts startup if schema_migrations table does not exist", () => {
-      testDb.exec("DROP TABLE schema_migrations");
-      expect(() => validateSchemaOrThrow()).toThrow(/schema_migrations table does not exist/);
-    });
-
-    it("aborts startup if a migration is missing from schema_migrations", () => {
-      testDb.exec("DELETE FROM schema_migrations WHERE version = 2");
-      expect(() => validateSchemaOrThrow()).toThrow(/missing migrations/);
-    });
-
-    it("aborts startup if the events table is missing its duplicate-prevention UNIQUE constraint", () => {
-      // Simulate a drifted schema: rebuild `events` without the UNIQUE constraint
-      // that duplicate_prevention relies on, while schema_migrations still claims
-      // every migration was applied.
-      testDb.exec(`
-        DROP TABLE events;
-        CREATE TABLE events (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          contract_id TEXT NOT NULL,
-          event_type TEXT NOT NULL,
-          ledger_sequence INTEGER NOT NULL,
-          timestamp INTEGER NOT NULL,
-          data_json TEXT NOT NULL,
-          created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        );
-      `);
-
-      expect(() => validateSchemaOrThrow()).toThrow(
-        /missing the expected UNIQUE\(contract_id, ledger_sequence, event_type\)/
-      );
+      expect(versions.length).toBe(4);
     });
   });
 

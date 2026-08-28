@@ -53,10 +53,14 @@ describe("GET /api/jobs/:contractId – response format and status codes", () =>
       .get("/api/jobs/not-a-contract")
       .expect(400);
 
-    expect(res.body).toEqual({
-      success: false,
-      error: "contractId must be a valid Stellar contract address (C...)",
-    });
+    expect(res.body.success).toBe(false);
+    expect(res.body.error).toBe("ValidationError");
+    expect(res.body.details).toEqual([
+      {
+        field: "contractId",
+        message: "contractId must be a valid Stellar contract address (C...)",
+      },
+    ]);
   });
 
   it("returns 401 when API_KEY is configured and the header is missing", async () => {
