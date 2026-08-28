@@ -171,6 +171,72 @@ export function initSchema() {
   runMigrations();
 }
 
+/**
+ * Startup schema validation (duplicate prevention).
+ *
+ * Verifies the database has every migration applied and that the `events`
+ * table still carries the UNIQUE(contract_id, ledger_sequence, event_type)
+ * constraint that duplicate-prevention relies on. Throws if the database
+ * state is out of sync with the expected schema, so callers (e.g.
+ * startPoller()) can let the error abort startup rather than run against a
+ * schema that would silently accept duplicate events.
+ */
+export function validateSchemaOrThrow(): void {
+  const database = getDb();
+
+  const migrationsTableExists = database
+    .prepare(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='schema_migrations'"
+    )
+    .get();
+
+  if (!migrationsTableExists) {
+    throw new Error(
+      "Schema validation failed: schema_migrations table does not exist. " +
+        "Run migrations before starting the service."
+    );
+  }
+
+  const appliedVersions = new Set(
+    (
+      database
+        .prepare("SELECT version FROM schema_migrations")
+        .all() as Array<{ version: number }>
+    ).map((row) => row.version)
+  );
+
+  const missingVersions = MIGRATIONS.map((m) => m.version).filter(
+    (version) => !appliedVersions.has(version)
+  );
+
+  if (missingVersions.length > 0) {
+    throw new Error(
+      `Schema validation failed: missing migrations [${missingVersions.join(
+        ", "
+      )}]. The database state is out of sync with the expected schema.`
+    );
+  }
+
+  const eventsTable = database
+    .prepare(
+      "SELECT sql FROM sqlite_master WHERE type='table' AND name='events'"
+    )
+    .get() as { sql: string } | undefined;
+
+  const hasDuplicatePreventionConstraint =
+    !!eventsTable &&
+    /UNIQUE\s*\(\s*contract_id\s*,\s*ledger_sequence\s*,\s*event_type\s*\)/i.test(
+      eventsTable.sql
+    );
+
+  if (!hasDuplicatePreventionConstraint) {
+    throw new Error(
+      "Schema validation failed: 'events' table is missing the expected " +
+        "UNIQUE(contract_id, ledger_sequence, event_type) duplicate-prevention constraint."
+    );
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Indexer state
 // ---------------------------------------------------------------------------

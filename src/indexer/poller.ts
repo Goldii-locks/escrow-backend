@@ -5,15 +5,37 @@ import {
   insertEventBatch,
   getActiveContractIds,
   registerContract,
+  validateSchemaOrThrow,
   type EventRow,
 } from "./db.js";
 import { deliverWebhooks } from "./webhook-delivery.js";
+import { withRpcBackoff } from "../utils/backoff.js";
 import logger from "../utils/logger.js";
 
 const RPC_URL =
   process.env.SOROBAN_RPC_URL || "https://soroban-testnet.stellar.org";
 const server = new Server(RPC_URL);
 const POLL_INTERVAL_MS = parseInt(process.env.POLL_INTERVAL_MS || "15000", 10);
+
+// Consecutive poll-failure threshold alerting (#duplicate-prevention).
+// If the RPC connection keeps timing out (even after backoff retries exhaust
+// within a single poll), we track how many *poll cycles* in a row have
+// failed and log a threshold warning once operations have stalled for too
+// long, so an operator/alerting pipeline can pick it up.
+const POLL_FAILURE_ALERT_THRESHOLD = parseInt(
+  process.env.POLL_FAILURE_ALERT_THRESHOLD || "5",
+  10
+);
+
+let consecutivePollFailures = 0;
+
+export function getConsecutivePollFailures(): number {
+  return consecutivePollFailures;
+}
+
+export function resetConsecutivePollFailures(): void {
+  consecutivePollFailures = 0;
+}
 
 const EVENT_TYPES = [
   "initialized",
@@ -52,24 +74,36 @@ export async function pollEvents() {
 
   try {
     const lastLedger = getLastIndexedLedger();
-    const currentLedger = (await server.getLatestLedger()).sequence;
-    if (currentLedger <= lastLedger) return;
+
+    // Ledger range tracker: fetch the current chain tip with exponential
+    // backoff so a transient RPC connection timeout doesn't fail the poll.
+    const currentLedger = (
+      await withRpcBackoff(() => server.getLatestLedger())
+    ).sequence;
+    if (currentLedger <= lastLedger) {
+      consecutivePollFailures = 0;
+      return;
+    }
 
     const startLedger = lastLedger + 1;
 
     logger.info("Polling events", { startLedger, currentLedger });
 
-    const events = await server.getEvents({
-      startLedger,
-      filters: [
-        {
-          type: "contract",
-          contractIds,
-          topics: [[...EVENT_TYPES]],
-        },
-      ],
-      limit: 100,
-    });
+    // Duplicate prevention: fetch the events to be deduped/inserted, also
+    // protected by the same exponential backoff on RPC connection timeouts.
+    const events = await withRpcBackoff(() =>
+      server.getEvents({
+        startLedger,
+        filters: [
+          {
+            type: "contract",
+            contractIds,
+            topics: [[...EVENT_TYPES]],
+          },
+        ],
+        limit: 100,
+      })
+    );
 
     // Build the batch to be written atomically (#84)
     const batch: EventRow[] = events.events.map((event) => ({
@@ -88,6 +122,7 @@ export async function pollEvents() {
       eventCount: events.events.length,
       upToLedger: currentLedger,
     });
+    consecutivePollFailures = 0;
 
     deliverWebhooks(startLedger, currentLedger).catch((err) =>
       logger.error("Error delivering webhooks", {
@@ -95,16 +130,31 @@ export async function pollEvents() {
       })
     );
   } catch (err) {
+    consecutivePollFailures++;
     logger.error("Error polling events", {
       error: err instanceof Error ? err.message : String(err),
+      consecutiveFailures: consecutivePollFailures,
     });
+
+    if (consecutivePollFailures >= POLL_FAILURE_ALERT_THRESHOLD) {
+      logger.warn("Indexer poll failure threshold reached", {
+        consecutiveFailures: consecutivePollFailures,
+        threshold: POLL_FAILURE_ALERT_THRESHOLD,
+      });
+    }
   }
 }
 
 let pollerInterval: NodeJS.Timeout | null = null;
 
+/**
+ * Starts the poller. Validates the database schema first (duplicate
+ * prevention's startup guard) and throws if the schema is out of sync,
+ * aborting startup rather than polling against a broken schema.
+ */
 export function startPoller() {
   if (pollerInterval) return;
+  validateSchemaOrThrow();
   logger.info("Starting event indexer poller", { intervalMs: POLL_INTERVAL_MS });
   pollEvents();
   pollerInterval = setInterval(pollEvents, POLL_INTERVAL_MS);
