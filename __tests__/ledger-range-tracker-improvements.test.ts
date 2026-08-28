@@ -27,6 +27,17 @@ import {
   DEFAULT_LEDGER_RANGE_FAILURE_THRESHOLD,
 } from "../src/indexer/ledger-range-tracker.js";
 
+type LoggerCall = [string, Record<string, unknown>?];
+
+/**
+ * winston's Logger overloads type spy.mock.calls as a 1-tuple in some
+ * inference contexts; normalize to the (message, meta) shape the tests
+ * actually rely on.
+ */
+function calls(spy: ReturnType<typeof jest.spyOn>): LoggerCall[] {
+  return spy.mock.calls as unknown as LoggerCall[];
+}
+
 function makeEvent(overrides: Partial<EventRow> = {}): EventRow {
   return {
     contractId: "C1",
@@ -293,7 +304,7 @@ describe("ledger_range_tracker improvements (#296, #297, #298, #299)", () => {
       });
       expect(tracker.failureMonitor.getConsecutiveFailures()).toBe(0);
       expect(
-        warn.mock.calls.filter(([msg]) =>
+        calls(warn).filter(([msg]) =>
           String(msg).includes("consecutive failure threshold reached")
         )
       ).toHaveLength(0);
@@ -325,12 +336,12 @@ describe("ledger_range_tracker improvements (#296, #297, #298, #299)", () => {
 
       expect(tracker.failureMonitor.getConsecutiveFailures()).toBe(2);
       expect(
-        warn.mock.calls.filter(([msg]) =>
+        calls(warn).filter(([msg]) =>
           String(msg).includes("consecutive failure threshold reached")
         )
       ).toHaveLength(0);
       expect(
-        error.mock.calls.filter(([msg]) =>
+        calls(error).filter(([msg]) =>
           String(msg).includes("ledger_range_tracker operation failed")
         ).length
       ).toBe(2);
@@ -352,7 +363,7 @@ describe("ledger_range_tracker improvements (#296, #297, #298, #299)", () => {
       await expect(fail()).rejects.toThrow("timeout");
       await expect(fail()).rejects.toThrow("timeout");
 
-      const alerts = warn.mock.calls.filter(([msg]) =>
+      const alerts = calls(warn).filter(([msg]) =>
         String(msg).includes("consecutive failure threshold reached")
       );
       expect(alerts).toHaveLength(1);
@@ -384,7 +395,7 @@ describe("ledger_range_tracker improvements (#296, #297, #298, #299)", () => {
       await expect(fail()).rejects.toThrow();
       expect(tracker.failureMonitor.getConsecutiveFailures()).toBe(3);
       expect(
-        warn.mock.calls.filter(([msg]) =>
+        calls(warn).filter(([msg]) =>
           String(msg).includes("consecutive failure threshold reached")
         )
       ).toHaveLength(1);
@@ -434,13 +445,13 @@ describe("ledger_range_tracker improvements (#296, #297, #298, #299)", () => {
       await expect(fail()).rejects.toThrow();
       expect(tracker.failureMonitor.getConsecutiveFailures()).toBe(1);
       expect(
-        warn.mock.calls.filter(([msg]) =>
+        calls(warn).filter(([msg]) =>
           String(msg).includes("consecutive failure threshold reached")
         )
       ).toHaveLength(0);
       await expect(fail()).rejects.toThrow();
       expect(
-        warn.mock.calls.filter(([msg]) =>
+        calls(warn).filter(([msg]) =>
           String(msg).includes("consecutive failure threshold reached")
         )
       ).toHaveLength(1);
@@ -479,7 +490,7 @@ describe("ledger_range_tracker improvements (#296, #297, #298, #299)", () => {
         endLedger: 2,
         events: eventsForRange(2, 2, "STALL"),
       });
-      const stallAlerts = warn.mock.calls.filter(([msg]) =>
+      const stallAlerts = calls(warn).filter(([msg]) =>
         String(msg).includes("poller stall threshold reached")
       );
       expect(stallAlerts.length).toBeGreaterThanOrEqual(1);
@@ -652,7 +663,7 @@ describe("ledger_range_tracker improvements (#296, #297, #298, #299)", () => {
         events: eventsForRange(11, 13, "DIAG"),
       });
       expect(result.elapsedMs).toBeGreaterThanOrEqual(0);
-      const polls = debug.mock.calls.filter(
+      const polls = calls(debug).filter(
         ([msg]) => String(msg) === "ledger_range_tracker poll diagnostics"
       );
       expect(polls.length).toBeGreaterThanOrEqual(2);
@@ -688,7 +699,7 @@ describe("ledger_range_tracker improvements (#296, #297, #298, #299)", () => {
           },
         })
       ).rejects.toThrow("diag fail");
-      const failure = debug.mock.calls
+      const failure = calls(debug)
         .filter(([msg]) => String(msg) === "ledger_range_tracker poll diagnostics")
         .filter(([, meta]) => (meta as { status: string }).status === "failure");
       expect(failure.length).toBeGreaterThanOrEqual(1);
@@ -709,7 +720,7 @@ describe("ledger_range_tracker improvements (#296, #297, #298, #299)", () => {
         pageSize: 2,
         fetchEvents: (page) => eventsForRange(page.startLedger, page.endLedger, "PG"),
       });
-      const pages = debug.mock.calls.filter(
+      const pages = calls(debug).filter(
         ([, meta]) => (meta as { operation?: string }).operation === "poll_ledger_page"
       );
       expect(pages).toHaveLength(2);
