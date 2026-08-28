@@ -68,44 +68,52 @@ function mapHealthRow(row: HealthRow): NodeHealthStatus {
 /**
  * Create the health/failover tables when absent and seed the singleton
  * failover_state row. Safe to call repeatedly.
+ *
+ * The entire operation runs inside a transaction so that any failure
+ * mid-initialization triggers a full ROLLBACK and no partial schema state
+ * persists on disk (#186).
  */
 export function initializeNodeHealthTables(): void {
   const db = getDb();
 
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS rpc_node_health (
-      node_url TEXT PRIMARY KEY,
-      is_healthy INTEGER NOT NULL DEFAULT 1,
-      failure_count INTEGER NOT NULL DEFAULT 0,
-      last_failure_at INTEGER,
-      last_success_at INTEGER,
-      next_retry_at INTEGER,
-      backoff_duration_ms INTEGER NOT NULL DEFAULT ${DEFAULT_BACKOFF_MS},
-      consecutive_successes INTEGER NOT NULL DEFAULT 0
-    );
+  const init = db.transaction(() => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS rpc_node_health (
+        node_url TEXT PRIMARY KEY,
+        is_healthy INTEGER NOT NULL DEFAULT 1,
+        failure_count INTEGER NOT NULL DEFAULT 0,
+        last_failure_at INTEGER,
+        last_success_at INTEGER,
+        next_retry_at INTEGER,
+        backoff_duration_ms INTEGER NOT NULL DEFAULT ${DEFAULT_BACKOFF_MS},
+        consecutive_successes INTEGER NOT NULL DEFAULT 0
+      );
 
-    CREATE TABLE IF NOT EXISTS failover_state (
-      id INTEGER PRIMARY KEY CHECK (id = 1),
-      active_node_url TEXT,
-      total_failovers INTEGER NOT NULL DEFAULT 0,
-      last_failover_at INTEGER
-    );
+      CREATE TABLE IF NOT EXISTS failover_state (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        active_node_url TEXT,
+        total_failovers INTEGER NOT NULL DEFAULT 0,
+        last_failover_at INTEGER
+      );
 
-    CREATE TABLE IF NOT EXISTS node_failure_events (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      node_url TEXT NOT NULL,
-      error_message TEXT,
-      retry_count INTEGER NOT NULL DEFAULT 0,
-      recovery_attempt_at INTEGER,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (node_url) REFERENCES rpc_node_health(node_url)
-    );
-  `);
+      CREATE TABLE IF NOT EXISTS node_failure_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        node_url TEXT NOT NULL,
+        error_message TEXT,
+        retry_count INTEGER NOT NULL DEFAULT 0,
+        recovery_attempt_at INTEGER,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (node_url) REFERENCES rpc_node_health(node_url)
+      );
+    `);
 
-  db.prepare(
-    `INSERT OR IGNORE INTO failover_state (id, active_node_url, total_failovers, last_failover_at)
-     VALUES (1, NULL, 0, NULL)`
-  ).run();
+    db.prepare(
+      `INSERT OR IGNORE INTO failover_state (id, active_node_url, total_failovers, last_failover_at)
+       VALUES (1, NULL, 0, NULL)`
+    ).run();
+  });
+
+  init();
 }
 
 /** Insert the node's health row if it is not tracked yet. */

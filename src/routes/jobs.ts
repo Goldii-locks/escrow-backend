@@ -47,6 +47,7 @@ import {
   submitBodySchema,
   partialReleaseBodySchema,
   claimAutoReleaseBodySchema,
+  whitelistUpdateBodySchema,
   byWalletParamsSchema,
   byWalletQuerySchema,
   type ByWalletQuery,
@@ -71,6 +72,20 @@ const inFlightWhitelistRequests = new Map<string, Promise<string[]>>();
 export function resetWhitelistCache(): void {
   whitelistCache.flushAll();
   inFlightWhitelistRequests.clear();
+}
+
+const WHITELIST_UPDATE_TTL = parseInt(
+  process.env.WHITELIST_UPDATE_CACHE_TTL_S || "60",
+  10,
+);
+export const whitelistUpdateCache = new NodeCache({
+  stdTTL: WHITELIST_UPDATE_TTL,
+  useClones: false,
+});
+const inFlightWhitelistUpdateRequests = new Map<string, Promise<string>>();
+export function resetWhitelistUpdateCache(): void {
+  whitelistUpdateCache.flushAll();
+  inFlightWhitelistUpdateRequests.clear();
 }
 
 const CLAIM_AUTO_RELEASE_TTL = parseInt(
@@ -625,6 +640,243 @@ router.get(
         error: message,
       });
       sendError(res, 500, "Internal server error");
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
+// POST /api/jobs/:contractId/whitelist/update – update token whitelist status
+// ---------------------------------------------------------------------------
+router.post(
+  "/:contractId/whitelist/update",
+  jobContractCors,
+  jobContractSecurityHeaders,
+  jobWhitelistRateLimit,
+  validate(contractIdParamsSchema, "params", (req) =>
+    logger.warn("Invalid params for whitelist/update", { params: req.params }),
+  ),
+  validate(whitelistUpdateBodySchema, "body", (req) =>
+    logger.warn("Invalid body for whitelist/update", { body: req.body }),
+  ),
+  async (req: Request, res: Response) => {
+    const contractId = req.params.contractId as string;
+    const { token, action, sourceAddress } = req.body as {
+      token: string;
+      action: "add" | "remove";
+      sourceAddress: string;
+    };
+    const cacheKey = `${contractId}:${action}:${token}:${sourceAddress}`;
+    const traceId = randomUUID();
+    const pathVars = { contractId, token, action, sourceAddress };
+
+    logger.debug("Whitelist update handler entered", {
+      traceId,
+      ...pathVars,
+      params: req.params,
+      bodyKeys: Object.keys(req.body ?? {}),
+    });
+
+    logger.info("Whitelist update request received", {
+      traceId,
+      ...pathVars,
+    });
+
+    try {
+      const requiredApiKey = process.env.API_KEY;
+      if (requiredApiKey) {
+        const providedKey = req.header("x-api-key");
+        if (providedKey !== requiredApiKey) {
+          logger.warn("Unauthorized request", { traceId, ...pathVars });
+          sendError(res, 401, "Unauthorized");
+          return;
+        }
+      }
+
+      logger.debug("Checking whitelist update cache", { traceId, ...pathVars, cacheKey });
+      const cached = whitelistUpdateCache.get<string>(cacheKey);
+      if (cached !== undefined) {
+        logger.info("Whitelist update XDR served from cache", {
+          traceId,
+          ...pathVars,
+          source: "cache",
+          xdrLength: cached.length,
+        });
+        const responseBody = { success: true, xdr: cached };
+        logger.debug("Whitelist update response body prepared", {
+          traceId,
+          ...pathVars,
+          success: responseBody.success,
+          xdrLength: responseBody.xdr.length,
+        });
+        logger.info("Whitelist update response sent", {
+          traceId,
+          ...pathVars,
+          status: 200,
+          success: true,
+          cached: true,
+          xdrLength: cached.length,
+        });
+        res.json(responseBody);
+        return;
+      }
+
+      logger.debug("Checking in-flight whitelist update requests", {
+        traceId,
+        ...pathVars,
+        cacheKey,
+      });
+      const inFlight = inFlightWhitelistUpdateRequests.get(cacheKey);
+      if (inFlight) {
+        const xdr = await inFlight;
+        logger.info("Whitelist update XDR served from in-flight cache", {
+          traceId,
+          ...pathVars,
+          source: "in-flight",
+          xdrLength: xdr.length,
+        });
+        const responseBody = { success: true, xdr };
+        logger.debug("Whitelist update response body prepared", {
+          traceId,
+          ...pathVars,
+          success: responseBody.success,
+          xdrLength: responseBody.xdr.length,
+        });
+        logger.info("Whitelist update response sent", {
+          traceId,
+          ...pathVars,
+          status: 200,
+          success: true,
+          cached: true,
+          inFlight: true,
+          xdrLength: xdr.length,
+        });
+        res.json(responseBody);
+        return;
+      }
+
+      logger.info("Fetching whitelist update XDR from Stellar RPC", {
+        traceId,
+        ...pathVars,
+      });
+
+      const method =
+        action === "add" ? "add_whitelisted_token" : "remove_whitelisted_token";
+
+      const requestPromise = (async (): Promise<string> => {
+        logger.debug("Building Stellar transaction for whitelist update", {
+          traceId,
+          ...pathVars,
+          method,
+          fee: BASE_FEE,
+          timeout: 30,
+        });
+        const contract = new Contract(contractId);
+        logger.debug("Fetching Stellar account", { traceId, ...pathVars });
+        const account = await server.getAccount(sourceAddress);
+        logger.debug("Stellar account fetched", { traceId, ...pathVars });
+
+        const tx = new TransactionBuilder(account, {
+          fee: BASE_FEE,
+          networkPassphrase: NETWORK_PASSPHRASE,
+        })
+          .addOperation(
+            contract.call(
+              method,
+              Address.fromString(sourceAddress).toScVal(),
+              Address.fromString(token).toScVal(),
+            ),
+          )
+          .setTimeout(30)
+          .build();
+
+        logger.debug("Calling prepareTransaction on Stellar RPC", {
+          traceId,
+          ...pathVars,
+        });
+        const prepared = await server.prepareTransaction(tx);
+        const xdr = prepared.toXDR();
+        logger.debug("Storing whitelist update XDR in cache", {
+          traceId,
+          ...pathVars,
+          cacheKey,
+          xdrLength: xdr.length,
+          ttlSeconds: WHITELIST_UPDATE_TTL,
+        });
+        whitelistUpdateCache.set(cacheKey, xdr);
+        return xdr;
+      })();
+
+      inFlightWhitelistUpdateRequests.set(cacheKey, requestPromise);
+      logger.debug("In-flight promise registered", { traceId, ...pathVars, cacheKey });
+      let xdr: string;
+      try {
+        xdr = await requestPromise;
+      } catch (err: any) {
+        logger.debug("RPC promise rejected, clearing cache entry", {
+          traceId,
+          ...pathVars,
+          cacheKey,
+          error: err?.message ?? String(err),
+        });
+        whitelistUpdateCache.del(cacheKey);
+        throw err;
+      } finally {
+        inFlightWhitelistUpdateRequests.delete(cacheKey);
+        logger.debug("In-flight promise unregistered", { traceId, ...pathVars, cacheKey });
+      }
+
+      logger.info("Whitelist update XDR built successfully", {
+        traceId,
+        ...pathVars,
+        xdrLength: xdr.length,
+      });
+      const responseBody = { success: true, xdr };
+      logger.debug("Whitelist update response body prepared", {
+        traceId,
+        ...pathVars,
+        success: responseBody.success,
+        xdrLength: responseBody.xdr.length,
+      });
+      logger.info("Whitelist update response sent", {
+        traceId,
+        ...pathVars,
+        status: 200,
+        success: true,
+        cached: false,
+        xdrLength: xdr.length,
+      });
+
+      res.json(responseBody);
+    } catch (err: any) {
+      const message = err?.message ?? String(err);
+      const stack = err?.stack;
+      logger.debug("Whitelist update error caught", {
+        traceId,
+        ...pathVars,
+        error: message,
+        stack,
+      });
+      logger.error("Failed to build whitelist update tx", {
+        traceId,
+        ...pathVars,
+        error: message,
+        stack,
+      });
+      const responseBody = { success: false, error: "Internal server error" };
+      logger.debug("Whitelist update error response body prepared", {
+        traceId,
+        ...pathVars,
+        success: responseBody.success,
+        clientError: responseBody.error,
+      });
+      logger.info("Whitelist update response sent", {
+        traceId,
+        ...pathVars,
+        status: 500,
+        success: false,
+        error: message,
+      });
+      res.status(500).json(responseBody);
     }
   },
 );
