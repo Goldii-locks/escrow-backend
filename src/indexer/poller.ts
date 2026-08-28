@@ -7,9 +7,12 @@ import {
   registerContract,
   adjustPollerInterval,
   getCurrentPollIntervalMs,
+  assertSchemaValid,
+  verifySchemaUpToDate,
   type EventRow,
 } from "./db.js";
 import { deliverWebhooks } from "./webhook-delivery.js";
+import { withRetry } from "./rpc-poller-client.js";
 import logger from "../utils/logger.js";
 
 const RPC_URL =
@@ -107,11 +110,16 @@ export async function pollEvents(): Promise<boolean> {
     verifySchemaUpToDate();
 
     const lastLedger = getLastIndexedLedger();
-    const currentLedger = (await server.getLatestLedger()).sequence;
+
+    // Ledger range tracker: fetch the current chain tip with exponential
+    // backoff so a transient RPC connection timeout doesn't fail the poll.
+    const currentLedger = (
+      await withRetry(() => server.getLatestLedger(), {}, "getLatestLedger")
+    ).sequence;
     if (currentLedger <= lastLedger) {
       // --- Dynamic throttling: idle cycle (#265) ---
       adjustPollerInterval(0);
-      return;
+      return false;
     }
 
     const startLedger = lastLedger + 1;
@@ -119,17 +127,24 @@ export async function pollEvents(): Promise<boolean> {
     logger.info("Polling events", { startLedger, currentLedger });
 
     const eventsStart = performance.now();
-    const events = await server.getEvents({
-      startLedger,
-      filters: [
-        {
-          type: "contract",
-          contractIds,
-          topics: [[...EVENT_TYPES]],
-        },
-      ],
-      limit: 100,
-    });
+    // Duplicate prevention: fetch the events to be deduped/inserted, also
+    // protected by the same exponential backoff on RPC connection timeouts.
+    const events = await withRetry(
+      () =>
+        server.getEvents({
+          startLedger,
+          filters: [
+            {
+              type: "contract",
+              contractIds,
+              topics: [[...EVENT_TYPES]],
+            },
+          ],
+          limit: 100,
+        }),
+      {},
+      "getEvents"
+    );
     const eventsElapsed = performance.now() - eventsStart;
 
     // --- Diagnostics: payload size and timing (#270) ---
@@ -195,6 +210,8 @@ export async function pollEvents(): Promise<boolean> {
         lastSuccessAt: lastSuccessfulPollAt,
       });
     }
+
+    return false;
   }
 }
 
@@ -208,8 +225,14 @@ async function pollLoop() {
   pollerTimeout = setTimeout(pollLoop, interval);
 }
 
+/**
+ * Starts the poller. Validates the database schema first (duplicate
+ * prevention's startup guard) and throws if the schema is out of sync,
+ * aborting startup rather than silently polling against a broken schema.
+ */
 export function startPoller() {
   if (pollerRunning) return;
+  assertSchemaValid();
   pollerRunning = true;
   logger.info("Starting event indexer poller", {
     intervalMs: getCurrentPollIntervalMs(),
