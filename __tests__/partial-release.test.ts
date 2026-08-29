@@ -114,6 +114,9 @@ describe("POST /api/jobs/:contractId/milestones/:index/partial-release", () => {
           message: "amount must be a positive integer",
         },
       ],
+      fields: {
+        amount: "amount must be a positive integer",
+      },
     });
   });
 
@@ -132,6 +135,9 @@ describe("POST /api/jobs/:contractId/milestones/:index/partial-release", () => {
           message: "amount must be a positive integer",
         },
       ],
+      fields: {
+        amount: "amount must be a positive integer",
+      },
     });
   });
 
@@ -150,6 +156,9 @@ describe("POST /api/jobs/:contractId/milestones/:index/partial-release", () => {
           message: "amount must be a positive integer",
         },
       ],
+      fields: {
+        amount: "amount must be a positive integer",
+      },
     });
   });
 
@@ -168,6 +177,9 @@ describe("POST /api/jobs/:contractId/milestones/:index/partial-release", () => {
           message: "amount must be a positive integer",
         },
       ],
+      fields: {
+        amount: "amount must be a positive integer",
+      },
     });
   });
 
@@ -186,6 +198,9 @@ describe("POST /api/jobs/:contractId/milestones/:index/partial-release", () => {
           message: "sourceAddress is required",
         },
       ],
+      fields: {
+        sourceAddress: "sourceAddress is required",
+      },
     });
   });
 
@@ -204,6 +219,9 @@ describe("POST /api/jobs/:contractId/milestones/:index/partial-release", () => {
           message: "sourceAddress must be a valid Stellar account address (G...)",
         },
       ],
+      fields: {
+        sourceAddress: "sourceAddress must be a valid Stellar account address (G...)",
+      },
     });
   });
 
