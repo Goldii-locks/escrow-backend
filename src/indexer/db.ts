@@ -401,12 +401,6 @@ export function runMigrations(
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       UNIQUE(contract_id, webhook_url)
     );
-
-    CREATE TABLE IF NOT EXISTS webhook_subscriptions (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      url TEXT NOT NULL UNIQUE,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    );
   `);
 
   for (const migration of MIGRATIONS) {
@@ -896,55 +890,6 @@ export function insertEvent(
     return result.changes > 0;
   });
   return tx();
-}
-
-export interface WebhookSubscription {
-  id: number;
-  url: string;
-  created_at: string;
-}
-
-/**
- * Add a global webhook subscription. Runs INSERT + SELECT inside a single
- * transaction so the returned row always reflects what was just committed,
- * even under concurrent writes.
- */
-export function addWebhookSubscription(url: string): WebhookSubscription {
-  const db = getDb();
-  const tx = db.transaction(() => {
-    const result = db
-      .prepare("INSERT INTO webhook_subscriptions (url) VALUES (?)")
-      .run(url);
-    const row = db
-      .prepare(
-        "SELECT id, url, created_at FROM webhook_subscriptions WHERE id = ?"
-      )
-      .get(result.lastInsertRowid);
-    return row as WebhookSubscription;
-  });
-  return tx();
-}
-
-/**
- * Remove a global webhook subscription by URL.
- * Wrapped in a transaction so concurrent writes never leave partial state.
- */
-export function removeWebhookSubscription(url: string): boolean {
-  const db = getDb();
-  const tx = db.transaction(() => {
-    const result = db
-      .prepare("DELETE FROM webhook_subscriptions WHERE url = ?")
-      .run(url);
-    return result.changes > 0;
-  });
-  return tx();
-}
-
-export function getWebhookSubscriptions(): WebhookSubscription[] {
-  const db = getDb();
-  return db
-    .prepare("SELECT id, url, created_at FROM webhook_subscriptions ORDER BY id")
-    .all() as WebhookSubscription[];
 }
 
 export interface EventRow {
