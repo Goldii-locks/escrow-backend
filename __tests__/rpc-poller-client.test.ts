@@ -299,11 +299,7 @@ describe("RpcPollerClient – database transaction isolation", () => {
             return result;
           };
           const tx = testDb.transaction(wrapped);
-          try {
-            return tx();
-          } catch (e) {
-            throw e;
-          }
+          return tx();
         };
         Object.assign(wrappedTx, {
           default: () => wrappedTx(),
@@ -337,11 +333,7 @@ describe("RpcPollerClient – database transaction isolation", () => {
             return result;
           };
           const tx = testDb.transaction(wrapped);
-          try {
-            return tx();
-          } catch (e) {
-            throw e;
-          }
+          return tx();
         };
         Object.assign(wrappedTx, {
           default: () => wrappedTx(),
@@ -381,11 +373,7 @@ describe("RpcPollerClient – database transaction isolation", () => {
             return result;
           };
           const tx = testDb.transaction(wrapped);
-          try {
-            return tx();
-          } catch (e) {
-            throw e;
-          }
+          return tx();
         };
         Object.assign(wrappedTx, {
           default: () => wrappedTx(),

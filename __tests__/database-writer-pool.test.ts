@@ -377,7 +377,7 @@ describe("DatabaseWriterPool – Concurrent Write Operations", () => {
     });
 
     it("flushWriteQueue waits for all pending operations", async () => {
-      let executionOrder: string[] = [];
+      const executionOrder: string[] = [];
 
       const operations = [1, 2, 3].map((num) => ({
         name: `operation-${num}`,
