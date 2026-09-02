@@ -95,6 +95,11 @@ export const contractIdParamsSchema = z.object({
   contractId: contractIdSchema,
 });
 
+/** Route params: /:contractId/whitelist */
+export const whitelistParamsSchema = z.object({
+  contractId: contractIdSchema,
+});
+
 /** Route params: /:contractId/milestones/:index */
 export const contractMilestoneParamsSchema = z.object({
   contractId: contractIdSchema,
@@ -389,6 +394,7 @@ export type WhitelistUpdateRequestBody =
 
 export type ContractIdParams = z.infer<typeof contractIdParamsSchema>;
 export type ContractMilestoneParams = z.infer<typeof contractMilestoneParamsSchema>;
+export type WhitelistParams = z.infer<typeof whitelistParamsSchema>;
 export type BuildTxBody = z.infer<typeof buildTxBodySchema>;
 export type SubmitBody = z.infer<typeof submitBodySchema>;
 export type PartialReleaseBody = z.infer<typeof partialReleaseBodySchema>;

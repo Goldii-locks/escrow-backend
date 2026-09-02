@@ -48,7 +48,8 @@ describe("GET /api/jobs/:contractId/whitelist", () => {
     const res = await request(app).get("/api/jobs/INVALID_ID/whitelist");
     expect(res.status).toBe(400);
     expect(res.body.success).toBe(false);
-    expect(res.body.error).toContain("valid Stellar contract address");
+    expect(res.body.error).toBe("ValidationError");
+    expect(res.body.details[0].message).toMatch(/valid Stellar contract address/i);
   });
 
   it("returns 200 and empty tokens if contract is not initialized", async () => {

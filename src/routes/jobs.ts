@@ -48,6 +48,7 @@ import type { RequestWithValidatedQuery } from "../middleware/validate.js";
 import { createJobDraftValidation } from "../middleware/create-job-draft-validation.js";
 import {
   contractIdParamsSchema,
+  whitelistParamsSchema,
   contractMilestoneParamsSchema,
   // Schema for building transaction requests
   buildTxBodySchema,
@@ -578,7 +579,7 @@ router.get(
     logger.info("Fetching whitelisted tokens", { contractId: req.params.contractId });
     next();
   },
-  validate(contractIdParamsSchema, "params", (req) =>
+  validate(whitelistParamsSchema, "params", (req) =>
     logger.warn("Invalid contractId provided", { contractId: req.params.contractId }),
   ),
   async (req: Request, res: Response) => {

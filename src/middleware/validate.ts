@@ -1,7 +1,5 @@
 import type { NextFunction, Request, Response } from "express";
-import { ZodSchema, ZodError } from "zod";
-import { sendError } from "../utils/api-response.js";
-import { formatValidationError } from "../utils/validation.js";
+import { ZodError, ZodSchema } from "zod";
 
 type Target = "params" | "body" | "query";
 
@@ -56,6 +54,7 @@ export function validate(
     next();
   };
 }
+
 export function validateWithFields(
   schema: ZodSchema,
   target: Target = "params",

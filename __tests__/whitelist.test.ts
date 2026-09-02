@@ -507,6 +507,18 @@ describe("GET /api/jobs/:contractId/whitelist", () => {
       expect(res.body.details[0].field).toBe("contractId");
     });
 
+    it("returns 400 for a contractId with an invalid Stellar checksum", async () => {
+      const invalidChecksum = VALID_CONTRACT.slice(0, -1) + "A";
+      const res = await request(buildApp())
+        .get(`/api/jobs/${invalidChecksum}/whitelist`)
+        .expect(400);
+
+      expect(res.body.success).toBe(false);
+      expect(res.body.error).toBe("ValidationError");
+      expect(res.body.details[0].field).toBe("contractId");
+      expect(res.body.details[0].message).toMatch(/valid Stellar contract address/i);
+    });
+
     it("returns 400 for an empty-looking contractId segment", async () => {
       const res = await request(buildApp())
         .get("/api/jobs/INVALID/whitelist")
@@ -540,6 +552,8 @@ describe("GET /api/jobs/:contractId/whitelist", () => {
 
       expect(typeof res.body.error).toBe("string");
       expect(res.body.error.length).toBeGreaterThan(0);
+      expect(typeof res.body.message).toBe("string");
+      expect(res.body.message.length).toBeGreaterThan(0);
     });
 
     it("error details carry the field name for easy client-side parsing", async () => {
