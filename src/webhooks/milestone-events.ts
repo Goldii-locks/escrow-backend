@@ -7,6 +7,11 @@ const MILESTONE_EVENT_STATUS: Record<string, string> = {
 
 export const MILESTONE_WEBHOOK_EVENT_TYPES = Object.keys(MILESTONE_EVENT_STATUS);
 
+/** `Object.hasOwn` equivalent that does not require the ES2022 lib target. */
+function hasOwn(target: object, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(target, key);
+}
+
 export interface MilestoneWebhookPayload {
   contractId: string;
   milestoneIndex: number;
@@ -15,11 +20,16 @@ export interface MilestoneWebhookPayload {
 }
 
 export function isMilestoneWebhookEvent(eventType: string): boolean {
-  return eventType in MILESTONE_EVENT_STATUS;
+  // An own-property check, not `in`: `in` walks the prototype chain, so an
+  // event named "toString", "constructor" or "valueOf" would pass this guard
+  // and then map to the inherited function rather than a status string.
+  return hasOwn(MILESTONE_EVENT_STATUS, eventType);
 }
 
-export function mapEventTypeToStatus(eventType: string): string {
-  return MILESTONE_EVENT_STATUS[eventType];
+export function mapEventTypeToStatus(eventType: string): string | undefined {
+  return hasOwn(MILESTONE_EVENT_STATUS, eventType)
+    ? MILESTONE_EVENT_STATUS[eventType]
+    : undefined;
 }
 
 export function parseMilestoneIndex(data: unknown): number | null {
@@ -72,10 +82,15 @@ export function buildMilestoneWebhookPayload(
     return null;
   }
 
+  const newStatus = mapEventTypeToStatus(eventType);
+  if (newStatus === undefined) {
+    return null;
+  }
+
   return {
     contractId,
     milestoneIndex,
-    newStatus: mapEventTypeToStatus(eventType),
+    newStatus,
     txHash,
   };
 }
