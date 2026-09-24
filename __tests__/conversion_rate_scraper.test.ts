@@ -131,6 +131,23 @@ describe("conversion_rate_scraper overflow and error structure validation", () =
       }
     });
 
+    it("enforces validation precedence: missing parameter takes precedence over order check", () => {
+      // Input has only 'rate', missing 'notional' for expected order [notional, rate]
+      const missingParamOrderedBody = {
+        code: "ORDERED_CALC_ERROR",
+        parameters: {
+          rate: "5", // Missing 'notional'
+        },
+      };
+
+      const result = validateErrorStructure(missingParamOrderedBody, sampleDefinitions);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.code).toBe(ERROR_CODES.MISSING_PARAMETER);
+        expect(result.details?.missingParams).toContain("notional");
+      }
+    });
+
     it("3. detects unexpected extra parameters and returns EXTRA_PARAMETER", () => {
       const extraParamBody = {
         code: "RATE_UNAVAILABLE",
@@ -169,7 +186,7 @@ describe("conversion_rate_scraper overflow and error structure validation", () =
     });
 
     it("5. detects genuine parameter order mismatches and returns INVALID_PARAMETER_ORDER", () => {
-      // Test out-of-order object keys for an ordered definition
+      // Complete parameter set provided out of order
       const outOfOrderKeysBody = {
         code: "ORDERED_CALC_ERROR",
         parameters: {
