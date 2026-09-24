@@ -12,11 +12,11 @@ export const ERROR_CODES = {
   EXCESSIVE_DIGITS: "OVERFLOW_EXCESSIVE_DIGITS",
   INVALID_RATE: "OVERFLOW_INVALID_RATE",
   PRODUCT_OVERFLOW: "OVERFLOW_PRODUCT_EXCEEDED",
-  MISSING_PARAMETER: "PARAM_MISSING_PARAMETER",
-  EXTRA_PARAMETER: "PARAM_EXTRA_PARAMETER",
-  INVALID_PARAMETER_TYPE: "PARAM_INVALID_TYPE",
-  INVALID_PARAMETER_ORDER: "PARAM_INVALID_ORDER",
-  UNKNOWN_ERROR_DEFINITION: "PARAM_UNKNOWN_ERROR_DEFINITION",
+  MISSING_PARAMETER: "MISSING_PARAMETER",
+  EXTRA_PARAMETER: "EXTRA_PARAMETER",
+  INVALID_PARAMETER_TYPE: "INVALID_PARAMETER_TYPE",
+  INVALID_PARAMETER_ORDER: "INVALID_PARAMETER_ORDER",
+  UNKNOWN_ERROR_DEFINITION: "UNKNOWN_ERROR_DEFINITION",
   CALCULATION_EXCEPTION: "CALCULATION_EXCEPTION",
   PARAM_STRUCTURE_MISMATCH: "PARAM_STRUCTURE_MISMATCH",
 } as const;
@@ -254,72 +254,119 @@ export function validateErrorStructure(
   }
 
   if (expectedDef.ordered) {
-    if (!Array.isArray(rawParams)) {
-      return {
-        ok: false,
-        error: `Expected parameters array in order for error '${targetCode}'`,
-        code: ERROR_CODES.INVALID_PARAMETER_ORDER,
-        details: { expectedDefinition: expectedDef, providedParams: rawParams },
-      };
-    }
+    const expectedNames = expectedDef.parameters.map((p) => p.name);
 
-    const paramArray = rawParams as unknown[];
-    const expectedParams = expectedDef.parameters;
+    if (Array.isArray(rawParams)) {
+      const paramArray = rawParams as unknown[];
 
-    const requiredParams = expectedParams.filter((p) => p.required !== false);
-    if (paramArray.length < requiredParams.length) {
-      const missingNames = expectedParams
-        .slice(paramArray.length)
-        .filter((p) => p.required !== false)
-        .map((p) => p.name);
-      return {
-        ok: false,
-        error: `Missing required ordered parameters for error '${targetCode}': ${missingNames.join(", ")}`,
-        code: ERROR_CODES.MISSING_PARAMETER,
-        details: { expectedDefinition: expectedDef, providedParams: rawParams, missingParams: missingNames },
-      };
-    }
+      const hasNameProps =
+        paramArray.length > 0 &&
+        paramArray.every(
+          (item) => typeof item === "object" && item !== null && "name" in item
+        );
 
-    if (paramArray.length > expectedParams.length) {
-      return {
-        ok: false,
-        error: `Received ${paramArray.length} parameters, expected max ${expectedParams.length} for error '${targetCode}'`,
-        code: ERROR_CODES.EXTRA_PARAMETER,
-        details: { expectedDefinition: expectedDef, providedParams: rawParams },
-      };
-    }
-
-    const validatedParams: Record<string, unknown> = {};
-    const typeMismatches: Array<{ param: string; expected: string; actual: string }> = [];
-
-    for (let i = 0; i < paramArray.length; i++) {
-      const expectedP = expectedParams[i];
-      const actualVal = paramArray[i];
-
-      if (!checkType(actualVal, expectedP.type)) {
-        typeMismatches.push({
-          param: expectedP.name,
-          expected: expectedP.type,
-          actual: getActualType(actualVal),
-        });
+      if (hasNameProps) {
+        const actualNames = (paramArray as Array<{ name: string; value?: unknown }>).map(
+          (item) => item.name
+        );
+        for (let i = 0; i < actualNames.length; i++) {
+          if (i < expectedNames.length && actualNames[i] !== expectedNames[i]) {
+            return {
+              ok: false,
+              error: `Parameter order mismatch for error '${targetCode}': expected order [${expectedNames.join(
+                ", "
+              )}], received [${actualNames.join(", ")}]`,
+              code: ERROR_CODES.INVALID_PARAMETER_ORDER,
+              details: { expectedDefinition: expectedDef, providedParams: rawParams },
+            };
+          }
+        }
       }
-      validatedParams[expectedP.name] = actualVal;
-    }
 
-    if (typeMismatches.length > 0) {
+      const requiredParams = expectedDef.parameters.filter((p) => p.required !== false);
+      if (paramArray.length < requiredParams.length) {
+        const missingNames = expectedNames
+          .slice(paramArray.length)
+          .filter((_, idx) => expectedDef.parameters[paramArray.length + idx]?.required !== false);
+        return {
+          ok: false,
+          error: `Missing required ordered parameters for error '${targetCode}': ${missingNames.join(", ")}`,
+          code: ERROR_CODES.MISSING_PARAMETER,
+          details: { expectedDefinition: expectedDef, providedParams: rawParams, missingParams: missingNames },
+        };
+      }
+
+      if (paramArray.length > expectedDef.parameters.length) {
+        return {
+          ok: false,
+          error: `Received ${paramArray.length} parameters, expected max ${expectedDef.parameters.length} for error '${targetCode}'`,
+          code: ERROR_CODES.EXTRA_PARAMETER,
+          details: { expectedDefinition: expectedDef, providedParams: rawParams },
+        };
+      }
+
+      const validatedParams: Record<string, unknown> = {};
+      const typeMismatches: Array<{ param: string; expected: string; actual: string }> = [];
+
+      for (let i = 0; i < paramArray.length; i++) {
+        const expectedP = expectedDef.parameters[i];
+        const rawVal = paramArray[i];
+        const actualVal =
+          typeof rawVal === "object" && rawVal !== null && "value" in rawVal
+            ? (rawVal as { value: unknown }).value
+            : rawVal;
+
+        if (!checkType(actualVal, expectedP.type)) {
+          typeMismatches.push({
+            param: expectedP.name,
+            expected: expectedP.type,
+            actual: getActualType(actualVal),
+          });
+        }
+        validatedParams[expectedP.name] = actualVal;
+      }
+
+      if (typeMismatches.length > 0) {
+        return {
+          ok: false,
+          error: `Parameter type mismatch in ordered parameters for '${targetCode}': ${typeMismatches
+            .map((m) => `${m.param} (expected ${m.expected}, got ${m.actual})`)
+            .join("; ")}`,
+          code: ERROR_CODES.INVALID_PARAMETER_TYPE,
+          details: { expectedDefinition: expectedDef, providedParams: rawParams, typeMismatches },
+        };
+      }
+
+      return {
+        ok: true,
+        code: targetCode,
+        validatedParams,
+      };
+    } else if (typeof rawParams === "object" && rawParams !== null) {
+      const actualKeys = Object.keys(rawParams as Record<string, unknown>);
+      const matchingKeys = actualKeys.filter((k) => expectedNames.includes(k));
+
+      for (let i = 0; i < matchingKeys.length; i++) {
+        const expectedIndex = expectedNames.indexOf(matchingKeys[i]);
+        if (expectedIndex !== i) {
+          return {
+            ok: false,
+            error: `Parameter order mismatch for error '${targetCode}': expected order [${expectedNames.join(
+              ", "
+            )}], received key order [${matchingKeys.join(", ")}]`,
+            code: ERROR_CODES.INVALID_PARAMETER_ORDER,
+            details: { expectedDefinition: expectedDef, providedParams: rawParams },
+          };
+        }
+      }
+    } else {
       return {
         ok: false,
-        error: `Parameter type mismatch in ordered parameters for '${targetCode}': ${typeMismatches.map((m) => `${m.param} (expected ${m.expected}, got ${m.actual})`).join("; ")}`,
-        code: ERROR_CODES.INVALID_PARAMETER_TYPE,
-        details: { expectedDefinition: expectedDef, providedParams: rawParams, typeMismatches },
+        error: `Parameters for error '${targetCode}' must be an object or array`,
+        code: ERROR_CODES.PARAM_STRUCTURE_MISMATCH,
+        details: { expectedDefinition: expectedDef, providedParams: rawParams },
       };
     }
-
-    return {
-      ok: true,
-      code: targetCode,
-      validatedParams,
-    };
   }
 
   if (typeof rawParams !== "object" || rawParams === null || Array.isArray(rawParams)) {
@@ -387,7 +434,9 @@ export function validateErrorStructure(
   if (typeMismatches.length > 0) {
     return {
       ok: false,
-      error: `Parameter type mismatch for error '${targetCode}': ${typeMismatches.map((m) => `${m.param} (expected ${m.expected}, got ${m.actual})`).join("; ")}`,
+      error: `Parameter type mismatch for error '${targetCode}': ${typeMismatches
+        .map((m) => `${m.param} (expected ${m.expected}, got ${m.actual})`)
+        .join("; ")}`,
       code: ERROR_CODES.INVALID_PARAMETER_TYPE,
       details: { expectedDefinition: expectedDef, providedParams: paramObj, typeMismatches },
     };

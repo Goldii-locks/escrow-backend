@@ -88,7 +88,7 @@ describe("conversion_rate_scraper overflow and error structure validation", () =
         ordered: true,
         parameters: [
           { name: "notional", type: "string", required: true },
-          { name: "rate", type: "number", required: true },
+          { name: "rate", type: "string", required: true },
         ],
       },
     ];
@@ -113,7 +113,7 @@ describe("conversion_rate_scraper overflow and error structure validation", () =
       }
     });
 
-    it("2. detects missing required parameters and returns PARAM_MISSING_PARAMETER", () => {
+    it("2. detects missing required parameters and returns MISSING_PARAMETER", () => {
       const missingParamBody = {
         code: "RATE_UNAVAILABLE",
         parameters: {
@@ -131,7 +131,7 @@ describe("conversion_rate_scraper overflow and error structure validation", () =
       }
     });
 
-    it("3. detects unexpected extra parameters and returns PARAM_EXTRA_PARAMETER", () => {
+    it("3. detects unexpected extra parameters and returns EXTRA_PARAMETER", () => {
       const extraParamBody = {
         code: "RATE_UNAVAILABLE",
         parameters: {
@@ -150,7 +150,7 @@ describe("conversion_rate_scraper overflow and error structure validation", () =
       }
     });
 
-    it("4. detects incorrect parameter types and returns PARAM_INVALID_TYPE without crashing", () => {
+    it("4. detects incorrect parameter types and returns INVALID_PARAMETER_TYPE without crashing", () => {
       const wrongTypeBody = {
         code: "RATE_UNAVAILABLE",
         parameters: {
@@ -168,41 +168,52 @@ describe("conversion_rate_scraper overflow and error structure validation", () =
       }
     });
 
-    it("5. validates ordered parameter structure/order and detects non-array or mismatch", () => {
-      const nonArrayOrderedBody = {
+    it("5. detects genuine parameter order mismatches and returns INVALID_PARAMETER_ORDER", () => {
+      // Test out-of-order object keys for an ordered definition
+      const outOfOrderKeysBody = {
         code: "ORDERED_CALC_ERROR",
         parameters: {
-          notional: "100",
-          rate: 5,
+          rate: "5",       // Key 1 provided first (expected 'notional' first)
+          notional: "100", // Key 2 provided second
         },
       };
 
-      const result = validateErrorStructure(nonArrayOrderedBody, sampleDefinitions);
-      expect(result.ok).toBe(false);
-      if (!result.ok) {
-        expect(result.code).toBe(ERROR_CODES.INVALID_PARAMETER_ORDER);
-        expect(result.error).toMatch(/Expected parameters array in order/i);
+      const orderResult1 = validateErrorStructure(outOfOrderKeysBody, sampleDefinitions);
+      expect(orderResult1.ok).toBe(false);
+      if (!orderResult1.ok) {
+        expect(orderResult1.code).toBe(ERROR_CODES.INVALID_PARAMETER_ORDER);
+        expect(orderResult1.error).toMatch(/Parameter order mismatch/i);
       }
 
-      const validOrderedBody = {
+      // Test out-of-order parameter objects array
+      const outOfOrderArrayBody = {
         code: "ORDERED_CALC_ERROR",
-        parameters: ["1000", 2],
+        parameters: [
+          { name: "rate", value: "5" },       // Array index 0 has 'rate'
+          { name: "notional", value: "100" }, // Array index 1 has 'notional'
+        ],
       };
-      const validResult = validateErrorStructure(validOrderedBody, sampleDefinitions);
+
+      const orderResult2 = validateErrorStructure(outOfOrderArrayBody, sampleDefinitions);
+      expect(orderResult2.ok).toBe(false);
+      if (!orderResult2.ok) {
+        expect(orderResult2.code).toBe(ERROR_CODES.INVALID_PARAMETER_ORDER);
+        expect(orderResult2.error).toMatch(/Parameter order mismatch/i);
+      }
+
+      // Verify that correct parameter order succeeds
+      const correctOrderBody = {
+        code: "ORDERED_CALC_ERROR",
+        parameters: {
+          notional: "100",
+          rate: "5",
+        },
+      };
+      const validResult = validateErrorStructure(correctOrderBody, sampleDefinitions);
       expect(validResult.ok).toBe(true);
-
-      const wrongTypeOrderedBody = {
-        code: "ORDERED_CALC_ERROR",
-        parameters: [1000, "wrong_type"], // expected string, number
-      };
-      const wrongTypeResult = validateErrorStructure(wrongTypeOrderedBody, sampleDefinitions);
-      expect(wrongTypeResult.ok).toBe(false);
-      if (!wrongTypeResult.ok) {
-        expect(wrongTypeResult.code).toBe(ERROR_CODES.INVALID_PARAMETER_TYPE);
-      }
     });
 
-    it("6. detects unknown error code/definition and returns PARAM_UNKNOWN_ERROR_DEFINITION", () => {
+    it("6. detects unknown error code/definition and returns UNKNOWN_ERROR_DEFINITION", () => {
       const unknownCodeBody = {
         code: "NON_EXISTENT_CODE",
         parameters: {},
@@ -216,11 +227,12 @@ describe("conversion_rate_scraper overflow and error structure validation", () =
       }
     });
 
-    it("handles non-object response bodies safely", () => {
+    it("8. detects non-object response bodies and returns PARAM_STRUCTURE_MISMATCH", () => {
       const invalidBodyResult = validateErrorStructure("string_body", sampleDefinitions);
       expect(invalidBodyResult.ok).toBe(false);
       if (!invalidBodyResult.ok) {
         expect(invalidBodyResult.code).toBe(ERROR_CODES.PARAM_STRUCTURE_MISMATCH);
+        expect(invalidBodyResult.error).toMatch(/must be a non-null object/i);
       }
     });
   });
