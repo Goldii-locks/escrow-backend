@@ -14,6 +14,26 @@ import logger from "./utils/logger.js";
 
 dotenv.config();
 
+// Fail fast in production rather than booting into a silently insecure or
+// misdirected state. Without this the server starts happily and passes
+// /health while serving job endpoints unauthenticated (API_KEY unset),
+// rejecting the real frontend origin (ALLOWED_ORIGINS defaulting to
+// localhost:3000), or indexing nothing against testnet (CONTRACT_ID unset).
+if (process.env.NODE_ENV === "production") {
+  const required = [
+    "API_KEY",
+    "ADMIN_API_KEY",
+    "ALLOWED_ORIGINS",
+    "CONTRACT_ID",
+  ] as const;
+  const missing = required.filter((key) => !process.env[key]);
+  if (missing.length > 0) {
+    throw new Error(
+      `Missing required production environment variables: ${missing.join(", ")}`,
+    );
+  }
+}
+
 // Initialize Express backend for Milesto Escrow Platform
 const app = express();
 const PORT = process.env.PORT || 3001;

@@ -1,4 +1,5 @@
 import { getDb, getSubscriptions, EventDbRow } from "./db.js";
+import { readLedgerRange } from "./ledger-range-tracker.js";
 import logger from "../utils/logger.js";
 
 const MAX_RETRIES = 3;
@@ -98,13 +99,9 @@ export async function deliverWebhooks(
   const subscriptions = getSubscriptions();
   if (subscriptions.length === 0) return [];
 
-  const events = db
-    .prepare(
-      `SELECT * FROM events
-       WHERE ledger_sequence >= ? AND ledger_sequence <= ?
-       ORDER BY ledger_sequence ASC`
-    )
-    .all(startLedger, endLedger) as EventDbRow[];
+  // Read events within the ledger range inside a transaction
+  // to ensure consistent snapshot even under concurrent ledger updates
+  const events = readLedgerRange(startLedger, endLedger) as EventDbRow[];
 
   if (events.length === 0) return [];
 

@@ -20,6 +20,9 @@ const VALID_BODY = {
 };
 
 const { default: router } = await import("../src/routes/jobs.js");
+const { resetCreateJobDraftRateLimitBuckets } = await import(
+  "../src/middleware/job-contract-rate-limit.js"
+);
 
 function buildApp() {
   const app = express();
@@ -29,6 +32,10 @@ function buildApp() {
 }
 
 describe("POST /api/jobs/create-job-draft – schema validation", () => {
+  beforeEach(() => {
+    resetCreateJobDraftRateLimitBuckets();
+  });
+
   it("returns 200 with a draft payload for a valid body", async () => {
     const res = await request(buildApp())
       .post("/api/jobs/create-job-draft")
@@ -56,7 +63,8 @@ describe("POST /api/jobs/create-job-draft – schema validation", () => {
       .expect(400);
 
     expect(res.body.success).toBe(false);
-    expect(res.body.error).toMatch(/freelancer/i);
+    expect(res.body.error).toBe("ValidationError");
+    expect(res.body.details[0].message).toMatch(/freelancer/i);
   });
 
   it("returns 400 when milestones is not an array", async () => {
@@ -66,7 +74,8 @@ describe("POST /api/jobs/create-job-draft – schema validation", () => {
       .expect(400);
 
     expect(res.body.success).toBe(false);
-    expect(res.body.error).toMatch(/milestones/i);
+    expect(res.body.error).toBe("ValidationError");
+    expect(res.body.details[0].message).toMatch(/milestones/i);
   });
 
   it("returns 400 when milestones is an empty array", async () => {
@@ -76,7 +85,8 @@ describe("POST /api/jobs/create-job-draft – schema validation", () => {
       .expect(400);
 
     expect(res.body.success).toBe(false);
-    expect(res.body.error).toMatch(/milestones/i);
+    expect(res.body.error).toBe("ValidationError");
+    expect(res.body.details[0].message).toMatch(/milestones/i);
   });
 
   it("returns 400 when autoReleaseDays has an invalid type", async () => {
@@ -86,7 +96,8 @@ describe("POST /api/jobs/create-job-draft – schema validation", () => {
       .expect(400);
 
     expect(res.body.success).toBe(false);
-    expect(res.body.error).toMatch(/autoReleaseDays/i);
+    expect(res.body.error).toBe("ValidationError");
+    expect(res.body.details[0].message).toMatch(/autoReleaseDays/i);
   });
 
   it("returns 400 when autoReleaseDays is out of range", async () => {
@@ -96,7 +107,8 @@ describe("POST /api/jobs/create-job-draft – schema validation", () => {
       .expect(400);
 
     expect(res.body.success).toBe(false);
-    expect(res.body.error).toMatch(/autoReleaseDays/i);
+    expect(res.body.error).toBe("ValidationError");
+    expect(res.body.details[0].message).toMatch(/autoReleaseDays/i);
   });
 
   it("returns 400 when milestone amount is not a positive integer", async () => {
@@ -106,22 +118,27 @@ describe("POST /api/jobs/create-job-draft – schema validation", () => {
       .expect(400);
 
     expect(res.body.success).toBe(false);
-    expect(res.body.error).toMatch(/amount/i);
+    expect(res.body.error).toBe("ValidationError");
+    expect(res.body.details[0].message).toMatch(/amount/i);
   });
 
-  it("error body has exactly {success, error} keys on schema failure", async () => {
+  it("error body has ValidationError format on schema failure", async () => {
     const res = await request(buildApp())
       .post("/api/jobs/create-job-draft")
       .send({})
       .expect(400);
 
-    expect(Object.keys(res.body)).toEqual(["success", "error"]);
     expect(res.body.success).toBe(false);
-    expect(typeof res.body.error).toBe("string");
+    expect(res.body.error).toBe("ValidationError");
+    expect(Array.isArray(res.body.details)).toBe(true);
   });
 });
 
 describe("POST /api/jobs/create-job-draft – Stellar address validation", () => {
+  beforeEach(() => {
+    resetCreateJobDraftRateLimitBuckets();
+  });
+
   it("returns 400 for an invalid freelancer address", async () => {
     const res = await request(buildApp())
       .post("/api/jobs/create-job-draft")
@@ -129,8 +146,9 @@ describe("POST /api/jobs/create-job-draft – Stellar address validation", () =>
       .expect(400);
 
     expect(res.body.success).toBe(false);
-    expect(res.body.error).toMatch(/freelancer/i);
-    expect(res.body.error).toMatch(/valid Stellar account address/i);
+    expect(res.body.error).toBe("ValidationError");
+    expect(res.body.details[0].message).toMatch(/freelancer/i);
+    expect(res.body.details[0].message).toMatch(/valid Stellar account address/i);
   });
 
   it("returns 400 for an invalid arbiter address", async () => {
@@ -140,8 +158,9 @@ describe("POST /api/jobs/create-job-draft – Stellar address validation", () =>
       .expect(400);
 
     expect(res.body.success).toBe(false);
-    expect(res.body.error).toMatch(/arbiter/i);
-    expect(res.body.error).toMatch(/valid Stellar account address/i);
+    expect(res.body.error).toBe("ValidationError");
+    expect(res.body.details[0].message).toMatch(/arbiter/i);
+    expect(res.body.details[0].message).toMatch(/valid Stellar account address/i);
   });
 
   it("returns 400 when freelancer is a contract address (C…)", async () => {
@@ -151,7 +170,8 @@ describe("POST /api/jobs/create-job-draft – Stellar address validation", () =>
       .expect(400);
 
     expect(res.body.success).toBe(false);
-    expect(res.body.error).toMatch(/freelancer/i);
+    expect(res.body.error).toBe("ValidationError");
+    expect(res.body.details[0].message).toMatch(/freelancer/i);
   });
 
   it("returns 400 for an invalid token contract address", async () => {
@@ -161,8 +181,9 @@ describe("POST /api/jobs/create-job-draft – Stellar address validation", () =>
       .expect(400);
 
     expect(res.body.success).toBe(false);
-    expect(res.body.error).toMatch(/token/i);
-    expect(res.body.error).toMatch(/valid Stellar contract address/i);
+    expect(res.body.error).toBe("ValidationError");
+    expect(res.body.details[0].message).toMatch(/token/i);
+    expect(res.body.details[0].message).toMatch(/valid Stellar contract address/i);
   });
 
   it("returns 400 for an invalid optional client address", async () => {
@@ -172,7 +193,8 @@ describe("POST /api/jobs/create-job-draft – Stellar address validation", () =>
       .expect(400);
 
     expect(res.body.success).toBe(false);
-    expect(res.body.error).toMatch(/client/i);
+    expect(res.body.error).toBe("ValidationError");
+    expect(res.body.details[0].message).toMatch(/client/i);
   });
 
   it("accepts a body without client when other addresses are valid", async () => {
@@ -188,6 +210,10 @@ describe("POST /api/jobs/create-job-draft – Stellar address validation", () =>
 });
 
 describe("POST /api/jobs/create-job-draft – CORS and security headers", () => {
+  beforeEach(() => {
+    resetCreateJobDraftRateLimitBuckets();
+  });
+
   const originalAllowedOrigins = process.env.ALLOWED_ORIGINS;
 
   beforeEach(() => {

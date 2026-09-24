@@ -1,0 +1,73 @@
+# /opt/escrow/docker-compose.yml
+#
+# Revised against recon: backend is Express on 3001 with a /health endpoint
+# and a SQLite database at /app/data that MUST persist.
+
+services:
+  backend:
+    image: ${ECR_REGISTRY}/escrow-backend:${BACKEND_TAG:-latest}
+    restart: unless-stopped
+    env_file:
+      - ./backend.env           # chmod 600 — see DECISIONS.md for required keys
+    expose:
+      - "3001"                  # internal only, never published to the host
+    volumes:
+      # The indexer's SQLite DB lives here. Without this, every container
+      # replacement wipes monitored_contracts and the poller re-indexes
+      # from ledger zero. The host dir must be owned by uid 1001.
+      - /opt/escrow/data:/app/data
+    networks:
+      - escrow
+    healthcheck:
+      # GET /health is registered before the rate limiter, so frequent
+      # probing won't trip it. Note it's liveness only — it returns ok
+      # even if SQLite is broken or the poller has died.
+      #
+      # Probe with node, not wget: node:20-bookworm-slim ships neither wget
+      # nor curl, so a wget probe exits 127 (command not found) and Compose
+      # reports the container unhealthy however healthy the app is. This
+      # healthcheck also overrides the image's own HEALTHCHECK, so fixing
+      # the Dockerfile alone would not have changed the reported status.
+      test: ["CMD", "node", "-e",
+        "fetch('http://127.0.0.1:3001/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          memory: 512M          # runtime tree is ~72M; 512M is generous
+
+  frontend:
+    image: ${ECR_REGISTRY}/escrow-frontend:${FRONTEND_TAG:-latest}
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      backend:
+        condition: service_started   # not service_healthy — nginx should
+                                     # still serve pages when the API is down
+    networks:
+      - escrow
+    volumes:
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          memory: 128M          # static export + nginx; tiny
+
+networks:
+  escrow:
+    driver: bridge

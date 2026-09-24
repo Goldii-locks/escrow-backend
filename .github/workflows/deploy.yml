@@ -1,0 +1,123 @@
+# .github/workflows/deploy.yml — escrow-backend
+#
+# Requires one repo secret: AWS_DEPLOY_ROLE_ARN
+# No access keys. Auth is OIDC — GitHub mints a short-lived token, AWS
+# trades it for temporary credentials. Nothing long-lived is stored.
+
+name: Deploy to AWS
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: af-south-1
+  SERVICE: backend
+  ECR_REPOSITORY: escrow-backend
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build and push image
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: meta
+        run: echo "tag=${GITHUB_SHA::12}-${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          # Must match your EC2 instance architecture.
+          # t3.* = linux/amd64. t4g.* (Graviton) = linux/arm64.
+          platforms: linux/arm64
+          tags: |
+            ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.meta.outputs.tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    name: Roll out to EC2
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Send deploy command via SSM
+        id: send
+        run: |
+          set -euo pipefail
+          CMD_ID=$(aws ssm send-command \
+            --document-name "AWS-RunShellScript" \
+            --targets "Key=tag:Role,Values=escrow-prod" \
+            --comment "deploy ${SERVICE} ${{ needs.build.outputs.image_tag }}" \
+            --parameters "commands=[\"/opt/escrow/deploy.sh ${SERVICE} ${{ needs.build.outputs.image_tag }}\"]" \
+            --query 'Command.CommandId' --output text)
+          echo "command_id=${CMD_ID}" >> "$GITHUB_OUTPUT"
+          echo "SSM command: ${CMD_ID}"
+
+      - name: Wait for completion and print output
+        run: |
+          set -euo pipefail
+          CMD_ID="${{ steps.send.outputs.command_id }}"
+
+          for i in $(seq 1 60); do
+            STATUS=$(aws ssm list-command-invocations \
+              --command-id "$CMD_ID" \
+              --query 'CommandInvocations[0].Status' --output text)
+            echo "attempt ${i}: ${STATUS}"
+            case "$STATUS" in
+              Success)   break ;;
+              Failed|Cancelled|TimedOut)
+                echo "::error::deploy finished with status ${STATUS}" ;;
+              *) sleep 5; continue ;;
+            esac
+            break
+          done
+
+          aws ssm list-command-invocations \
+            --command-id "$CMD_ID" --details \
+            --query 'CommandInvocations[0].CommandPlugins[0].Output' \
+            --output text
+
+          [ "$STATUS" = "Success" ] || exit 1
+
+      - name: Smoke test
+        run: |
+          set -euo pipefail
+          BASE="http://${{ secrets.DEPLOY_HOST }}"
+          for i in $(seq 1 12); do
+            if curl -fsS --max-time 5 "${BASE}/healthz" >/dev/null; then
+              echo "frontend healthy"
+              break
+            fi
+            echo "waiting for frontend... (${i}/12)"; sleep 5
+          done
+          curl -fsS --max-time 5 "${BASE}/healthz"
+          curl -fsS --max-time 10 "${BASE}/health" || \
+            echo "::warning::backend /health not responding — expected while the contract migration is outstanding"

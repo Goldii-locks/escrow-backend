@@ -1,6 +1,8 @@
 import { jest } from "@jest/globals";
 import request from "supertest";
 import express from "express";
+import { validate } from "../src/middleware/validate.js";
+import { contractIdParamsSchema } from "../src/schemas/jobs.js";
 
 const VALID_CONTRACT = "CDD5WKK3WT3QVKXMXTJNDIXE4T73FK6GGXDSD6UTJAH6YYZU52SQ4MUH";
 
@@ -15,6 +17,9 @@ jest.unstable_mockModule("@stellar/stellar-sdk/rpc", () => ({
 }));
 
 const { default: router } = await import("../src/routes/jobs.js");
+const { resetJobContractRateLimitBuckets } = await import(
+  "../src/middleware/job-contract-rate-limit.js"
+);
 
 function buildApp() {
   const app = express();
@@ -25,6 +30,7 @@ function buildApp() {
 
 describe("Zod contractId middleware – GET /api/jobs/:contractId", () => {
   beforeEach(() => {
+    resetJobContractRateLimitBuckets();
     mockGetAccount.mockReset();
     mockSimulateTransaction.mockReset();
     delete process.env.API_KEY;
@@ -41,10 +47,8 @@ describe("Zod contractId middleware – GET /api/jobs/:contractId", () => {
     const res = await request(buildApp())
       .get("/api/jobs/not-a-valid-contract-id")
       .expect(400);
-    expect(res.body).toEqual({
-      success: false,
-      error: "contractId must be a valid Stellar contract address (C...)",
-    });
+    expect(res.body.error).toBe("ValidationError");
+    expect(res.body.details[0].message).toBe("contractId must be a valid Stellar contract address (C...)");
   });
 
   it("returns 400 for a Stellar account address (G...)", async () => {
@@ -52,7 +56,8 @@ describe("Zod contractId middleware – GET /api/jobs/:contractId", () => {
       .get("/api/jobs/GAODBHVR63Z56MVQRBEJSYM2H5423LJ4WAPUUBOFG4JYY72S6ROKVZRX")
       .expect(400);
     expect(res.body.success).toBe(false);
-    expect(res.body.error).toMatch(/valid Stellar contract address/i);
+    expect(res.body.error).toBe("ValidationError");
+    expect(res.body.details[0].message).toMatch(/valid Stellar contract address/i);
   });
 
   it("returns 400 for a contractId that is too short", async () => {
@@ -60,7 +65,8 @@ describe("Zod contractId middleware – GET /api/jobs/:contractId", () => {
       .get(`/api/jobs/${"C" + "A".repeat(40)}`)
       .expect(400);
     expect(res.body.success).toBe(false);
-    expect(res.body.error).toMatch(/valid Stellar contract address/i);
+    expect(res.body.error).toBe("ValidationError");
+    expect(res.body.details[0].message).toMatch(/valid Stellar contract address/i);
   });
 
   it("returns 400 for a contractId that is too long", async () => {
@@ -68,7 +74,8 @@ describe("Zod contractId middleware – GET /api/jobs/:contractId", () => {
       .get(`/api/jobs/${"C" + "A".repeat(60)}`)
       .expect(400);
     expect(res.body.success).toBe(false);
-    expect(res.body.error).toMatch(/valid Stellar contract address/i);
+    expect(res.body.error).toBe("ValidationError");
+    expect(res.body.details[0].message).toMatch(/valid Stellar contract address/i);
   });
 
   it("returns 400 for a contractId with special characters", async () => {
@@ -76,6 +83,7 @@ describe("Zod contractId middleware – GET /api/jobs/:contractId", () => {
       .get(`/api/jobs/${VALID_CONTRACT}!`)
       .expect(400);
     expect(res.body.success).toBe(false);
+    expect(res.body.error).toBe("ValidationError");
   });
 
   it("returns 400 for a single-char contractId", async () => {
@@ -83,7 +91,33 @@ describe("Zod contractId middleware – GET /api/jobs/:contractId", () => {
       .get("/api/jobs/C")
       .expect(400);
     expect(res.body.success).toBe(false);
-    expect(res.body.error).toMatch(/valid Stellar contract address/i);
+    expect(res.body.error).toBe("ValidationError");
+    expect(res.body.details[0].message).toMatch(/valid Stellar contract address/i);
+  });
+
+  it("returns 400 for a non-string contractId value", () => {
+    const req = { params: { contractId: 123 } } as any;
+    const res = {
+      status: jest.fn().mockReturnThis(),
+      json: jest.fn(),
+    } as any;
+    const next = jest.fn();
+
+    validate(contractIdParamsSchema, "params")(req, res, next);
+
+    expect(next).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.json).toHaveBeenCalledWith({
+      success: false,
+      error: "ValidationError",
+      message: "Invalid request parameters",
+      details: [
+        {
+          field: "contractId",
+          message: "contractId must be a valid Stellar contract address (C...)",
+        },
+      ],
+    });
   });
 
   // ── error body shape ──────────────────────────────────────────────────────
