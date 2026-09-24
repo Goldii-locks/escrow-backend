@@ -1,6 +1,7 @@
 import { jest } from "@jest/globals";
 import request from "supertest";
 import express from "express";
+import { autoAuth, TEST_API_KEY } from "./helpers/api-key-helper.js";
 import { resetJobWhitelistRateLimitBuckets } from "../src/middleware/job-contract-rate-limit.js";
 
 const VALID_CONTRACT =
@@ -33,6 +34,7 @@ const { default: router, resetWhitelistCache } = await import("../src/routes/job
 function buildApp() {
   const app = express();
   app.use(express.json());
+  app.use(autoAuth);
   app.use("/api/jobs", router);
   return app;
 }
@@ -52,7 +54,6 @@ describe("GET /api/jobs/:contractId/whitelist", () => {
     resetJobWhitelistRateLimitBuckets();
     resetWhitelistCache();
 
-    delete process.env.API_KEY;
     delete process.env.JOB_WHITELIST_RATE_MAX;
     delete process.env.JOB_WHITELIST_RATE_WINDOW_MS;
     delete process.env.ALLOWED_ORIGINS;
@@ -95,10 +96,26 @@ describe("GET /api/jobs/:contractId/whitelist", () => {
         .get("/api/jobs/not-a-valid-contract/whitelist")
         .expect(400);
 
-      expect(res.body).toEqual({
-        success: false,
-        error: "contractId must be a valid Stellar contract address (C...)",
-      });
+      expect(res.body.success).toBe(false);
+      expect(res.body.error).toBe("ValidationError");
+      expect(res.body.details).toEqual([
+        {
+          field: "contractId",
+          message: "contractId must be a valid Stellar contract address (C...)",
+        },
+      ]);
+    });
+
+    it("returns 400 for an invalid contractId string", async () => {
+      const res = await request(buildApp())
+        .get("/api/jobs/123/whitelist")
+        .expect(400);
+
+      expect(res.body.success).toBe(false);
+      expect(res.body.error).toBe("ValidationError");
+      expect(res.body.details[0].message).toBe(
+        "contractId must be a valid Stellar contract address (C...)",
+      );
     });
 
     it("returns 400 for a Stellar account address used as contractId", async () => {
@@ -109,7 +126,8 @@ describe("GET /api/jobs/:contractId/whitelist", () => {
         .expect(400);
 
       expect(res.body.success).toBe(false);
-      expect(res.body.error).toMatch(/valid Stellar contract address/i);
+      expect(res.body.error).toBe("ValidationError");
+      expect(res.body.details[0].message).toMatch(/valid Stellar contract address/i);
     });
 
     it("returns 400 for a contractId that is too short", async () => {
@@ -119,7 +137,8 @@ describe("GET /api/jobs/:contractId/whitelist", () => {
         .expect(400);
 
       expect(res.body.success).toBe(false);
-      expect(res.body.error).toMatch(/valid Stellar contract address/i);
+      expect(res.body.error).toBe("ValidationError");
+      expect(res.body.details[0].message).toMatch(/valid Stellar contract address/i);
     });
 
     it("returns 400 for a contractId that is too long", async () => {
@@ -129,7 +148,8 @@ describe("GET /api/jobs/:contractId/whitelist", () => {
         .expect(400);
 
       expect(res.body.success).toBe(false);
-      expect(res.body.error).toMatch(/valid Stellar contract address/i);
+      expect(res.body.error).toBe("ValidationError");
+      expect(res.body.details[0].message).toMatch(/valid Stellar contract address/i);
     });
 
     it("returns standardised error shape for all invalid contractId inputs", async () => {
@@ -172,6 +192,17 @@ describe("GET /api/jobs/:contractId/whitelist", () => {
         .expect(401);
 
       expect(res.body).toEqual({ success: false, error: "Unauthorized" });
+    });
+
+    it("returns 401 (fails closed) when API_KEY is not set", async () => {
+      delete process.env.API_KEY;
+
+      const res = await request(buildApp())
+        .get(`/api/jobs/${VALID_CONTRACT}/whitelist`)
+        .expect(401);
+
+      expect(res.body).toEqual({ success: false, error: "Unauthorized" });
+      expect(mockGetAccount).not.toHaveBeenCalled();
     });
 
     it("returns 404 when simulation reports the contract/job was not found", async () => {
@@ -450,8 +481,9 @@ describe("GET /api/jobs/:contractId/whitelist", () => {
         .expect(400);
 
       expect(res.body.success).toBe(false);
-      expect(res.body.error).toMatch(/contractId/);
-      expect(res.body.error).toMatch(/valid Stellar contract address/i);
+      expect(res.body.error).toBe("ValidationError");
+      expect(res.body.details[0].field).toBe("contractId");
+      expect(res.body.details[0].message).toMatch(/valid Stellar contract address/i);
     });
 
     it("returns 400 when contractId is a Stellar account address (G…)", async () => {
@@ -462,8 +494,9 @@ describe("GET /api/jobs/:contractId/whitelist", () => {
         .expect(400);
 
       expect(res.body.success).toBe(false);
-      expect(res.body.error).toMatch(/contractId/);
-      expect(res.body.error).toMatch(/valid Stellar contract address/i);
+      expect(res.body.error).toBe("ValidationError");
+      expect(res.body.details[0].field).toBe("contractId");
+      expect(res.body.details[0].message).toMatch(/valid Stellar contract address/i);
     });
 
     it("returns 400 when contractId is too short (< 56 chars)", async () => {
@@ -473,7 +506,7 @@ describe("GET /api/jobs/:contractId/whitelist", () => {
         .expect(400);
 
       expect(res.body.success).toBe(false);
-      expect(res.body.error).toMatch(/contractId/);
+      expect(res.body.details[0].field).toBe("contractId");
     });
 
     it("returns 400 when contractId is too long (> 56 chars)", async () => {
@@ -483,7 +516,19 @@ describe("GET /api/jobs/:contractId/whitelist", () => {
         .expect(400);
 
       expect(res.body.success).toBe(false);
-      expect(res.body.error).toMatch(/contractId/);
+      expect(res.body.details[0].field).toBe("contractId");
+    });
+
+    it("returns 400 for a contractId with an invalid Stellar checksum", async () => {
+      const invalidChecksum = VALID_CONTRACT.slice(0, -1) + "A";
+      const res = await request(buildApp())
+        .get(`/api/jobs/${invalidChecksum}/whitelist`)
+        .expect(400);
+
+      expect(res.body.success).toBe(false);
+      expect(res.body.error).toBe("ValidationError");
+      expect(res.body.details[0].field).toBe("contractId");
+      expect(res.body.details[0].message).toMatch(/valid Stellar contract address/i);
     });
 
     it("returns 400 for an empty-looking contractId segment", async () => {
@@ -492,17 +537,22 @@ describe("GET /api/jobs/:contractId/whitelist", () => {
         .expect(400);
 
       expect(res.body.success).toBe(false);
-      expect(res.body.error).toMatch(/contractId/);
+      expect(res.body.details[0].field).toBe("contractId");
     });
 
     // ── Response shape assertions ─────────────────────────────────────────
 
-    it("error body has exactly {success, error} keys — no extra fields", async () => {
+    it("error body has exactly {success, error, message, details} keys — no extra fields", async () => {
       const res = await request(buildApp())
         .get("/api/jobs/bad-id/whitelist")
         .expect(400);
 
-      expect(Object.keys(res.body)).toEqual(["success", "error"]);
+      expect(Object.keys(res.body).sort()).toEqual([
+        "details",
+        "error",
+        "message",
+        "success",
+      ]);
       expect(res.body.success).toBe(false);
       expect(typeof res.body.error).toBe("string");
     });
@@ -514,15 +564,18 @@ describe("GET /api/jobs/:contractId/whitelist", () => {
 
       expect(typeof res.body.error).toBe("string");
       expect(res.body.error.length).toBeGreaterThan(0);
+      expect(typeof res.body.message).toBe("string");
+      expect(res.body.message.length).toBeGreaterThan(0);
     });
 
-    it("error message contains the field name for easy client-side parsing", async () => {
+    it("error details carry the field name for easy client-side parsing", async () => {
       const res = await request(buildApp())
         .get("/api/jobs/bad-id/whitelist")
         .expect(400);
 
-      // The middleware formats Zod issues as "field: message"
-      expect(res.body.error).toMatch(/contractId/);
+      // The middleware reports each Zod issue as {field, message}
+      expect(res.body.details[0].field).toBe("contractId");
+      expect(res.body.details[0].message).toMatch(/contractId/);
     });
 
     // ── Valid contractId passes Zod and reaches the route handler ─────────
