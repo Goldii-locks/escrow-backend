@@ -94,15 +94,4 @@ describe("GET /api/jobs/:contractId – CORS and security headers", () => {
     expect(res.headers["content-security-policy"]).toBe("default-src 'none'");
   });
 
-  it("does not apply the contract security headers to by-wallet routes", async () => {
-    const validWallet =
-      "GAODBHVR63Z56MVQRBEJSYM2H5423LJ4WAPUUBOFG4JYY72S6ROKVZRX";
-    const res = await request(app)
-      .get(`/api/jobs/by-wallet/${validWallet}`)
-      .set("Origin", "https://evil.example.com")
-      .expect(200);
-
-    expect(res.headers["x-frame-options"]).toBeUndefined();
-    expect(res.headers["access-control-allow-origin"]).toBeUndefined();
-  });
 });

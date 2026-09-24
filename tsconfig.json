@@ -11,7 +11,7 @@
     "types": ["jest"],
     "isolatedModules": true
   },
-  "include": ["src/**/*", "__tests__/**/*"],
+  "include": ["src/**/*", "__tests__/**/*", "jest.setup.ts"],
   "exclude": ["node_modules", "dist"],
   "ts-node": {
     "esm": true

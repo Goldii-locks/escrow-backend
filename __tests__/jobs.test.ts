@@ -1,6 +1,7 @@
 import { jest } from "@jest/globals";
 import request from "supertest";
 import express from "express";
+import { autoAuth, TEST_API_KEY } from "./helpers/api-key-helper.js";
 import type { NextFunction, Request, Response } from "express";
 
 const VALID_CONTRACT =
@@ -21,6 +22,7 @@ const { default: router } = await import("../src/routes/jobs.js");
 function buildApp() {
   const app = express();
   app.use(express.json());
+  app.use(autoAuth);
   app.use("/api/jobs", router);
   // Add error interceptor for test coverage
   app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
@@ -34,7 +36,6 @@ describe("GET /api/jobs/:contractId – error interceptor", () => {
   beforeEach(() => {
     mockGetAccount.mockReset();
     mockSimulateTransaction.mockReset();
-    delete process.env.API_KEY;
     mockGetAccount.mockResolvedValue({
       accountId: () =>
         "GAODBHVR63Z56MVQRBEJSYM2H5423LJ4WAPUUBOFG4JYY72S6ROKVZRX",
