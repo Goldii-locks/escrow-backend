@@ -157,3 +157,54 @@ export function jobWhitelistRateLimit(
 
   next();
 }
+
+const partialPaymentAllocatorBuckets = new Map<string, RateBucket>();
+
+export function resetPartialPaymentAllocatorRateLimitBuckets(): void {
+  partialPaymentAllocatorBuckets.clear();
+}
+
+function resolvePartialPaymentAllocatorWindowMs(): number {
+  const configured = Number(process.env.PARTIAL_PAYMENT_ALLOCATOR_RATE_WINDOW_MS ?? "60000");
+  return Number.isFinite(configured) && configured > 0 ? configured : 60000;
+}
+
+function resolvePartialPaymentAllocatorMaxRequests(): number {
+  const configured = Number(process.env.PARTIAL_PAYMENT_ALLOCATOR_RATE_MAX ?? "50");
+  return Number.isFinite(configured) && configured > 0 ? configured : 50;
+}
+
+/** Dedicated rate limiter for partial payment allocator endpoints. */
+export function partialPaymentAllocatorRateLimit(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): void {
+  const windowMs = resolvePartialPaymentAllocatorWindowMs();
+  const maxRequests = resolvePartialPaymentAllocatorMaxRequests();
+  const key = req.ip || req.socket.remoteAddress || "unknown";
+  const now = Date.now();
+
+  let bucket = partialPaymentAllocatorBuckets.get(key);
+  if (!bucket || now >= bucket.resetAt) {
+    bucket = { count: 0, resetAt: now + windowMs };
+    partialPaymentAllocatorBuckets.set(key, bucket);
+  }
+
+  bucket.count += 1;
+
+  const remaining = Math.max(0, maxRequests - bucket.count);
+  res.setHeader("X-RateLimit-Limit", String(maxRequests));
+  res.setHeader("X-RateLimit-Remaining", String(remaining));
+  res.setHeader("X-RateLimit-Reset", String(Math.ceil(bucket.resetAt / 1000)));
+
+  if (bucket.count > maxRequests) {
+    res.status(429).json({
+      success: false,
+      error: "Too many requests, please try again later",
+    });
+    return;
+  }
+
+  next();
+}
