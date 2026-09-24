@@ -173,3 +173,8 @@ All endpoints return JSON errors in a consistent shape.
 
 - [escrow-contract](https://github.com/Goldii-locks/escrow-contract) — Soroban smart contract
 - [escrow-frontend](https://github.com/Goldii-locks/escrow-frontend) — Next.js frontend
+
+## Handsoff notes
+
+<!-- handsoff-issue-478 -->
+- #478: Reject negative parameters passed to stablecoin_cents_multiplier
