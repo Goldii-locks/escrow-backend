@@ -10,11 +10,30 @@ import { isValidStellarContractId, isValidStellarAddress } from "../utils/stella
  * Validates a Soroban contract address: starts with 'C', 56 characters total,
  * and passes the Stellar SDK StrKey check.
  */
-export const contractIdSchema = z
-  .string({ required_error: "contractId is required" })
-  .refine(isValidStellarContractId, {
-    message: "contractId must be a valid Stellar contract address (C...)",
-  });
+export const contractIdSchema = z.unknown().superRefine((value, ctx) => {
+  if (value === undefined || value === null) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "contractId is required",
+    });
+    return;
+  }
+
+  if (typeof value !== "string") {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "contractId must be a valid Stellar contract address (C...)",
+    });
+    return;
+  }
+
+  if (!isValidStellarContractId(value)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "contractId must be a valid Stellar contract address (C...)",
+    });
+  }
+});
 
 /**
  * Validates a Stellar account (G…) address: starts with 'G', 56 characters,
@@ -57,12 +76,27 @@ export const amountSchema = z
     { message: "amount must be a positive numeric value" },
   );
 
+/**
+ * Named Stellar account field (G…) with field-specific error messages.
+ */
+const stellarAccountField = (field: string) =>
+  z
+    .string({ required_error: `${field} is required` })
+    .refine(isValidStellarAddress, {
+      message: `${field} must be a valid Stellar account address (G...)`,
+    });
+
 // ---------------------------------------------------------------------------
 // Composed route schemas
 // ---------------------------------------------------------------------------
 
 /** Route params: /:contractId */
 export const contractIdParamsSchema = z.object({
+  contractId: contractIdSchema,
+});
+
+/** Route params: /:contractId/whitelist */
+export const whitelistParamsSchema = z.object({
   contractId: contractIdSchema,
 });
 
@@ -81,7 +115,7 @@ export const buildTxBodySchema = z.object({
   // Optional arguments for the method, defaults to an empty array
   args: z.array(z.any()).optional().default([]),
   // The Stellar address of the transaction source account
-  sourceAddress: stellarAddressSchema,
+  sourceAddress: stellarAccountField("sourceAddress"),
 });
 
 /** POST /submit body */
@@ -99,17 +133,8 @@ export const submitBodySchema = z.object({
       },
       { message: "signedXdr must be a valid base64-encoded XDR string" },
     ),
+  sourceAddress: stellarAccountField("sourceAddress").optional(),
 });
-
-/**
- * Named Stellar account field (G…) with field-specific error messages.
- */
-const stellarAccountField = (field: string) =>
-  z
-    .string({ required_error: `${field} is required` })
-    .refine(isValidStellarAddress, {
-      message: `${field} must be a valid Stellar account address (G...)`,
-    });
 
 /**
  * POST /:contractId/milestones/:index/partial-release body.
@@ -140,7 +165,7 @@ export const partialReleaseBodySchema = z.object({
 /** POST /:contractId/milestones/:index/claim-auto-release body */
 export const claimAutoReleaseBodySchema = z.object({
   sourceAddress: stellarAccountField("sourceAddress"),
-});
+}).strict();
 
 /** Route params: /by-wallet/:address */
 export const byWalletParamsSchema = z.object({
@@ -228,8 +253,148 @@ export const createJobDraftBodySchema = z.object({
   requirements: z.array(z.string()).optional().default([]),
 });
 
+/**
+ * POST /create-job-draft body — `*Address` naming variant.
+ *
+ * Two PRs shipped this endpoint with different field names, response shapes,
+ * and token-validation strictness, and both were merged. This variant keeps a
+ * permissive `.min(1)` token rule (its own tests post a token that is not a
+ * valid 56-char contract id); the variant above enforces a real C… address.
+ * `createJobDraftRouteValidator` in routes/jobs.ts picks between them by shape.
+ */
+export const createJobDraftLegacyBodySchema = z.object({
+  clientAddress: stellarAddressSchema,
+  freelancerAddress: stellarAddressSchema,
+  arbiterAddress: stellarAddressSchema,
+  tokenAddress: z
+    .string({ required_error: "tokenAddress is required" })
+    .min(1, "tokenAddress cannot be empty"),
+  milestones: z
+    .array(
+      z.object({
+        amount: amountSchema,
+      }),
+      { required_error: "milestones is required" },
+    )
+    .min(1, "milestones must contain at least one entry"),
+});
+
+/**
+ * POST /:contractId/whitelist/update body.
+ * Validates the token address and the action (add/remove).
+ */
+export const whitelistUpdateBodySchema = z.object({
+  token: z
+    .string({
+      required_error: "token is required",
+      invalid_type_error: "token must be a string",
+    })
+    .min(1, "token cannot be empty")
+    .refine(isValidStellarContractId, {
+      message: "token must be a valid Stellar contract address (C...)",
+    }),
+  action: z
+    .enum(["add", "remove"], {
+      required_error: "action is required",
+      invalid_type_error: "action must be one of: add, remove",
+    }),
+  adminAddress: stellarAccountField("adminAddress"),
+}).strict();
+
+export type WhitelistUpdateBody = z.infer<typeof whitelistUpdateBodySchema>;
+
+export type CreateJobDraftLegacyBody = z.infer<typeof createJobDraftLegacyBodySchema>;
+
+/**
+ * Validates a Stellar address that can be either a public key account address (G...)
+ * or a Soroban contract address (C...).
+ */
+export const stellarAddressOrContractSchema = z
+  .string({ required_error: "Address is required" })
+  .refine((v) => isValidStellarAddress(v) || isValidStellarContractId(v), {
+    message: "Invalid Stellar address",
+  });
+
+/**
+ * POST /:contractId/whitelist/update body schema.
+ * Accepts `addresses` (or `tokens` fallback) array containing valid Stellar addresses.
+ */
+export const updateWhitelistBodySchema = z
+  .object({
+    addresses: z
+      .array(stellarAddressOrContractSchema, {
+        required_error: "addresses array is required",
+        invalid_type_error: "addresses must be an array",
+      })
+      .optional(),
+    tokens: z
+      .array(stellarAddressOrContractSchema, {
+        invalid_type_error: "tokens must be an array",
+      })
+      .optional(),
+  })
+  .superRefine((data, ctx) => {
+    const addresses = data.addresses ?? data.tokens;
+    if (!addresses) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "addresses array is required",
+        path: ["addresses"],
+      });
+      return;
+    }
+    if (addresses.length === 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "addresses array cannot be empty",
+        path: ["addresses"],
+      });
+    }
+  });
+
+export type UpdateWhitelistBody = z.infer<typeof updateWhitelistBodySchema>;
+
+/**
+ * POST /:contractId/whitelist/update accepts two historical body shapes:
+ *
+ * - the single-token form `{ token, action, adminAddress }`
+ *   (`whitelistUpdateBodySchema`), and
+ * - the bulk form `{ addresses | tokens }` (`updateWhitelistBodySchema`).
+ *
+ * A plain `z.union` would collapse both branches into one `invalid_union`
+ * issue with an empty path, and the route's error responses are asserted
+ * field-by-field. So dispatch on the shape instead and forward the chosen
+ * branch's issues verbatim, which keeps `details[].field` populated.
+ *
+ * An ambiguous body (neither `addresses` nor `tokens` present) is reported
+ * against the single-token form, so an empty `{}` lists token/action/
+ * adminAddress as missing.
+ */
+export const whitelistUpdateRequestSchema = z
+  .object({})
+  .passthrough()
+  .superRefine((data, ctx) => {
+    const body = (data ?? {}) as Record<string, unknown>;
+    const isBulkForm = "addresses" in body || "tokens" in body;
+    const branch = isBulkForm
+      ? updateWhitelistBodySchema
+      : whitelistUpdateBodySchema;
+
+    const result = branch.safeParse(body);
+    if (!result.success) {
+      for (const issue of result.error.issues) {
+        ctx.addIssue(issue);
+      }
+    }
+  });
+
+export type WhitelistUpdateRequestBody =
+  | WhitelistUpdateBody
+  | UpdateWhitelistBody;
+
 export type ContractIdParams = z.infer<typeof contractIdParamsSchema>;
 export type ContractMilestoneParams = z.infer<typeof contractMilestoneParamsSchema>;
+export type WhitelistParams = z.infer<typeof whitelistParamsSchema>;
 export type BuildTxBody = z.infer<typeof buildTxBodySchema>;
 export type SubmitBody = z.infer<typeof submitBodySchema>;
 export type PartialReleaseBody = z.infer<typeof partialReleaseBodySchema>;

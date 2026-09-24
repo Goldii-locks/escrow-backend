@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { addSubscription, removeSubscription } from "../indexer/db.js";
 import { sendSuccess, sendError } from "../utils/api-response.js";
+import logger from "../utils/logger.js";
 
 const router = Router();
 
@@ -24,8 +25,17 @@ router.post("/subscribe", (req, res) => {
     return sendError(res, 400, "event_types must be an array of strings or '*'");
   }
 
-  const subscription = addSubscription(contract_id, webhook_url, types);
-  sendSuccess(res, { subscription });
+  try {
+    const subscription = addSubscription(contract_id, webhook_url, types);
+    sendSuccess(res, { subscription });
+  } catch (err) {
+    logger.error("Subscribe endpoint failed", {
+      contractId: contract_id,
+      webhookUrl: webhook_url,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    sendError(res, 500, "Internal server error");
+  }
 });
 
 router.post("/unsubscribe", (req, res) => {
@@ -35,12 +45,20 @@ router.post("/unsubscribe", (req, res) => {
     return sendError(res, 400, "contract_id and webhook_url are required");
   }
 
-  const removed = removeSubscription(contract_id, webhook_url);
-  if (!removed) {
-    return sendError(res, 404, "Subscription not found");
+  try {
+    const removed = removeSubscription(contract_id, webhook_url);
+    if (!removed) {
+      return sendError(res, 404, "Subscription not found");
+    }
+    sendSuccess(res, { message: "Unsubscribed successfully" });
+  } catch (err) {
+    logger.error("Unsubscribe endpoint failed", {
+      contractId: contract_id,
+      webhookUrl: webhook_url,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    sendError(res, 500, "Internal server error");
   }
-
-  sendSuccess(res, { message: "Unsubscribed successfully" });
 });
 
 export default router;
