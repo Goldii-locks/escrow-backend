@@ -1,5 +1,13 @@
 import Database from "better-sqlite3";
-import { getDb, getShippedMigrationVersions } from "./db.js";
+import { getDb, getLastIndexedLedger, getShippedMigrationVersions } from "./db.js";
+import {
+  validateLedgerRange,
+  resolveHistoricalLedgerRange,
+  chunkLedgerRange,
+  filterEventsToRange,
+  LedgerRangeValidationError,
+  type LedgerRange,
+} from "./ledger-range-tracker.js";
 import logger from "../utils/logger.js";
 
 /**
@@ -1071,5 +1079,517 @@ export function recordFailoverRecoverySuccess(details?: {
 export function checkFailoverRecoveryStall(): boolean {
   return defaultFailoverRecoveryFailureMonitor.checkStall();
 }
+
+// ---------------------------------------------------------------------------
+// Dynamic poller throttling parameters (#418)
+// ---------------------------------------------------------------------------
+//
+// The failover recovery poll loop sizes its wait delay from the ledger
+// processing load observed in the most recent cycle, mirroring the
+// indexer_runner / poller throttles (#256, #265). Idle networks back off so
+// the loop stops hammering healthy RPC nodes, while active networks pull the
+// delay back toward the minimum.
+
+/** Configured throttle parameters sizing the failover recovery poll wait delay. */
+export interface FailoverRecoveryThrottleParameters {
+  /** Interval the poll loop starts from (and resets to on activity). */
+  baseIntervalMs: number;
+  /** Floor the delay is pulled toward under load. */
+  minIntervalMs: number;
+  /** Ceiling idle backoff can never exceed. */
+  maxIntervalMs: number;
+  /** Factor applied to the delay on an idle poll once the threshold is met. */
+  idleMultiplier: number;
+  /** Consecutive idle polls required before the delay starts growing. */
+  idleThresholdCycles: number;
+  /** Factor applied to the delay on a loaded poll (must be < 1). */
+  loadDecreaseFactor: number;
+}
+
+/** Snapshot of the current failover recovery throttle state. */
+export interface FailoverRecoveryThrottleState {
+  /** Current effective poll wait delay in ms. */
+  currentIntervalMs: number;
+  /** Event count observed during the most recent poll adjustment. */
+  lastProcessedEventCount: number;
+  /** Consecutive idle (zero-event) polls so far. */
+  idleCycles: number;
+  /** Timestamp of the most recent throttle adjustment. */
+  lastLoadAdjustmentAt: number;
+}
+
+function readThrottleIntEnv(
+  names: string[],
+  fallback: number
+): number {
+  for (const name of names) {
+    const raw = process.env[name];
+    if (raw === undefined || raw === "") continue;
+    const value = Number(raw);
+    if (Number.isInteger(value) && value >= 1) return value;
+  }
+  return fallback;
+}
+
+function readThrottleFloatEnv(
+  names: string[],
+  fallback: number
+): number {
+  for (const name of names) {
+    const raw = process.env[name];
+    if (raw === undefined || raw === "") continue;
+    const value = Number(raw);
+    if (Number.isFinite(value) && value > 0) return value;
+  }
+  return fallback;
+}
+
+const FAILOVER_RECOVERY_BASE_POLL_INTERVAL_MS = readThrottleIntEnv(
+  [
+    "FAILOVER_RECOVERY_BASE_POLL_INTERVAL_MS",
+    "FAILOVER_RECOVERY_POLL_INTERVAL_MS",
+    "INDEXER_FAILOVER_RECOVERY_POLL_INTERVAL_MS",
+    "POLL_INTERVAL_MS",
+  ],
+  15000
+);
+const FAILOVER_RECOVERY_MIN_POLL_INTERVAL_MS = readThrottleIntEnv(
+  [
+    "FAILOVER_RECOVERY_MIN_POLL_INTERVAL_MS",
+    "FAILOVER_RECOVERY_MIN_INTERVAL_MS",
+    "INDEXER_FAILOVER_RECOVERY_MIN_POLL_INTERVAL_MS",
+  ],
+  5000
+);
+const FAILOVER_RECOVERY_MAX_POLL_INTERVAL_MS = readThrottleIntEnv(
+  [
+    "FAILOVER_RECOVERY_MAX_POLL_INTERVAL_MS",
+    "FAILOVER_RECOVERY_MAX_INTERVAL_MS",
+    "INDEXER_FAILOVER_RECOVERY_MAX_POLL_INTERVAL_MS",
+  ],
+  60000
+);
+const FAILOVER_RECOVERY_IDLE_MULTIPLIER = readThrottleFloatEnv(
+  [
+    "FAILOVER_RECOVERY_IDLE_MULTIPLIER",
+    "INDEXER_FAILOVER_RECOVERY_IDLE_MULTIPLIER",
+  ],
+  2
+);
+const FAILOVER_RECOVERY_IDLE_THRESHOLD_CYCLES = readThrottleIntEnv(
+  [
+    "FAILOVER_RECOVERY_IDLE_THRESHOLD_CYCLES",
+    "FAILOVER_RECOVERY_IDLE_THRESHOLD",
+    "INDEXER_FAILOVER_RECOVERY_IDLE_THRESHOLD_CYCLES",
+  ],
+  3
+);
+const FAILOVER_RECOVERY_LOAD_DECREASE_FACTOR = readThrottleFloatEnv(
+  [
+    "FAILOVER_RECOVERY_LOAD_DECREASE_FACTOR",
+    "INDEXER_FAILOVER_RECOVERY_LOAD_DECREASE_FACTOR",
+  ],
+  0.5
+);
+
+let failoverRecoveryThrottleState: FailoverRecoveryThrottleState = {
+  currentIntervalMs: FAILOVER_RECOVERY_BASE_POLL_INTERVAL_MS,
+  lastProcessedEventCount: 0,
+  idleCycles: 0,
+  lastLoadAdjustmentAt: Date.now(),
+};
+
+/** Snapshot of the configured failover recovery throttle parameters (read-only). */
+export function getFailoverRecoveryThrottleParameters(): FailoverRecoveryThrottleParameters {
+  return {
+    baseIntervalMs: FAILOVER_RECOVERY_BASE_POLL_INTERVAL_MS,
+    minIntervalMs: FAILOVER_RECOVERY_MIN_POLL_INTERVAL_MS,
+    maxIntervalMs: FAILOVER_RECOVERY_MAX_POLL_INTERVAL_MS,
+    idleMultiplier: FAILOVER_RECOVERY_IDLE_MULTIPLIER,
+    idleThresholdCycles: FAILOVER_RECOVERY_IDLE_THRESHOLD_CYCLES,
+    loadDecreaseFactor: FAILOVER_RECOVERY_LOAD_DECREASE_FACTOR,
+  };
+}
+
+/** Snapshot of the current failover recovery throttle state (read-only copy). */
+export function getFailoverRecoveryThrottleState(): FailoverRecoveryThrottleState {
+  return { ...failoverRecoveryThrottleState };
+}
+
+/** Reset the failover recovery throttle state to defaults (useful for tests). */
+export function resetFailoverRecoveryThrottleState(): void {
+  failoverRecoveryThrottleState = {
+    currentIntervalMs: FAILOVER_RECOVERY_BASE_POLL_INTERVAL_MS,
+    lastProcessedEventCount: 0,
+    idleCycles: 0,
+    lastLoadAdjustmentAt: Date.now(),
+  };
+}
+
+/** Poll wait delay the failover recovery loop should use before the next cycle. */
+export function getFailoverRecoveryPollDelayMs(): number {
+  return failoverRecoveryThrottleState.currentIntervalMs;
+}
+
+/** Alias matching the poller/db getter naming. */
+export const getFailoverRecoveryCurrentPollIntervalMs = getFailoverRecoveryPollDelayMs;
+export const getCurrentFailoverRecoveryPollIntervalMs = getFailoverRecoveryPollDelayMs;
+
+/**
+ * Next failover recovery poll delay given the current one and whether the
+ * last poll saw activity.
+ *
+ * Idle polls back off geometrically up to the configured maximum; the first
+ * active poll drops straight back to the base interval. Pure function so the
+ * backoff curve can be reasoned about (and tested) without running the loop.
+ */
+export function nextFailoverRecoveryPollIntervalMs(
+  currentIntervalMs: number,
+  sawActivity: boolean
+): number {
+  if (sawActivity) return FAILOVER_RECOVERY_BASE_POLL_INTERVAL_MS;
+  return Math.min(
+    currentIntervalMs * FAILOVER_RECOVERY_IDLE_MULTIPLIER,
+    FAILOVER_RECOVERY_MAX_POLL_INTERVAL_MS
+  );
+}
+
+/**
+ * Adjust the failover recovery poll wait delay based on the ledger
+ * processing load observed in the most recent poll cycle (#418).
+ *
+ * A poll that processed zero events means the network is idle: once
+ * `idleThresholdCycles` consecutive idle polls have been seen the wait delay
+ * backs off (multiplied by `idleMultiplier`, capped at `maxIntervalMs`) so
+ * polling slows down while idle.
+ *
+ * A poll that processed any events means the network is active: idle cycles
+ * are cleared and the delay is pulled back toward `minIntervalMs`.
+ *
+ * @param processedEventCount - Number of events handled in the last poll.
+ * @returns Updated throttle state snapshot.
+ */
+export function adjustFailoverRecoveryPollInterval(
+  processedEventCount: number
+): FailoverRecoveryThrottleState {
+  const state = failoverRecoveryThrottleState;
+  state.lastProcessedEventCount = processedEventCount;
+
+  if (processedEventCount === 0) {
+    // Idle network → the polling wait delay increases once enough
+    // consecutive idle cycles have been observed.
+    state.idleCycles += 1;
+    if (state.idleCycles >= FAILOVER_RECOVERY_IDLE_THRESHOLD_CYCLES) {
+      state.currentIntervalMs = Math.min(
+        state.currentIntervalMs * FAILOVER_RECOVERY_IDLE_MULTIPLIER,
+        FAILOVER_RECOVERY_MAX_POLL_INTERVAL_MS
+      );
+    }
+  } else {
+    // Active network → pull the wait delay back toward the minimum.
+    state.idleCycles = 0;
+    state.currentIntervalMs = Math.max(
+      FAILOVER_RECOVERY_MIN_POLL_INTERVAL_MS,
+      Math.floor(state.currentIntervalMs * FAILOVER_RECOVERY_LOAD_DECREASE_FACTOR)
+    );
+  }
+
+  state.lastLoadAdjustmentAt = Date.now();
+  return { ...state };
+}
+
+/** Aliases for the load-based adjustment entry point. */
+export const adjustFailoverRecoveryPollDelay = adjustFailoverRecoveryPollInterval;
+export const adjustIndexerFailoverRecoveryPollInterval = adjustFailoverRecoveryPollInterval;
+
+// ---------------------------------------------------------------------------
+// Dynamic historical sync ranges (#416)
+// ---------------------------------------------------------------------------
+//
+// indexer_failover_recovery accepts dynamic start/end ledger values for
+// custom historical event imports. The requested range is validated, split
+// into pages, and used to filter events before they are persisted, so callers
+// can backfill any window and verify correct per-block (per-ledger) event
+// counts. Historical imports never advance the live ledger pointer unless
+// `advanceLivePointer` is set.
+
+/** Inclusive historical range page size; matches the live poller RPC `limit`. */
+export const DEFAULT_FAILOVER_RECOVERY_HISTORICAL_PAGE_SIZE = 100;
+
+export { LedgerRangeValidationError };
+export const FailoverRecoveryLedgerRangeValidationError = LedgerRangeValidationError;
+export type FailoverRecoveryLedgerRange = LedgerRange;
+
+export interface FailoverRecoveryHistoricalRangeConfig {
+  startLedger?: number;
+  endLedger?: number;
+  pageSize?: number;
+}
+
+export interface FailoverRecoveryHistoricalRangeOptions {
+  startLedger?: number;
+  endLedger?: number;
+  /** Fallback start when no custom/env start is set (typically lastIndexed+1). */
+  defaultStart?: number;
+  /** Fallback end when no custom/env end is set. */
+  defaultEnd?: number;
+  /** Pre-fetched events; filtered to the resolved range before persist. */
+  events?: Array<{
+    contractId: string;
+    eventType: string;
+    ledgerSequence: number;
+    timestamp: number;
+    dataJson: string;
+  }>;
+  /** Per-page event source. Called once per chunk with the page's inclusive range. */
+  fetchEvents?: (page: LedgerRange) => Promise<
+    Array<{
+      contractId: string;
+      eventType: string;
+      ledgerSequence: number;
+      timestamp: number;
+      dataJson: string;
+    }>
+  > | Array<{
+    contractId: string;
+    eventType: string;
+    ledgerSequence: number;
+    timestamp: number;
+    dataJson: string;
+  }>;
+  pageSize?: number;
+  /**
+   * When true, advances `last_ledger_sequence` to the range end after a
+   * successful import. Defaults to false so live polling is unchanged.
+   */
+  advanceLivePointer?: boolean;
+}
+
+/** Number of events indexed for a single ledger ("block"). */
+export interface FailoverRecoveryLedgerEventCount {
+  ledgerSequence: number;
+  eventCount: number;
+}
+
+export interface FailoverRecoveryHistoricalImportResult {
+  range: LedgerRange;
+  pages: LedgerRange[];
+  /** Events accepted into the requested range (pre-persist). */
+  eventCount: number;
+  /** Rows actually written. */
+  insertedCount: number;
+  /** Rows skipped as already present (INSERT OR IGNORE). */
+  duplicateCount: number;
+  /** Distinct ledgers ("blocks") that contributed at least one event. */
+  processedLedgerCount: number;
+  /** Per-ledger event counts, ascending by ledger sequence. */
+  ledgerEventCounts: FailoverRecoveryLedgerEventCount[];
+  elapsedMs: number;
+}
+
+type FailoverRecoveryHistoricalEvent = {
+  contractId: string;
+  eventType: string;
+  ledgerSequence: number;
+  timestamp: number;
+  dataJson: string;
+};
+
+let failoverRecoveryHistoricalRangeConfig: FailoverRecoveryHistoricalRangeConfig = {};
+
+function failoverRecoveryDefaultHistoricalStart(): number {
+  const last = getLastIndexedLedger();
+  return last < 1 ? 1 : last + 1;
+}
+
+function validateOptionalFailoverLedger(name: string, value: unknown): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1) {
+    throw new LedgerRangeValidationError(
+      `${name} must be a positive integer, received ${String(value)}`
+    );
+  }
+  return value;
+}
+
+/**
+ * Aggregate per-ledger ("block") event counts, ascending by ledger sequence.
+ * Tests assert against this to prove a custom range indexed every block.
+ */
+export function countFailoverRecoveryEventsByLedger(
+  events: Array<{ ledgerSequence?: unknown; ledger?: unknown }>
+): FailoverRecoveryLedgerEventCount[] {
+  const counts = new Map<number, number>();
+  for (const event of events) {
+    const raw = event?.ledgerSequence ?? event?.ledger;
+    const ledger = Number(raw);
+    if (!Number.isFinite(ledger)) continue;
+    counts.set(ledger, (counts.get(ledger) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([ledgerSequence, eventCount]) => ({ ledgerSequence, eventCount }));
+}
+
+/**
+ * Store optional historical start/end/pageSize for failover recovery imports.
+ * When both start and end are supplied they are validated as a pair.
+ */
+export function configureFailoverRecoveryHistoricalRange(
+  options: FailoverRecoveryHistoricalRangeConfig = {}
+): FailoverRecoveryHistoricalRangeConfig {
+  if (options.startLedger !== undefined && options.endLedger !== undefined) {
+    validateLedgerRange(options.startLedger, options.endLedger);
+  } else {
+    if (options.startLedger !== undefined) {
+      validateOptionalFailoverLedger("start ledger", options.startLedger);
+    }
+    if (options.endLedger !== undefined) {
+      validateOptionalFailoverLedger("end ledger", options.endLedger);
+    }
+  }
+  if (options.pageSize !== undefined) {
+    validateOptionalFailoverLedger("page size", options.pageSize);
+  }
+  failoverRecoveryHistoricalRangeConfig = { ...options };
+  return { ...failoverRecoveryHistoricalRangeConfig };
+}
+
+export function getFailoverRecoveryHistoricalRangeConfig(): FailoverRecoveryHistoricalRangeConfig {
+  return { ...failoverRecoveryHistoricalRangeConfig };
+}
+
+export function resetFailoverRecoveryHistoricalRangeConfig(): void {
+  failoverRecoveryHistoricalRangeConfig = {};
+}
+
+/**
+ * Resolve an inclusive historical range from explicit values, then the
+ * failover recovery configured start/end, then `LEDGER_RANGE_START` /
+ * `LEDGER_RANGE_END`, then live defaults (`last_indexed + 1` → provided
+ * default end).
+ *
+ * Throws `LedgerRangeValidationError` on non-integers, values below 1, or
+ * an inverted range (start > end).
+ */
+export function resolveFailoverRecoveryHistoricalRange(
+  options: FailoverRecoveryHistoricalRangeOptions = {}
+): LedgerRange {
+  return resolveHistoricalLedgerRange({
+    startLedger:
+      options.startLedger ?? failoverRecoveryHistoricalRangeConfig.startLedger,
+    endLedger:
+      options.endLedger ?? failoverRecoveryHistoricalRangeConfig.endLedger,
+    defaultStart: options.defaultStart ?? failoverRecoveryDefaultHistoricalStart(),
+    defaultEnd: options.defaultEnd ?? failoverRecoveryHistoricalRangeConfig.endLedger,
+  });
+}
+
+/**
+ * Import events for a custom inclusive historical ledger range through
+ * indexer_failover_recovery.
+ *
+ * The requested range is validated, split into pages, and used to filter
+ * events before they are persisted. Historical imports never advance the
+ * live ledger pointer unless `advanceLivePointer` is set, so live
+ * synchronization is unaffected.
+ */
+export async function importFailoverRecoveryHistoricalRange(
+  options: FailoverRecoveryHistoricalRangeOptions = {}
+): Promise<FailoverRecoveryHistoricalImportResult> {
+  const startedAt = performance.now();
+  const range = resolveFailoverRecoveryHistoricalRange(options);
+  const pageSize = validateOptionalFailoverLedger(
+    "page size",
+    options.pageSize ??
+      failoverRecoveryHistoricalRangeConfig.pageSize ??
+      DEFAULT_FAILOVER_RECOVERY_HISTORICAL_PAGE_SIZE
+  );
+  const pages = chunkLedgerRange(range, pageSize);
+
+  const collected: FailoverRecoveryHistoricalEvent[] = [];
+
+  if (options.fetchEvents) {
+    for (const page of pages) {
+      const pageEvents = await options.fetchEvents(page);
+      collected.push(
+        ...filterEventsToRange(
+          pageEvents as Parameters<typeof filterEventsToRange>[0],
+          page
+        )
+      );
+    }
+  } else if (options.events) {
+    collected.push(
+      ...filterEventsToRange(
+        options.events as Parameters<typeof filterEventsToRange>[0],
+        range
+      )
+    );
+  }
+
+  const db = getDb();
+  let insertedCount = 0;
+  let duplicateCount = 0;
+
+  const write = db.transaction(() => {
+    const insertStmt = db.prepare(`
+      INSERT OR IGNORE INTO events
+      (contract_id, event_type, ledger_sequence, timestamp, data_json)
+      VALUES (?, ?, ?, ?, ?)
+    `);
+
+    for (const ev of collected) {
+      const result = insertStmt.run(
+        ev.contractId,
+        ev.eventType,
+        ev.ledgerSequence,
+        ev.timestamp,
+        ev.dataJson
+      );
+      if (result.changes > 0) {
+        insertedCount += 1;
+      } else {
+        duplicateCount += 1;
+      }
+    }
+
+    if (options.advanceLivePointer) {
+      db.prepare(
+        "UPDATE indexer_state SET value = ? WHERE key = 'last_ledger_sequence'"
+      ).run(range.endLedger.toString());
+    }
+  });
+  write();
+
+  const elapsedMs = Math.max(0, performance.now() - startedAt);
+  const ledgerEventCounts = countFailoverRecoveryEventsByLedger(collected);
+
+  logger.info("indexer_failover_recovery historical range imported", {
+    startLedger: range.startLedger,
+    endLedger: range.endLedger,
+    eventCount: collected.length,
+    insertedCount,
+    duplicateCount,
+    processedLedgerCount: ledgerEventCounts.length,
+  });
+
+  return {
+    range,
+    pages,
+    eventCount: collected.length,
+    insertedCount,
+    duplicateCount,
+    processedLedgerCount: ledgerEventCounts.length,
+    ledgerEventCounts,
+    elapsedMs,
+  };
+}
+
+/** Aliases matching sibling module naming. */
+export const resolveFailoverHistoricalRange = resolveFailoverRecoveryHistoricalRange;
+export const importFailoverHistoricalRange = importFailoverRecoveryHistoricalRange;
+export const countFailoverEventsByLedger = countFailoverRecoveryEventsByLedger;
+
+
 
 

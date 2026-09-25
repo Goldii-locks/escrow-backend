@@ -30,8 +30,13 @@
  * explicit so the formatter is stateless and trivially testable.
  */
 
-/** Max decimal digits allowed for a conversion rate or notional (below Number.MAX_SAFE_INTEGER). */
-export const MAX_SAFE_DIGITS = 15;
+import {
+  digitCount,
+  parseIntegerInput,
+  MAX_SAFE_DIGITS,
+} from "./digit-limit-validator.js";
+
+export { MAX_SAFE_DIGITS };
 
 export const ERROR_CODES = {
   EXCESSIVE_DIGITS: "OVERFLOW_EXCESSIVE_DIGITS",
@@ -46,58 +51,18 @@ export type ValidationResult =
   | { ok: true; value: bigint }
   | { ok: false; error: string; code: OverflowErrorCode };
 
-function digitCount(normalized: string): number {
-  const digits = normalized.replace(/^-/, "").replace(/^0+(?=\d)/, "");
-  return digits.length === 0 ? 1 : digits.length;
-}
-
-function parseIntegerInput(
-  input: string | number | bigint,
-  label: string,
-  invalidCode: OverflowErrorCode
-): ValidationResult {
-  let raw: string;
-
-  if (typeof input === "bigint") {
-    raw = input.toString();
-  } else if (typeof input === "number") {
-    if (!Number.isFinite(input) || !Number.isInteger(input)) {
-      return {
-        ok: false,
-        error: `${label} must be a finite integer`,
-        code: invalidCode,
-      };
-    }
-    raw = String(input);
-  } else {
-    raw = input.trim();
-    if (!/^-?\d+$/.test(raw)) {
-      return {
-        ok: false,
-        error: `${label} must be an integer numeric value`,
-        code: invalidCode,
-      };
-    }
-  }
-
-  if (digitCount(raw) > MAX_SAFE_DIGITS) {
-    return {
-      ok: false,
-      error: `${label} exceeds maximum of ${MAX_SAFE_DIGITS} digits`,
-      code: ERROR_CODES.EXCESSIVE_DIGITS,
-    };
-  }
-
-  return { ok: true, value: BigInt(raw) };
-}
-
 /**
  * Validate an oracle conversion rate against digit limits.
  */
 export function validateConversionRate(
   rate: string | number | bigint
 ): ValidationResult {
-  return parseIntegerInput(rate, "rate", ERROR_CODES.INVALID_RATE);
+  return parseIntegerInput(
+    rate,
+    "rate",
+    ERROR_CODES.INVALID_RATE,
+    ERROR_CODES.EXCESSIVE_DIGITS
+  );
 }
 
 /**
@@ -111,7 +76,8 @@ export function applyConversionRate(
   const amount = parseIntegerInput(
     notional,
     "notional",
-    ERROR_CODES.INVALID_RATE
+    ERROR_CODES.INVALID_RATE,
+    ERROR_CODES.EXCESSIVE_DIGITS
   );
   if (!amount.ok) {
     return amount;
