@@ -339,7 +339,8 @@ describe("Partial Payment Allocator – Database Precision Formatting", () => {
     });
 
     it("handles large amounts with full precision", () => {
-      const largeAmount = BigInt("9007199254740991");
+      // Largest amount the shared ledger validator accepts (MAX_SAFE_DIGITS = 15).
+      const largeAmount = BigInt("999999999999999");
       const result = allocatePayment(
         0,
         largeAmount,
@@ -649,11 +650,11 @@ describe("Partial Payment Allocator – Database Precision Formatting", () => {
     it("detects and rejects precision loss early", () => {
       const result = allocatePayment(
         0,
-        BigInt("9007199254740991"), // MAX_SAFE_INTEGER
+        BigInt("999999999999999"), // largest 15-digit amount (MAX_SAFE_DIGITS)
         [
           {
             address: "GAAAA...AAAA",
-            amount: BigInt("9007199254740991"),
+            amount: BigInt("999999999999999"),
           },
         ]
       );
@@ -666,7 +667,7 @@ describe("Partial Payment Allocator – Database Precision Formatting", () => {
       rows.forEach((row) => {
         expect(row.precision_preserved).toBe(true);
         const parsed = BigInt(row.amount);
-        expect(parsed).toBe(BigInt("9007199254740991"));
+        expect(parsed).toBe(BigInt("999999999999999"));
       });
     });
   });
