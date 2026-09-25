@@ -1,32 +1,10 @@
 /**
  * Interest yield estimator with overflow / digit-limit validation.
  * Rejects principals and rates whose digit count would risk unsafe numeric overflow.
- * Rejects negative parameters, applies round-half-to-even remainder policies,
- * resolves unknown Stellar asset tickers to default configurations, and formats
- * calculated values to match database precision schemas.
  */
 
 /** Max decimal digits allowed for a principal or rate (below Number.MAX_SAFE_INTEGER). */
 export const MAX_SAFE_DIGITS = 15;
-
-/** Max decimal digits allowed for an intermediate multiplication product before division. */
-export const MAX_INTERMEDIATE_DIGITS = MAX_SAFE_DIGITS * 2;
-
-/**
- * Practical upper bound for a yield scale / decimals value.
- * Mirrors the SEP-41 style 0-18 range used by token helpers so that
- * 10^scale factors stay safe to combine with MAX_SAFE_DIGITS.
- */
-export const MAX_YIELD_DECIMALS = 18;
-
-/** Default denominator for scaled yield calculations (10,000 bps = 100%). */
-export const DEFAULT_YIELD_SCALE = 10_000;
-
-/** Basis-points denominator used by half-even yield rounding. */
-export const YIELD_SCALE_DENOMINATOR = 10_000n;
-
-/** Rounding policy applied when a division leaves a remainder. */
-export const ROUNDING_MODE = "half-even" as const;
 
 export const ERROR_CODES = {
   EXCESSIVE_DIGITS: "OVERFLOW_EXCESSIVE_DIGITS",
@@ -88,7 +66,6 @@ function parseIntegerInput(
 
 /**
  * Validate an interest rate (integer scaled factor) against digit limits.
- * Rejects negative rates as yields cannot be computed from negative factors.
  */
 export function validateInterestRate(
   rate: string | number | bigint
@@ -97,20 +74,8 @@ export function validateInterestRate(
 }
 
 /**
- * Validate a principal amount against digit limits.
- * Rejects negative principals as balances cannot be negative.
- */
-export function validatePrincipal(
-  principal: string | number | bigint,
-  label = "principal"
-): ValidationResult {
-  return parseIntegerInput(principal, label, ERROR_CODES.INVALID_AMOUNT);
-}
-
-/**
  * Estimate yield as principal * rate after validating both operands for overflow.
  * Rate is treated as an integer scaled factor (e.g. fixed-point APR).
- * Rejects negative principals and rates.
  */
 export function estimateInterestYield(
   principal: string | number | bigint,
@@ -128,22 +93,6 @@ export function estimateInterestYield(
   const factor = validateInterestRate(rate);
   if (!factor.ok) {
     return factor;
-  }
-
-  if (amount.value < 0n) {
-    return {
-      ok: false,
-      error: "principal cannot be negative",
-      code: ERROR_CODES.INVALID_RATE,
-    };
-  }
-
-  if (factor.value < 0n) {
-    return {
-      ok: false,
-      error: "rate cannot be negative",
-      code: ERROR_CODES.INVALID_RATE,
-    };
   }
 
   const product = amount.value * factor.value;

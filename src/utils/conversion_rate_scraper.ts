@@ -1,6 +1,6 @@
 /**
  * Oracle conversion-rate scraper helpers with overflow / digit-limit validation
- * and detailed parameter error structure / calculation exception handling.
+ * and detailed parameter error structure / calculation exception handling (#494).
  * Rejects rates and notionals whose digit count would risk unsafe numeric overflow,
  * and validates response body shapes against declared error definitions.
  */
@@ -12,10 +12,13 @@ export const ERROR_CODES = {
   EXCESSIVE_DIGITS: "OVERFLOW_EXCESSIVE_DIGITS",
   INVALID_RATE: "OVERFLOW_INVALID_RATE",
   PRODUCT_OVERFLOW: "OVERFLOW_PRODUCT_EXCEEDED",
-  RATE_LIMIT_EXCEEDED: "RATE_LIMIT_EXCEEDED",
-  INVALID_CSV_INPUT: "INVALID_CSV_INPUT",
-  SUM_MISMATCH: "SUM_MISMATCH",
-  INVALID_AMOUNT: "INVALID_AMOUNT",
+  MISSING_PARAMETER: "MISSING_PARAMETER",
+  EXTRA_PARAMETER: "EXTRA_PARAMETER",
+  INVALID_PARAMETER_TYPE: "INVALID_PARAMETER_TYPE",
+  INVALID_PARAMETER_ORDER: "INVALID_PARAMETER_ORDER",
+  UNKNOWN_ERROR_DEFINITION: "UNKNOWN_ERROR_DEFINITION",
+  CALCULATION_EXCEPTION: "CALCULATION_EXCEPTION",
+  PARAM_STRUCTURE_MISMATCH: "PARAM_STRUCTURE_MISMATCH",
 } as const;
 
 export type ScraperErrorCode =
