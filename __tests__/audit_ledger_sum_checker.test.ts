@@ -7,6 +7,16 @@ import {
   roundHalfEven,
   divideWithRounding,
   applyRoundedScale,
+  // Issue #499 - Rate limiting
+  checkAuditLedgerRateLimit,
+  resetAuditRateLimitBuckets,
+  setAuditRateLimitMax,
+  // Issue #497 - Unknown asset ticker fallbacks
+  resolveAssetTicker,
+  getAssetFormatConfig,
+  DEFAULT_ASSET_FALLBACK,
+  DEFAULT_ASSET_FORMAT_CONFIG,
+  KNOWN_ASSETS,
 } from "../src/utils/audit_ledger_sum_checker.js";
 
 // ---------------------------------------------------------------------------
@@ -350,5 +360,193 @@ describe("audit_ledger_sum_checker rounding policies", () => {
         expect(result.value * denom + result.remainder).toBe(amount * num);
       }
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #496 – Negative parameter rejection
+// ---------------------------------------------------------------------------
+
+describe("audit_ledger_sum_checker negative parameter rejection (#496)", () => {
+  const negativeAmounts = [
+    -1,
+    -100,
+    "-1",
+    "-50",
+    "-999999999999999",
+    -1n,
+    -10000000n,
+  ];
+
+  negativeAmounts.forEach((val) => {
+    it(`rejects negative amount ${val} in validateLedgerAmount`, () => {
+      const res = validateLedgerAmount(val);
+      expect(res.ok).toBe(false);
+      if (!res.ok) {
+        expect(res.code).toBe(ERROR_CODES.INVALID_AMOUNT);
+        expect(res.error).toMatch(/negative/i);
+      }
+    });
+
+    it(`rejects negative amount ${val} within sumLedgerAmounts`, () => {
+      const res = sumLedgerAmounts(["100", val, "50"]);
+      expect(res.ok).toBe(false);
+      if (!res.ok) {
+        expect(res.code).toBe(ERROR_CODES.INVALID_AMOUNT);
+        expect(res.error).toMatch(/negative/i);
+      }
+    });
+  });
+
+  it("rejects negative zero (-0) correctly", () => {
+    const res = validateLedgerAmount(-0);
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.code).toBe(ERROR_CODES.INVALID_AMOUNT);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #499 – Rate limiting checks
+// ---------------------------------------------------------------------------
+
+describe("audit_ledger_sum_checker rate limiting checks (#499)", () => {
+  beforeEach(() => {
+    resetAuditRateLimitBuckets();
+    process.env.AUDIT_LEDGER_RATE_MAX = "3";
+    process.env.AUDIT_LEDGER_RATE_WINDOW_MS = "10000";
+  });
+
+  afterEach(() => {
+    resetAuditRateLimitBuckets();
+    delete process.env.AUDIT_LEDGER_RATE_MAX;
+    delete process.env.AUDIT_LEDGER_RATE_WINDOW_MS;
+  });
+
+  it("permits requests within configured threshold", () => {
+    for (let i = 0; i < 3; i++) {
+      const res = checkAuditLedgerRateLimit("client-1");
+      expect(res.ok).toBe(true);
+      if (res.ok) {
+        expect(res.allowed).toBe(true);
+        expect(res.remaining).toBe(3 - (i + 1));
+      }
+    }
+  });
+
+  it("returns 429 warning and denial when threshold is exceeded", () => {
+    for (let i = 0; i < 3; i++) {
+      checkAuditLedgerRateLimit("client-2");
+    }
+
+    const denied = checkAuditLedgerRateLimit("client-2");
+    expect(denied.ok).toBe(false);
+    if (!denied.ok) {
+      expect(denied.allowed).toBe(false);
+      expect(denied.status).toBe(429);
+      expect(denied.code).toBe(ERROR_CODES.RATE_LIMIT_EXCEEDED);
+      expect(denied.remaining).toBe(0);
+      expect(denied.error).toMatch(/rate limit exceeded/i);
+    }
+  });
+
+  it("enforces rate limits inside sumLedgerAmounts with clientKey option", () => {
+    for (let i = 0; i < 3; i++) {
+      const ok = sumLedgerAmounts(["10", "20"], { clientKey: "client-sum" });
+      expect(ok.ok).toBe(true);
+    }
+
+    const exceeded = sumLedgerAmounts(["10", "20"], { clientKey: "client-sum" });
+    expect(exceeded.ok).toBe(false);
+    if (!exceeded.ok) {
+      expect(exceeded.status).toBe(429);
+    }
+  });
+
+  it("enforces global rate limits when clientKey is omitted", () => {
+    setAuditRateLimitMax(2);
+    expect(checkAuditLedgerRateLimit().ok).toBe(true);
+    expect(checkAuditLedgerRateLimit().ok).toBe(true);
+    const globalDenied = checkAuditLedgerRateLimit();
+    expect(globalDenied.ok).toBe(false);
+    if (!globalDenied.ok) {
+      expect(globalDenied.status).toBe(429);
+      expect(globalDenied.code).toBe(ERROR_CODES.RATE_LIMITED);
+    }
+  });
+
+  it("tracks independent client buckets per IP / client key", () => {
+    for (let i = 0; i < 3; i++) {
+      checkAuditLedgerRateLimit("client-A");
+    }
+    expect(checkAuditLedgerRateLimit("client-A").ok).toBe(false);
+    expect(checkAuditLedgerRateLimit("client-B").ok).toBe(true);
+  });
+
+  it("resets rate limit buckets on demand", () => {
+    for (let i = 0; i < 3; i++) {
+      checkAuditLedgerRateLimit("client-reset");
+    }
+    expect(checkAuditLedgerRateLimit("client-reset").ok).toBe(false);
+    resetAuditRateLimitBuckets();
+    expect(checkAuditLedgerRateLimit("client-reset").ok).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #497 – Unknown asset ticker key fallbacks
+// ---------------------------------------------------------------------------
+
+describe("audit_ledger_sum_checker unknown asset ticker fallbacks (#497)", () => {
+  it("resolves well-known Stellar tickers (XLM, USDC, USDT, BTC, ETH)", () => {
+    const knownList = ["XLM", "USDC", "USDT", "BTC", "ETH"];
+    knownList.forEach((ticker) => {
+      const res = resolveAssetTicker(ticker);
+      expect(res.known).toBe(true);
+      expect(res.ticker).toBe(ticker);
+      expect(res.config.decimals).toBe(7);
+      expect(res.config.ticker).toBe(ticker);
+    });
+  });
+
+  it("handles case-insensitivity and whitespace in ticker keys", () => {
+    const res = resolveAssetTicker("  xlm  ");
+    expect(res.known).toBe(true);
+    expect(res.ticker).toBe("XLM");
+  });
+
+  it("applies default format configuration for unfamiliar Stellar token types without throwing", () => {
+    const unknownTickers = ["RANDOM_TOKEN", "XYZ", "UNKNOWN_ASSET", "CUSTOM_STOKEN_123"];
+
+    unknownTickers.forEach((ticker) => {
+      const res = resolveAssetTicker(ticker);
+      expect(res.known).toBe(false);
+      if (!res.known) {
+        expect(res.fallback).toBe(true);
+        expect(res.config.decimals).toBe(7);
+        expect(res.config.label).toBe(DEFAULT_ASSET_FALLBACK.label);
+      }
+    });
+  });
+
+  it("handles missing/null/undefined tickers with default fallback", () => {
+    expect(resolveAssetTicker(null).known).toBe(false);
+    expect(resolveAssetTicker(undefined).known).toBe(false);
+    expect(resolveAssetTicker("").known).toBe(false);
+  });
+
+  it("resolves format configs via getAssetFormatConfig", () => {
+    expect(getAssetFormatConfig("XLM")).toEqual({ ticker: "XLM", decimals: 7 });
+    expect(getAssetFormatConfig("UNKNOWN_TOK")).toEqual({ ticker: "UNKNOWN_TOK", decimals: 7 });
+    expect(getAssetFormatConfig(null)).toEqual(DEFAULT_ASSET_FORMAT_CONFIG);
+  });
+
+  it("accepts ticker in sumLedgerAmounts options without error", () => {
+    const res = sumLedgerAmounts(["10", "20"], { ticker: "NOVEL_TOKEN" });
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      expect(res.value).toBe(30n);
+    }
   });
 });
