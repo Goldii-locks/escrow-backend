@@ -357,7 +357,13 @@ describe("ledger_range_tracker improvements (#296, #297, #298, #299)", () => {
 
     it("emits a warning exactly when the threshold is reached", async () => {
       const warn = spyOnLogger("warn");
-      const tracker = new LedgerRangeTracker({ name: "alert-hit", failureThreshold: 3 });
+      // Retries are covered by ledger-range-tracker-rpc-retry.test.ts; disable
+      // them here so each call records exactly one failure without backoff.
+      const tracker = new LedgerRangeTracker({
+        name: "alert-hit",
+        failureThreshold: 3,
+        rpcRetryConfig: { maxRetries: 0 },
+      });
       const fail = () =>
         tracker.processRange({
           startLedger: 8,

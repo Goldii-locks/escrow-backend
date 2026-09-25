@@ -2,6 +2,115 @@ import { getDb, getLastIndexedLedger, insertEvent, type EventRow } from "./db.js
 import logger from "../utils/logger.js";
 
 // ---------------------------------------------------------------------------
+// RPC retry backoff for ledger-range-tracker (#Task1)
+// ---------------------------------------------------------------------------
+// The tracker's fetchEvents callback may invoke an RPC endpoint that suffers
+// transient timeouts or connection resets.  Rather than propagating the first
+// error immediately, the tracker applies an exponential-backoff retry so
+// short-lived connectivity problems are recovered from automatically.
+
+export interface LedgerRangeRpcRetryConfig {
+  /** Maximum number of retry attempts per fetchEvents call (default: 5). */
+  maxRetries: number;
+  /** Delay in ms after the first failure (default: 200). */
+  initialBackoffMs: number;
+  /** Multiplier applied on every subsequent failure (default: 2). */
+  backoffMultiplier: number;
+  /** Upper ceiling on the delay in ms (default: 10 000). */
+  maxBackoffMs: number;
+}
+
+export const DEFAULT_LEDGER_RANGE_RPC_RETRY_CONFIG: LedgerRangeRpcRetryConfig = {
+  maxRetries: 5,
+  initialBackoffMs: 200,
+  backoffMultiplier: 2,
+  maxBackoffMs: 10_000,
+};
+
+/** Error patterns that represent transient RPC/network failures worth retrying. */
+const RPC_RETRYABLE_PATTERNS = [
+  "timeout",
+  "ECONNRESET",
+  "ECONNREFUSED",
+  "ETIMEDOUT",
+  "socket hang up",
+  "network",
+  "status 429",
+  "status 503",
+  "status 502",
+  "request timeout",
+  "connect timeout",
+  "connection reset",
+  "connection refused",
+  "connection dropped",
+];
+
+export function isLedgerRangeRpcRetryable(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const msg = err.message.toLowerCase();
+  return RPC_RETRYABLE_PATTERNS.some((p) => msg.includes(p.toLowerCase()));
+}
+
+/**
+ * Compute the delay in ms for a given retry attempt using exponential backoff.
+ * attempt 0 → initialBackoffMs
+ * attempt 1 → initialBackoffMs × multiplier
+ * …, capped at maxBackoffMs.
+ */
+export function computeLedgerRangeRpcBackoffMs(
+  attempt: number,
+  config: Pick<
+    LedgerRangeRpcRetryConfig,
+    "initialBackoffMs" | "backoffMultiplier" | "maxBackoffMs"
+  >,
+): number {
+  return Math.min(
+    config.initialBackoffMs * Math.pow(config.backoffMultiplier, attempt),
+    config.maxBackoffMs,
+  );
+}
+
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Execute an async operation with exponential backoff retry, retrying only on
+ * transient RPC/network errors.  Non-retryable errors are re-thrown immediately.
+ */
+export async function withLedgerRangeRpcRetry<T>(
+  fn: () => Promise<T>,
+  config: Partial<LedgerRangeRpcRetryConfig> = {},
+  context = "ledger_range_tracker_rpc",
+): Promise<T> {
+  const cfg = { ...DEFAULT_LEDGER_RANGE_RPC_RETRY_CONFIG, ...config };
+  let lastError: Error | null = null;
+
+  for (let attempt = 0; attempt <= cfg.maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+
+      if (!isLedgerRangeRpcRetryable(lastError) || attempt >= cfg.maxRetries) {
+        throw lastError;
+      }
+
+      const delay = computeLedgerRangeRpcBackoffMs(attempt, cfg);
+      logger.warn(`${context} failed, retrying with backoff`, {
+        attempt: attempt + 1,
+        maxRetries: cfg.maxRetries,
+        backoffMs: delay,
+        error: lastError.message,
+      });
+      await sleepMs(delay);
+    }
+  }
+
+  throw lastError ?? new Error(`${context} exhausted all retries`);
+}
+
+// ---------------------------------------------------------------------------
 // Schema verification (#259)
 // ---------------------------------------------------------------------------
 // The tracker reads and writes `events` and `indexer_state` directly. Starting
@@ -357,6 +466,8 @@ export interface LedgerRangeTrackerConfig {
   failureThreshold?: number;
   /** Elapsed ms since last success after which a stall is reported. */
   stallThresholdMs?: number;
+  /** RPC retry backoff configuration for transient fetchEvents failures. */
+  rpcRetryConfig?: Partial<LedgerRangeRpcRetryConfig>;
 }
 
 export interface ProcessLedgerRangeOptions {
@@ -895,10 +1006,12 @@ export class LedgerRangeTracker {
   readonly name: string;
   readonly failureMonitor: LedgerRangeFailureMonitor;
   private readonly config: LedgerRangeTrackerConfig;
+  private readonly rpcRetryConfig: Partial<LedgerRangeRpcRetryConfig>;
 
   constructor(config: LedgerRangeTrackerConfig = {}) {
     this.config = config;
     this.name = config.name ?? TRACKER_NAME;
+    this.rpcRetryConfig = config.rpcRetryConfig ?? {};
     this.failureMonitor = new LedgerRangeFailureMonitor({
       name: this.name,
       failureThreshold: config.failureThreshold,
@@ -947,7 +1060,11 @@ export class LedgerRangeTracker {
             const pageStart = performance.now();
             let pageEvents: EventRow[];
             try {
-              pageEvents = await options.fetchEvents(page);
+              pageEvents = await withLedgerRangeRpcRetry(
+                async () => options.fetchEvents!(page),
+                this.rpcRetryConfig,
+                `${this.name}_fetchEvents`,
+              );
             } catch (err) {
               const error = err instanceof Error ? err.message : String(err);
               this.failureMonitor.recordFailure("event_retrieval", {

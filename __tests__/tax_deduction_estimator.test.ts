@@ -16,6 +16,10 @@ import {
   formatRawForDbStorage,
   formatHumanForDbStorage,
   configureFormatColumns,
+  escapeTaxCsvField,
+  formatTaxCsvRow,
+  buildTaxDeductionCsvBlock,
+  exportTaxDeductionsToCsv,
 } from "../src/utils/tax_deduction_estimator.js";
 
 describe("tax_deduction_estimator", () => {
@@ -239,6 +243,157 @@ describe("tax_deduction_estimator", () => {
       if (res.ok) {
         expect(res.value.gross_amount).toBe("50.0000000");
         expect(res.value.tax_amount).toBe("2.5000000");
+      }
+    });
+  });
+
+  describe("Issue #454: CSV format exporters in tax_deduction_estimator", () => {
+    it("escapes fields per RFC 4180", () => {
+      expect(escapeTaxCsvField("plain")).toBe("plain");
+      expect(escapeTaxCsvField("a,b")).toBe('"a,b"');
+      expect(escapeTaxCsvField('say "hi"')).toBe('"say ""hi"""');
+      expect(escapeTaxCsvField("line\nbreak")).toBe('"line\nbreak"');
+      expect(escapeTaxCsvField(null)).toBe("");
+      expect(escapeTaxCsvField(undefined)).toBe("");
+      expect(escapeTaxCsvField(42n)).toBe("42");
+      expect(escapeTaxCsvField("a;b", ";")).toBe('"a;b"');
+      expect(formatTaxCsvRow(["x", "y,z", 1])).toBe('x,"y,z",1');
+    });
+
+    it("builds a table with header and computed rows", () => {
+      const res = buildTaxDeductionCsvBlock([
+        { grossAmount: "10000", taxRate: "500" },
+        { grossAmount: 100, taxRate: 333 },
+      ]);
+      expect(res.ok).toBe(true);
+      if (res.ok) {
+        expect(res.value).toBe(
+          "grossAmount,taxRate,taxAmount,netAmount,remainder\n" +
+            "10000,500,500,9500,0\n" +
+            "100,333,3,97,3300\n"
+        );
+        expect(res.rowCount).toBe(2);
+        expect(res.columns).toEqual([
+          "grossAmount",
+          "taxRate",
+          "taxAmount",
+          "netAmount",
+          "remainder",
+        ]);
+      }
+    });
+
+    it("includes an escaped label column when any record has a label", () => {
+      const res = exportTaxDeductionsToCsv([
+        { label: "Invoice, Q1", grossAmount: "10000", taxRate: "500" },
+        { grossAmount: "2000", taxRate: "1000" },
+      ]);
+      expect(res.ok).toBe(true);
+      if (res.ok) {
+        expect(res.value.split("\n")).toEqual([
+          "label,grossAmount,taxRate,taxAmount,netAmount,remainder",
+          '"Invoice, Q1",10000,500,500,9500,0',
+          ",2000,1000,200,1800,0",
+          "",
+        ]);
+      }
+    });
+
+    it("applies scale, custom columns, headers, delimiter and CRLF", () => {
+      const res = buildTaxDeductionCsvBlock(
+        [{ grossAmount: "100000000", taxRate: "500" }],
+        {
+          scale: 7,
+          columns: ["grossAmount", "taxAmount", "netAmount"],
+          headers: ["Gross", "Tax", "Net"],
+          delimiter: ";",
+          lineEnding: "\r\n",
+        }
+      );
+      expect(res.ok).toBe(true);
+      if (res.ok) {
+        expect(res.value).toBe(
+          "Gross;Tax;Net\r\n10.0000000;0.5000000;9.5000000\r\n"
+        );
+      }
+    });
+
+    it("omits the header row when includeHeader is false", () => {
+      const res = buildTaxDeductionCsvBlock(
+        [{ grossAmount: "1000", taxRate: "250", taxScale: "1000" }],
+        { includeHeader: false }
+      );
+      expect(res.ok).toBe(true);
+      if (res.ok) {
+        expect(res.value).toBe("1000,250,250,750,0\n");
+      }
+    });
+
+    it("handles empty record arrays", () => {
+      const allowed = buildTaxDeductionCsvBlock([]);
+      expect(allowed.ok).toBe(true);
+      if (allowed.ok) {
+        expect(allowed.value).toBe(
+          "grossAmount,taxRate,taxAmount,netAmount,remainder\n"
+        );
+        expect(allowed.rowCount).toBe(0);
+      }
+
+      const rejected = buildTaxDeductionCsvBlock([], { allowEmpty: false });
+      expect(rejected.ok).toBe(false);
+      if (!rejected.ok) {
+        expect(rejected.code).toBe(ERROR_CODES.INVALID_CSV_INPUT);
+      }
+    });
+
+    it("rejects invalid options", () => {
+      const records = [{ grossAmount: "1000", taxRate: "500" }];
+      const cases = [
+        buildTaxDeductionCsvBlock(records, { delimiter: "::" }),
+        buildTaxDeductionCsvBlock(records, { delimiter: '"' }),
+        buildTaxDeductionCsvBlock(records, { headers: ["only-one"] }),
+        buildTaxDeductionCsvBlock(records, {
+          columns: ["bogus" as unknown as "label"],
+        }),
+      ];
+      for (const res of cases) {
+        expect(res.ok).toBe(false);
+        if (!res.ok) {
+          expect(res.code).toBe(ERROR_CODES.INVALID_CSV_INPUT);
+        }
+      }
+
+      const badScale = buildTaxDeductionCsvBlock(records, { scale: 19 });
+      expect(badScale.ok).toBe(false);
+      if (!badScale.ok) {
+        expect(badScale.code).toBe(ERROR_CODES.INVALID_SCHEMA);
+      }
+    });
+
+    it("rejects non-array input and non-object records", () => {
+      const notArray = buildTaxDeductionCsvBlock(
+        "nope" as unknown as []
+      );
+      expect(notArray.ok).toBe(false);
+
+      const badRecord = buildTaxDeductionCsvBlock([
+        null as unknown as { grossAmount: string; taxRate: string },
+      ]);
+      expect(badRecord.ok).toBe(false);
+      if (!badRecord.ok) {
+        expect(badRecord.error).toMatch(/index 0/);
+      }
+    });
+
+    it("propagates estimator validation errors with the record index", () => {
+      const res = buildTaxDeductionCsvBlock([
+        { grossAmount: "1000", taxRate: "500" },
+        { grossAmount: "-5", taxRate: "500" },
+      ]);
+      expect(res.ok).toBe(false);
+      if (!res.ok) {
+        expect(res.code).toBe(ERROR_CODES.INVALID_AMOUNT);
+        expect(res.error).toMatch(/^record at index 1:/);
       }
     });
   });

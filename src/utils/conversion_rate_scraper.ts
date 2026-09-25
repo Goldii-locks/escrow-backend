@@ -46,14 +46,144 @@ export const ERROR_CODES = {
   INVALID_CSV_INPUT: "INVALID_CSV_INPUT",
   SUM_MISMATCH: "SUM_MISMATCH",
   INVALID_AMOUNT: "INVALID_AMOUNT",
+  NEGATIVE_RATE: "OVERFLOW_NEGATIVE_RATE",
+  MISSING_PARAMETER: "MISSING_PARAMETER",
+  EXTRA_PARAMETER: "EXTRA_PARAMETER",
+  INVALID_PARAMETER_TYPE: "INVALID_PARAMETER_TYPE",
+  INVALID_PARAMETER_ORDER: "INVALID_PARAMETER_ORDER",
+  UNKNOWN_ERROR_DEFINITION: "UNKNOWN_ERROR_DEFINITION",
+  CALCULATION_EXCEPTION: "CALCULATION_EXCEPTION",
+  PARAM_STRUCTURE_MISMATCH: "PARAM_STRUCTURE_MISMATCH",
 } as const;
 
-export type OverflowErrorCode =
+export type ScraperErrorCode =
   (typeof ERROR_CODES)[keyof typeof ERROR_CODES];
+
+export type OverflowErrorCode = ScraperErrorCode;
 
 export type ValidationResult =
   | { ok: true; value: bigint }
   | { ok: false; error: string; code: OverflowErrorCode };
+
+export interface ParameterDefinition {
+  name: string;
+  type: "string" | "number" | "bigint" | "boolean" | "object" | "array";
+  required?: boolean;
+}
+
+export interface ErrorDefinition {
+  code: string;
+  message?: string;
+  parameters: ParameterDefinition[];
+  ordered?: boolean;
+}
+
+export interface ParameterValidationSuccess {
+  ok: true;
+  code?: string;
+  validatedParams: Record<string, unknown>;
+}
+
+export interface ParameterValidationFailure {
+  ok: false;
+  error: string;
+  code: ScraperErrorCode;
+  details?: {
+    expectedDefinition?: ErrorDefinition;
+    providedParams?: unknown;
+    missingParams?: string[];
+    extraParams?: string[];
+    typeMismatches?: Array<{ param: string; expected: string; actual: string }>;
+    orderMismatches?: Array<{ expected: string; actual: string; index: number }>;
+    context?: unknown;
+    reason?: string;
+  };
+}
+
+export type ParameterValidationResult =
+  | ParameterValidationSuccess
+  | ParameterValidationFailure;
+
+export interface CalculationContext {
+  notional?: unknown;
+  rate?: unknown;
+  operation?: string;
+  [key: string]: unknown;
+}
+
+// ---------------------------------------------------------------------------
+// TASK 1 – In-process rate limiter for conversion-rate scraper calls
+// ---------------------------------------------------------------------------
+
+type RateBucket = {
+  count: number;
+  resetAt: number;
+};
+
+const conversionRateBuckets = new Map<string, RateBucket>();
+
+/**
+ * Reset all in-process rate-limit buckets. Intended for use in tests only.
+ */
+export function resetConversionRateLimitBuckets(): void {
+  conversionRateBuckets.clear();
+}
+
+function resolveConversionRateWindowMs(): number {
+  const configured = Number(
+    process.env.CONVERSION_RATE_WINDOW_MS ?? "60000"
+  );
+  return Number.isFinite(configured) && configured > 0 ? configured : 60000;
+}
+
+function resolveConversionRateMax(): number {
+  const configured = Number(
+    process.env.CONVERSION_RATE_MAX ?? "30"
+  );
+  return Number.isFinite(configured) && configured > 0 ? configured : 30;
+}
+
+export type RateLimitResult =
+  | { allowed: true; remaining: number; resetAt: number }
+  | { allowed: false; remaining: 0; resetAt: number; code: typeof ERROR_CODES.RATE_LIMIT_EXCEEDED };
+
+/**
+ * Check whether the caller identified by `clientKey` (e.g. an IP address or
+ * API-key fingerprint) has exceeded the configured conversion-rate scraper
+ * request budget for the current sliding window.
+ *
+ * Returns `{ allowed: true }` when the request is within budget, or
+ * `{ allowed: false, code: "RATE_LIMIT_EXCEEDED" }` when the budget is
+ * exhausted so the caller can return HTTP 429.
+ */
+export function checkConversionRateLimit(clientKey: string): RateLimitResult {
+  const windowMs = resolveConversionRateWindowMs();
+  const maxRequests = resolveConversionRateMax();
+  const now = Date.now();
+
+  let bucket = conversionRateBuckets.get(clientKey);
+  if (!bucket || now >= bucket.resetAt) {
+    bucket = { count: 0, resetAt: now + windowMs };
+    conversionRateBuckets.set(clientKey, bucket);
+  }
+
+  bucket.count += 1;
+
+  if (bucket.count > maxRequests) {
+    return {
+      allowed: false,
+      remaining: 0,
+      resetAt: bucket.resetAt,
+      code: ERROR_CODES.RATE_LIMIT_EXCEEDED,
+    };
+  }
+
+  return {
+    allowed: true,
+    remaining: Math.max(0, maxRequests - bucket.count),
+    resetAt: bucket.resetAt,
+  };
+}
 
 /**
  * Validate an oracle conversion rate against digit limits.
@@ -61,12 +191,23 @@ export type ValidationResult =
 export function validateConversionRate(
   rate: string | number | bigint
 ): ValidationResult {
-  return parseIntegerInput(
+  const parsed = parseIntegerInput(
     rate,
     "rate",
     ERROR_CODES.INVALID_RATE,
     ERROR_CODES.EXCESSIVE_DIGITS
   );
+  if (!parsed.ok) {
+    return parsed;
+  }
+  if (parsed.value < 0n) {
+    return {
+      ok: false,
+      error: "rate cannot be negative",
+      code: ERROR_CODES.NEGATIVE_RATE,
+    };
+  }
+  return parsed;
 }
 
 /**
@@ -85,6 +226,13 @@ export function applyConversionRate(
   );
   if (!amount.ok) {
     return amount;
+  }
+  if (amount.value < 0n) {
+    return {
+      ok: false,
+      error: "notional cannot be negative",
+      code: ERROR_CODES.NEGATIVE_RATE,
+    };
   }
 
   const factor = validateConversionRate(rate);
@@ -329,4 +477,643 @@ export function formatRateForDb(rate: bigint, ticker: string): string {
 export function formatNotionalForDb(notional: bigint, ticker: string): string {
   const resolution = resolveAssetTicker(ticker);
   return formatForDb(notional, resolution.config.decimals);
+}
+
+// ---------------------------------------------------------------------------
+// TASK 2 – CSV format exporters
+// ---------------------------------------------------------------------------
+
+/** A single row in a conversion-rate CSV export. */
+export interface ConversionRateRow {
+  /** Human-readable asset pair label, e.g. "XLM/USDC". */
+  pair: string;
+  /** Integer-scaled rate value (fixed-point). */
+  rate: string | number | bigint;
+  /** Optional Unix timestamp (seconds) when the rate was observed. */
+  timestamp?: number;
+}
+
+export type CsvExportResult =
+  | { ok: true; csv: string }
+  | { ok: false; error: string; code: OverflowErrorCode };
+
+/**
+ * Escape a single CSV cell value.
+ * Wraps the value in double-quotes if it contains a comma, double-quote, or
+ * newline, and escapes embedded double-quotes by doubling them.
+ */
+function escapeCsvCell(value: string): string {
+  if (/[",\r\n]/.test(value)) {
+    return `"${value.replace(/"/g, '""')}"`;
+  }
+  return value;
+}
+
+/**
+ * Serialize an array of conversion-rate rows to RFC 4180-compatible CSV text.
+ *
+ * Columns: pair, rate, timestamp (omitted when none of the rows carry one).
+ *
+ * Each `rate` value is validated against the digit-limit before serialization;
+ * the function short-circuits and returns an error result if any rate is
+ * invalid, so the caller never writes a file with malformed data.
+ */
+export function exportConversionRatesToCsv(
+  rows: ConversionRateRow[]
+): CsvExportResult {
+  if (!Array.isArray(rows) || rows.length === 0) {
+    return {
+      ok: false,
+      error: "rows must be a non-empty array",
+      code: ERROR_CODES.INVALID_CSV_INPUT,
+    };
+  }
+
+  const includeTimestamp = rows.some((r) => r.timestamp !== undefined);
+  const headerCols = includeTimestamp
+    ? ["pair", "rate", "timestamp"]
+    : ["pair", "rate"];
+  const lines: string[] = [headerCols.join(",")];
+
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+
+    if (typeof row.pair !== "string" || row.pair.trim() === "") {
+      return {
+        ok: false,
+        error: `rows[${i}].pair must be a non-empty string`,
+        code: ERROR_CODES.INVALID_CSV_INPUT,
+      };
+    }
+
+    const rateCheck = validateConversionRate(row.rate);
+    if (!rateCheck.ok) {
+      return {
+        ok: false,
+        error: `rows[${i}].rate: ${rateCheck.error}`,
+        code: rateCheck.code,
+      };
+    }
+
+    const cells: string[] = [
+      escapeCsvCell(row.pair.trim()),
+      escapeCsvCell(rateCheck.value.toString()),
+    ];
+
+    if (includeTimestamp) {
+      const ts = row.timestamp;
+      if (ts !== undefined) {
+        if (
+          typeof ts !== "number" ||
+          !Number.isFinite(ts) ||
+          !Number.isInteger(ts) ||
+          ts < 0
+        ) {
+          return {
+            ok: false,
+            error: `rows[${i}].timestamp must be a non-negative integer`,
+            code: ERROR_CODES.INVALID_CSV_INPUT,
+          };
+        }
+        cells.push(String(ts));
+      } else {
+        cells.push("");
+      }
+    }
+
+    lines.push(cells.join(","));
+  }
+
+  return { ok: true, csv: lines.join("\r\n") };
+}
+
+/**
+ * Parse a CSV string produced by `exportConversionRatesToCsv` back into an
+ * array of `ConversionRateRow` objects. Each rate value is re-validated on
+ * the way in so round-tripped data is guaranteed to be within the digit limit.
+ */
+export function parseConversionRatesCsv(
+  csv: string
+): { ok: true; rows: ConversionRateRow[] } | { ok: false; error: string; code: OverflowErrorCode } {
+  if (typeof csv !== "string" || csv.trim() === "") {
+    return {
+      ok: false,
+      error: "csv must be a non-empty string",
+      code: ERROR_CODES.INVALID_CSV_INPUT,
+    };
+  }
+
+  const rawLines = csv.split(/\r?\n/).filter((l) => l.trim() !== "");
+  if (rawLines.length < 2) {
+    return {
+      ok: false,
+      error: "csv must contain a header row and at least one data row",
+      code: ERROR_CODES.INVALID_CSV_INPUT,
+    };
+  }
+
+  const header = rawLines[0].split(",").map((h) => h.trim());
+  const hasPair = header[0] === "pair";
+  const hasRate = header[1] === "rate";
+  const hasTimestamp = header[2] === "timestamp";
+
+  if (!hasPair || !hasRate) {
+    return {
+      ok: false,
+      error: "csv header must start with 'pair,rate'",
+      code: ERROR_CODES.INVALID_CSV_INPUT,
+    };
+  }
+
+  const rows: ConversionRateRow[] = [];
+
+  for (let i = 1; i < rawLines.length; i++) {
+    const cols = rawLines[i].split(",");
+
+    const pair = cols[0]?.trim() ?? "";
+    if (pair === "") {
+      return {
+        ok: false,
+        error: `row ${i}: pair must be a non-empty string`,
+        code: ERROR_CODES.INVALID_CSV_INPUT,
+      };
+    }
+
+    const rateRaw = cols[1]?.trim() ?? "";
+    const rateCheck = validateConversionRate(rateRaw);
+    if (!rateCheck.ok) {
+      return {
+        ok: false,
+        error: `row ${i}: rate: ${rateCheck.error}`,
+        code: rateCheck.code,
+      };
+    }
+
+    const row: ConversionRateRow = {
+      pair,
+      rate: rateCheck.value.toString(),
+    };
+
+    if (hasTimestamp && cols[2] !== undefined && cols[2].trim() !== "") {
+      const ts = Number(cols[2].trim());
+      if (!Number.isFinite(ts) || !Number.isInteger(ts) || ts < 0) {
+        return {
+          ok: false,
+          error: `row ${i}: timestamp must be a non-negative integer`,
+          code: ERROR_CODES.INVALID_CSV_INPUT,
+        };
+      }
+      row.timestamp = ts;
+    }
+
+    rows.push(row);
+  }
+
+  return { ok: true, rows };
+}
+
+// ---------------------------------------------------------------------------
+// TASK 3 – Split-sum assertions
+// ---------------------------------------------------------------------------
+
+export type SumCheckResult =
+  | { ok: true; total: bigint; isMatch: boolean }
+  | { ok: false; error: string; code: OverflowErrorCode };
+
+/**
+ * Assert that a set of split amounts adds up to an expected base amount.
+ *
+ * Each split value and the base amount are individually validated against the
+ * digit limit before any arithmetic so the function never silently operates on
+ * unsafe integers. When `strict` is true (the default) the function returns
+ * `{ isMatch: false }` — rather than an error — whenever the sum does not
+ * equal the base; callers that want to treat a mismatch as a hard failure
+ * should check `isMatch` and act accordingly.
+ */
+export function assertConversionSplitSum(
+  splits: Array<string | number | bigint>,
+  expectedBase: string | number | bigint
+): SumCheckResult {
+  if (!Array.isArray(splits) || splits.length === 0) {
+    return {
+      ok: false,
+      error: "splits must be a non-empty array",
+      code: ERROR_CODES.INVALID_AMOUNT,
+    };
+  }
+
+  const baseCheck = parseIntegerInput(
+    expectedBase,
+    "expectedBase",
+    ERROR_CODES.INVALID_AMOUNT,
+    ERROR_CODES.EXCESSIVE_DIGITS
+  );
+  if (!baseCheck.ok) {
+    return baseCheck;
+  }
+
+  let total = 0n;
+
+  for (let i = 0; i < splits.length; i++) {
+    const splitCheck = parseIntegerInput(
+      splits[i],
+      `splits[${i}]`,
+      ERROR_CODES.INVALID_AMOUNT,
+      ERROR_CODES.EXCESSIVE_DIGITS
+    );
+    if (!splitCheck.ok) {
+      return splitCheck;
+    }
+
+    const next = total + splitCheck.value;
+    // Guard against the running total itself overflowing the digit limit.
+    if (digitCount(next.toString()) > MAX_SAFE_DIGITS) {
+      return {
+        ok: false,
+        error: `split total exceeds maximum of ${MAX_SAFE_DIGITS} digits`,
+        code: ERROR_CODES.PRODUCT_OVERFLOW,
+      };
+    }
+
+    total = next;
+  }
+
+  return {
+    ok: true,
+    total,
+    isMatch: total === baseCheck.value,
+  };
+}
+
+function checkType(value: unknown, expectedType: string): boolean {
+  if (expectedType === "array") {
+    return Array.isArray(value);
+  }
+  if (expectedType === "object") {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+  if (expectedType === "bigint") {
+    return typeof value === "bigint";
+  }
+  return typeof value === expectedType;
+}
+
+function getActualType(value: unknown): string {
+  if (Array.isArray(value)) return "array";
+  if (value === null) return "null";
+  return typeof value;
+}
+
+/**
+ * Validate a response body (or error payload) against error definitions.
+ */
+export function validateErrorStructure(
+  responseBody: unknown,
+  definitions: ErrorDefinition[] | Record<string, ErrorDefinition> | ErrorDefinition,
+  explicitCode?: string
+): ParameterValidationResult {
+  if (responseBody === null || typeof responseBody !== "object") {
+    return {
+      ok: false,
+      error: "Response body must be a non-null object",
+      code: ERROR_CODES.PARAM_STRUCTURE_MISMATCH,
+      details: { providedParams: responseBody },
+    };
+  }
+
+  const defMap = new Map<string, ErrorDefinition>();
+  if (Array.isArray(definitions)) {
+    for (const def of definitions) {
+      defMap.set(def.code, def);
+    }
+  } else if ("code" in definitions && "parameters" in definitions) {
+    const singleDef = definitions as ErrorDefinition;
+    defMap.set(singleDef.code, singleDef);
+  } else {
+    for (const [key, value] of Object.entries(definitions as Record<string, ErrorDefinition>)) {
+      defMap.set(key, value);
+    }
+  }
+
+  const bodyObj = responseBody as Record<string, unknown>;
+  const responseCode =
+    explicitCode ||
+    (typeof bodyObj.code === "string"
+      ? bodyObj.code
+      : typeof bodyObj.errorCode === "string"
+      ? bodyObj.errorCode
+      : typeof bodyObj.error === "string" && defMap.has(bodyObj.error as string)
+      ? (bodyObj.error as string)
+      : undefined);
+
+  if (!responseCode || !defMap.has(responseCode)) {
+    if (defMap.size === 1 && !responseCode && !bodyObj.code && !bodyObj.errorCode) {
+      // Use single available definition
+    } else {
+      return {
+        ok: false,
+        error: `Unknown or missing error definition code: '${responseCode ?? "undefined"}'`,
+        code: ERROR_CODES.UNKNOWN_ERROR_DEFINITION,
+        details: { providedParams: responseBody },
+      };
+    }
+  }
+
+  const targetCode = responseCode || Array.from(defMap.keys())[0];
+  const expectedDef = defMap.get(targetCode)!;
+
+  let rawParams: unknown = bodyObj.parameters ?? bodyObj.params ?? bodyObj.args ?? bodyObj.data;
+  if (rawParams === undefined) {
+    const {
+      code: _code,
+      errorCode: _errorCode,
+      error: _error,
+      message: _message,
+      details: _details,
+      ...rest
+    } = bodyObj;
+    rawParams = rest;
+  }
+
+  if (typeof rawParams !== "object" || rawParams === null) {
+    return {
+      ok: false,
+      error: `Parameters for error '${targetCode}' must be an object or array`,
+      code: ERROR_CODES.PARAM_STRUCTURE_MISMATCH,
+      details: { expectedDefinition: expectedDef, providedParams: rawParams },
+    };
+  }
+
+  const expectedParams = expectedDef.parameters;
+  const expectedNames = expectedParams.map((p) => p.name);
+  const expectedParamMap = new Map<string, ParameterDefinition>();
+  for (const p of expectedParams) {
+    expectedParamMap.set(p.name, p);
+  }
+
+  if (Array.isArray(rawParams)) {
+    const paramArray = rawParams as unknown[];
+
+    const requiredCount = expectedParams.filter((p) => p.required !== false).length;
+    if (paramArray.length < requiredCount) {
+      const missingNames = expectedNames.slice(paramArray.length).filter(
+        (_, idx) => expectedParams[paramArray.length + idx]?.required !== false
+      );
+      return {
+        ok: false,
+        error: `Missing required ordered parameters for error '${targetCode}': ${missingNames.join(", ")}`,
+        code: ERROR_CODES.MISSING_PARAMETER,
+        details: { expectedDefinition: expectedDef, providedParams: rawParams, missingParams: missingNames },
+      };
+    }
+
+    if (paramArray.length > expectedParams.length) {
+      return {
+        ok: false,
+        error: `Received ${paramArray.length} parameters, expected max ${expectedParams.length} for error '${targetCode}'`,
+        code: ERROR_CODES.EXTRA_PARAMETER,
+        details: { expectedDefinition: expectedDef, providedParams: rawParams },
+      };
+    }
+
+    const hasNameProps =
+      paramArray.length > 0 &&
+      paramArray.every(
+        (item) => typeof item === "object" && item !== null && "name" in item
+      );
+
+    if (expectedDef.ordered && hasNameProps) {
+      const actualNames = (paramArray as Array<{ name: string; value?: unknown }>).map(
+        (item) => item.name
+      );
+      for (let i = 0; i < actualNames.length; i++) {
+        if (actualNames[i] !== expectedNames[i]) {
+          return {
+            ok: false,
+            error: `Parameter order mismatch for error '${targetCode}': expected order [${expectedNames.join(
+              ", "
+            )}], received [${actualNames.join(", ")}]`,
+            code: ERROR_CODES.INVALID_PARAMETER_ORDER,
+            details: { expectedDefinition: expectedDef, providedParams: rawParams },
+          };
+        }
+      }
+    }
+
+    const validatedParams: Record<string, unknown> = {};
+    const typeMismatches: Array<{ param: string; expected: string; actual: string }> = [];
+
+    for (let i = 0; i < paramArray.length; i++) {
+      const expectedP = expectedParams[i];
+      const rawVal = paramArray[i];
+      const actualVal =
+        typeof rawVal === "object" && rawVal !== null && "value" in rawVal
+          ? (rawVal as { value: unknown }).value
+          : rawVal;
+
+      if (!checkType(actualVal, expectedP.type)) {
+        typeMismatches.push({
+          param: expectedP.name,
+          expected: expectedP.type,
+          actual: getActualType(actualVal),
+        });
+      }
+      validatedParams[expectedP.name] = actualVal;
+    }
+
+    if (typeMismatches.length > 0) {
+      return {
+        ok: false,
+        error: `Parameter type mismatch in ordered parameters for '${targetCode}': ${typeMismatches
+          .map((m) => `${m.param} (expected ${m.expected}, got ${m.actual})`)
+          .join("; ")}`,
+        code: ERROR_CODES.INVALID_PARAMETER_TYPE,
+        details: { expectedDefinition: expectedDef, providedParams: rawParams, typeMismatches },
+      };
+    }
+
+    return {
+      ok: true,
+      code: targetCode,
+      validatedParams,
+    };
+  }
+
+  const paramObj = rawParams as Record<string, unknown>;
+  const missingParams: string[] = [];
+  const extraParams: string[] = [];
+  const typeMismatches: Array<{ param: string; expected: string; actual: string }> = [];
+  const validatedParams: Record<string, unknown> = {};
+
+  for (const p of expectedParams) {
+    if (!(p.name in paramObj)) {
+      if (p.required !== false) {
+        missingParams.push(p.name);
+      }
+    }
+  }
+
+  if (missingParams.length > 0) {
+    return {
+      ok: false,
+      error: `Missing required parameter(s) for error '${targetCode}': ${missingParams.join(", ")}`,
+      code: ERROR_CODES.MISSING_PARAMETER,
+      details: { expectedDefinition: expectedDef, providedParams: paramObj, missingParams },
+    };
+  }
+
+  for (const key of Object.keys(paramObj)) {
+    if (!expectedParamMap.has(key)) {
+      extraParams.push(key);
+    }
+  }
+
+  if (extraParams.length > 0) {
+    return {
+      ok: false,
+      error: `Unexpected extra parameter(s) for error '${targetCode}': ${extraParams.join(", ")}`,
+      code: ERROR_CODES.EXTRA_PARAMETER,
+      details: { expectedDefinition: expectedDef, providedParams: paramObj, extraParams },
+    };
+  }
+
+  if (expectedDef.ordered) {
+    const actualKeys = Object.keys(paramObj);
+    for (let i = 0; i < actualKeys.length; i++) {
+      if (actualKeys[i] !== expectedNames[i]) {
+        return {
+          ok: false,
+          error: `Parameter order mismatch for error '${targetCode}': expected key order [${expectedNames.join(
+            ", "
+          )}], received key order [${actualKeys.join(", ")}]`,
+          code: ERROR_CODES.INVALID_PARAMETER_ORDER,
+          details: { expectedDefinition: expectedDef, providedParams: paramObj },
+        };
+      }
+    }
+  }
+
+  for (const p of expectedParams) {
+    const val = paramObj[p.name];
+    if (!checkType(val, p.type)) {
+      typeMismatches.push({
+        param: p.name,
+        expected: p.type,
+        actual: getActualType(val),
+      });
+    }
+    validatedParams[p.name] = val;
+  }
+
+  if (typeMismatches.length > 0) {
+    return {
+      ok: false,
+      error: `Parameter type mismatch for error '${targetCode}': ${typeMismatches
+        .map((m) => `${m.param} (expected ${m.expected}, got ${m.actual})`)
+        .join("; ")}`,
+      code: ERROR_CODES.INVALID_PARAMETER_TYPE,
+      details: { expectedDefinition: expectedDef, providedParams: paramObj, typeMismatches },
+    };
+  }
+
+  return {
+    ok: true,
+    code: targetCode,
+    validatedParams,
+  };
+}
+
+/**
+ * Validate calculation parameters and context for conversion rate operations,
+ * reporting calculation exceptions and parameter structure mismatches.
+ */
+export function validateCalculationParameters(
+  context: CalculationContext,
+  expectedDefinition?: ErrorDefinition
+): ParameterValidationResult {
+  if (context === null || typeof context !== "object") {
+    return {
+      ok: false,
+      error: "Calculation context must be a valid non-null object",
+      code: ERROR_CODES.PARAM_STRUCTURE_MISMATCH,
+      details: { context },
+    };
+  }
+
+  if (expectedDefinition) {
+    const valResult = validateErrorStructure(context, expectedDefinition);
+    if (!valResult.ok) {
+      return valResult;
+    }
+  }
+
+  const { notional, rate } = context;
+
+  if (notional !== undefined) {
+    const notionalRes = parseIntegerInput(
+      notional as string | number | bigint,
+      "notional",
+      ERROR_CODES.INVALID_RATE,
+      ERROR_CODES.EXCESSIVE_DIGITS
+    );
+    if (!notionalRes.ok) {
+      return {
+        ok: false,
+        error: `Calculation exception on notional: ${notionalRes.error}`,
+        code: ERROR_CODES.CALCULATION_EXCEPTION,
+        details: { context, reason: notionalRes.error },
+      };
+    }
+  }
+
+  if (rate !== undefined) {
+    const rateRes = validateConversionRate(rate as string | number | bigint);
+    if (!rateRes.ok) {
+      return {
+        ok: false,
+        error: `Calculation exception on rate: ${rateRes.error}`,
+        code: ERROR_CODES.CALCULATION_EXCEPTION,
+        details: { context, reason: rateRes.error },
+      };
+    }
+  }
+
+  return {
+    ok: true,
+    validatedParams: context as Record<string, unknown>,
+  };
+}
+
+/**
+ * Safe conversion rate calculation wrapper validating parameter structure and calculation exceptions.
+ */
+export function safeApplyConversionRateWithValidation(
+  notional: unknown,
+  rate: unknown,
+  errorDef?: ErrorDefinition
+): ParameterValidationResult & { value?: bigint } {
+  const calcValidation = validateCalculationParameters({ notional, rate }, errorDef);
+  if (!calcValidation.ok) {
+    return calcValidation;
+  }
+
+  const applied = applyConversionRate(
+    notional as string | number | bigint,
+    rate as string | number | bigint
+  );
+
+  if (!applied.ok) {
+    return {
+      ok: false,
+      error: `Calculation exception during rate application: ${applied.error}`,
+      code: applied.code,
+      details: { context: { notional, rate }, reason: applied.error },
+    };
+  }
+
+  return {
+    ok: true,
+    validatedParams: { notional, rate },
+    value: applied.value,
+  };
 }

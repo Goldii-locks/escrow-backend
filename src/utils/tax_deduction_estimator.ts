@@ -79,6 +79,7 @@ export const ERROR_CODES = {
   TAX_EXCEEDS_AMOUNT: "TAX_ESTIMATOR_TAX_EXCEEDS_AMOUNT",
   INVALID_SCHEMA: "TAX_ESTIMATOR_INVALID_SCHEMA",
   RATE_LIMITED: "TAX_ESTIMATOR_RATE_LIMITED",
+  INVALID_CSV_INPUT: "TAX_ESTIMATOR_INVALID_CSV_INPUT",
   // Compatibility aliases
   OVERFLOW_EXCESSIVE_DIGITS: "OVERFLOW_EXCESSIVE_DIGITS",
   OVERFLOW_INVALID_AMOUNT: "OVERFLOW_INVALID_AMOUNT",
@@ -556,3 +557,171 @@ export function configureFormatColumns(defaultSchema?: DbPrecisionSchema) {
     validateSchema: (schema: DbPrecisionSchema) => validateDbPrecisionSchema(schema),
   };
 }
+
+/**
+ * A single estimator input to be rendered as one CSV table row.
+ */
+export interface TaxDeductionCsvRecord {
+  grossAmount: string | number | bigint;
+  taxRate: string | number | bigint;
+  taxScale?: string | number | bigint;
+  label?: string;
+}
+
+/** Columns the tax deduction CSV exporter can emit. */
+export const TAX_CSV_COLUMNS = [
+  "label",
+  "grossAmount",
+  "taxRate",
+  "taxAmount",
+  "netAmount",
+  "remainder",
+] as const;
+
+export type TaxCsvColumn = (typeof TAX_CSV_COLUMNS)[number];
+
+/**
+ * Options configuring tax deduction CSV block formatting.
+ */
+export interface TaxCsvExportOptions {
+  /** Single-character field delimiter. Defaults to ','. */
+  delimiter?: string;
+  /** Line ending string. Defaults to '\n'. */
+  lineEnding?: "\n" | "\r\n";
+  /** Whether to emit the header row. Defaults to true. */
+  includeHeader?: boolean;
+  /** Column keys to export, in order. Defaults to all columns (label only when present). */
+  columns?: TaxCsvColumn[];
+  /** Custom header labels; must match the column count when provided. */
+  headers?: string[];
+  /** Decimal scale applied to amount columns (0 = raw integer units). Defaults to 0. */
+  scale?: number;
+  /** Whether an empty records array is allowed. Defaults to true. */
+  allowEmpty?: boolean;
+}
+
+export type TaxCsvOutcome =
+  | { ok: true; value: string; rowCount: number; columns: TaxCsvColumn[] }
+  | { ok: false; error: string; code: TaxEstimatorErrorCode; status?: number };
+
+/**
+ * Escape a single CSV field following RFC 4180: fields containing the
+ * delimiter, quotes, or line breaks are quoted, with inner quotes doubled.
+ */
+export function escapeTaxCsvField(value: unknown, delimiter = ","): string {
+  if (value === null || value === undefined) {
+    return "";
+  }
+  const str = typeof value === "string" ? value : String(value);
+  if (
+    str.includes(delimiter) ||
+    str.includes('"') ||
+    str.includes("\n") ||
+    str.includes("\r")
+  ) {
+    return `"${str.replace(/"/g, '""')}"`;
+  }
+  return str;
+}
+
+/**
+ * Format an array of values into a single escaped CSV row.
+ */
+export function formatTaxCsvRow(values: unknown[], delimiter = ","): string {
+  return values.map((v) => escapeTaxCsvField(v, delimiter)).join(delimiter);
+}
+
+function csvError(error: string): TaxCsvOutcome {
+  return { ok: false, error, code: ERROR_CODES.INVALID_CSV_INPUT };
+}
+
+/**
+ * Build a CSV formatting block from tax deduction inputs. Each record is run
+ * through calculateTaxDeduction, so all digit, overflow, and rate-limit rules
+ * apply; the first failing record aborts the export with its error.
+ */
+export function buildTaxDeductionCsvBlock(
+  records: TaxDeductionCsvRecord[],
+  options: TaxCsvExportOptions = {}
+): TaxCsvOutcome {
+  if (!Array.isArray(records)) {
+    return csvError("records must be an array");
+  }
+  if (records.length === 0 && options.allowEmpty === false) {
+    return csvError("records array cannot be empty");
+  }
+
+  const delimiter = options.delimiter ?? ",";
+  if (delimiter.length !== 1 || /["\r\n]/.test(delimiter)) {
+    return csvError("delimiter must be a single character other than a quote or line break");
+  }
+  const lineEnding = options.lineEnding ?? "\n";
+  if (lineEnding !== "\n" && lineEnding !== "\r\n") {
+    return csvError("lineEnding must be '\\n' or '\\r\\n'");
+  }
+
+  const scale = options.scale ?? 0;
+  const schemaCheck = validateDbPrecisionSchema({ scale });
+  if (!schemaCheck.ok) {
+    return schemaCheck;
+  }
+
+  let columns: TaxCsvColumn[];
+  if (options.columns && options.columns.length > 0) {
+    const unknown = options.columns.find((c) => !TAX_CSV_COLUMNS.includes(c));
+    if (unknown !== undefined) {
+      return csvError(`unknown column: ${String(unknown)}`);
+    }
+    columns = [...options.columns];
+  } else {
+    const hasLabel = records.some((r) => r?.label !== undefined);
+    columns = TAX_CSV_COLUMNS.filter((c) => c !== "label" || hasLabel);
+  }
+
+  if (options.headers && options.headers.length !== columns.length) {
+    return csvError(
+      `headers length (${options.headers.length}) must match columns length (${columns.length})`
+    );
+  }
+
+  const amount = (v: bigint) => formatFixedScaleString(v.toString(), scale, true);
+  const lines: string[] = [];
+  if (options.includeHeader !== false) {
+    lines.push(formatTaxCsvRow(options.headers ?? columns, delimiter));
+  }
+
+  for (let i = 0; i < records.length; i++) {
+    const record = records[i];
+    if (typeof record !== "object" || record === null) {
+      return csvError(`record at index ${i} must be an object`);
+    }
+    const outcome = calculateTaxDeduction(
+      record.grossAmount,
+      record.taxRate,
+      record.taxScale ?? DEFAULT_TAX_SCALE
+    );
+    if (!outcome.ok) {
+      return { ...outcome, error: `record at index ${i}: ${outcome.error}` };
+    }
+
+    const cells: Record<TaxCsvColumn, string> = {
+      label: record.label ?? "",
+      grossAmount: amount(outcome.grossAmount),
+      taxRate: outcome.taxRate.toString(),
+      taxAmount: amount(outcome.taxAmount),
+      netAmount: amount(outcome.netAmount),
+      remainder: outcome.remainder.toString(),
+    };
+    lines.push(formatTaxCsvRow(columns.map((c) => cells[c]), delimiter));
+  }
+
+  return {
+    ok: true,
+    value: lines.length > 0 ? lines.join(lineEnding) + lineEnding : "",
+    rowCount: records.length,
+    columns,
+  };
+}
+
+/** Alias for buildTaxDeductionCsvBlock. */
+export const exportTaxDeductionsToCsv = buildTaxDeductionCsvBlock;
