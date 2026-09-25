@@ -32,6 +32,15 @@ describe("conversion_rate_scraper overflow validation", () => {
         expect(result.code).toBe(ERROR_CODES.INVALID_RATE);
       }
     });
+
+    it("rejects negative rates with NEGATIVE_RATE", () => {
+      const result = validateConversionRate("-1");
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.code).toBe(ERROR_CODES.NEGATIVE_RATE);
+        expect(result.error).toMatch(/negative/i);
+      }
+    });
   });
 
   describe("applyConversionRate", () => {
@@ -64,6 +73,24 @@ describe("conversion_rate_scraper overflow validation", () => {
       expect(result.ok).toBe(false);
       if (!result.ok) {
         expect(result.code).toBe(ERROR_CODES.PRODUCT_OVERFLOW);
+      }
+    });
+
+    it("rejects negative notional with NEGATIVE_RATE", () => {
+      const result = applyConversionRate("-100", "2");
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.code).toBe(ERROR_CODES.NEGATIVE_RATE);
+        expect(result.error).toMatch(/negative/i);
+      }
+    });
+
+    it("rejects negative rate with NEGATIVE_RATE", () => {
+      const result = applyConversionRate("100", "-2");
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.code).toBe(ERROR_CODES.NEGATIVE_RATE);
+        expect(result.error).toMatch(/negative/i);
       }
     });
   });
