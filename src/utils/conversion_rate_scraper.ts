@@ -42,6 +42,7 @@ export const ERROR_CODES = {
   EXCESSIVE_DIGITS: "OVERFLOW_EXCESSIVE_DIGITS",
   INVALID_RATE: "OVERFLOW_INVALID_RATE",
   PRODUCT_OVERFLOW: "OVERFLOW_PRODUCT_EXCEEDED",
+  NEGATIVE_RATE: "OVERFLOW_NEGATIVE_RATE",
 } as const;
 
 export type OverflowErrorCode =
@@ -57,12 +58,23 @@ export type ValidationResult =
 export function validateConversionRate(
   rate: string | number | bigint
 ): ValidationResult {
-  return parseIntegerInput(
+  const parsed = parseIntegerInput(
     rate,
     "rate",
     ERROR_CODES.INVALID_RATE,
     ERROR_CODES.EXCESSIVE_DIGITS
   );
+  if (!parsed.ok) {
+    return parsed;
+  }
+  if (parsed.value < 0n) {
+    return {
+      ok: false,
+      error: "rate cannot be negative",
+      code: ERROR_CODES.NEGATIVE_RATE,
+    };
+  }
+  return parsed;
 }
 
 /**
@@ -81,6 +93,13 @@ export function applyConversionRate(
   );
   if (!amount.ok) {
     return amount;
+  }
+  if (amount.value < 0n) {
+    return {
+      ok: false,
+      error: "notional cannot be negative",
+      code: ERROR_CODES.NEGATIVE_RATE,
+    };
   }
 
   const factor = validateConversionRate(rate);
