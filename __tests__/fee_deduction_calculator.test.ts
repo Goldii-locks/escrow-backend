@@ -319,12 +319,12 @@ describe("fee_deduction_calculator overflow validation", () => {
       }
     });
 
-    it("reports isValid false when expected total fee does not match", () => {
+    it("rejects when expected total fee does not match the share sum", () => {
       const result = checkFeeShareCalculation(1000, ["50", "30"], 100);
-      expect(result.ok).toBe(true);
-      if (result.ok) {
-        expect(result.totalFee).toBe(80n);
-        expect(result.isValid).toBe(false);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.code).toBe(ERROR_CODES.SUM_MISMATCH);
+        expect(result.error).toMatch(/does not match expected total/i);
       }
     });
 

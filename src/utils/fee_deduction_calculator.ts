@@ -34,6 +34,7 @@ export const ERROR_CODES = {
   SERIALIZATION_ERROR: "FEE_CALCULATOR_SERIALIZATION_ERROR",
   FILE_WRITE_ERROR: "FEE_CALCULATOR_FILE_WRITE_ERROR",
   FILE_READ_ERROR: "FEE_CALCULATOR_FILE_READ_ERROR",
+  SUM_MISMATCH: "FEE_CALCULATOR_SUM_MISMATCH",
   // Compatibility aliases
   OVERFLOW_EXCESSIVE_DIGITS: "OVERFLOW_EXCESSIVE_DIGITS",
   OVERFLOW_INVALID_AMOUNT: "OVERFLOW_INVALID_AMOUNT",
@@ -452,7 +453,8 @@ export function calculateFeeShareDeductions(
  * Fee share calculation checker:
  * Validates individual fee shares, checks running sum for overflow against
  * MAX_SAFE_DIGITS, ensures total fee does not exceed gross amount,
- * and verifies expected total fee if provided.
+ * and verifies expected total fee if provided. A mismatch is returned as a
+ * validation failure so callers cannot accidentally accept an invalid split.
  */
 export function checkFeeShareCalculation(
   grossAmount: string | number | bigint,
@@ -492,13 +494,18 @@ export function checkFeeShareCalculation(
     };
   }
 
-  let isValid = true;
   if (expectedTotalFee !== undefined) {
     const expectedCheck = validateAmount(expectedTotalFee, "expectedTotalFee");
     if (!expectedCheck.ok) {
       return expectedCheck;
     }
-    isValid = totalFee === expectedCheck.value;
+    if (totalFee !== expectedCheck.value) {
+      return {
+        ok: false,
+        error: `fee share total ${totalFee} does not match expected total ${expectedCheck.value}`,
+        code: ERROR_CODES.SUM_MISMATCH,
+      };
+    }
   }
 
   const netAmount = gross - totalFee;
@@ -508,7 +515,7 @@ export function checkFeeShareCalculation(
     grossAmount: gross,
     totalFee,
     netAmount,
-    isValid,
+    isValid: true,
   };
 }
 
