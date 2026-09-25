@@ -82,9 +82,9 @@ describe("CSV Serializer", () => {
 
   describe("formatCSVTimestamp", () => {
     it("should convert milliseconds to ISO 8601 format", () => {
-      const timestamp = 1695000000000; // 2023-09-18T00:40:00.000Z
+      const timestamp = 1695000000000; // 2023-09-18T01:20:00.000Z
       const formatted = formatCSVTimestamp(timestamp);
-      expect(formatted).toBe("2023-09-18T00:40:00.000Z");
+      expect(formatted).toBe("2023-09-18T01:20:00.000Z");
     });
 
     it("should handle different timestamps", () => {
@@ -96,7 +96,7 @@ describe("CSV Serializer", () => {
     it("should preserve millisecond precision", () => {
       const timestamp = 1695000000123;
       const formatted = formatCSVTimestamp(timestamp);
-      expect(formatted).toBe("2023-09-18T00:40:00.123Z");
+      expect(formatted).toBe("2023-09-18T01:20:00.123Z");
     });
   });
 
@@ -138,7 +138,7 @@ describe("CSV Serializer", () => {
       const row = createMockFormattedRow({ processed_at: 1695000000000 });
       const csv = serializeFormattedRowsToCSV([row], true, true);
 
-      expect(csv).toContain("2023-09-18T00:40:00.000Z");
+      expect(csv).toContain("2023-09-18T01:20:00.000Z");
     });
 
     it("should throw error for empty rows array", () => {
@@ -476,8 +476,8 @@ describe("CSV Serializer", () => {
           totalAmount: BigInt(1000000 * (idx + 1)),
           allocations: Array(idx + 2).fill(null).map((_, recipientIdx) => ({
             recipient: `ADDRESS_${idx}_${recipientIdx}`,
-            amount: BigInt(1000000 / (idx + 2)),
-            formattedAmount: String(1000000 / (idx + 2)),
+            amount: BigInt(Math.floor(1000000 / (idx + 2))),
+            formattedAmount: String(Math.floor(1000000 / (idx + 2))),
           })),
         })
       );

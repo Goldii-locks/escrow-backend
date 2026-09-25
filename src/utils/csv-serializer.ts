@@ -392,9 +392,13 @@ export function validateCSVOutput(
       };
     }
 
-    // Check if first line looks like headers (contains non-numeric, non-address values)
+    // The first line is a header row when none of its cells is numeric:
+    // every data row carries at least one amount, header rows carry none.
     const firstLine = lines[0];
-    const hasHeaders = firstLine.toLowerCase().includes("_") || firstLine.includes("index");
+    const firstCells = firstLine.split(",").map((cell) => cell.trim());
+    const hasHeaders = firstCells.every(
+      (cell) => cell.length > 0 && !/^-?\d+(\.\d+)?$/.test(cell)
+    );
 
     const dataRowCount = hasHeaders ? lines.length - 1 : lines.length;
 
