@@ -3,13 +3,19 @@
  * Rejects principals and rates whose digit count would risk unsafe numeric overflow.
  */
 
-/** Max decimal digits allowed for a principal or rate (below Number.MAX_SAFE_INTEGER). */
-export const MAX_SAFE_DIGITS = 15;
+import {
+  digitCount,
+  parseIntegerInput,
+  MAX_SAFE_DIGITS,
+} from "./digit-limit-validator.js";
+
+export { MAX_SAFE_DIGITS };
 
 export const ERROR_CODES = {
   EXCESSIVE_DIGITS: "OVERFLOW_EXCESSIVE_DIGITS",
   INVALID_RATE: "OVERFLOW_INVALID_RATE",
   PRODUCT_OVERFLOW: "OVERFLOW_PRODUCT_EXCEEDED",
+  SUM_MISMATCH: "OVERFLOW_SUM_MISMATCH",
 } as const;
 
 export type OverflowErrorCode =
@@ -19,58 +25,28 @@ export type ValidationResult =
   | { ok: true; value: bigint }
   | { ok: false; error: string; code: OverflowErrorCode };
 
-function digitCount(normalized: string): number {
-  const digits = normalized.replace(/^-/, "").replace(/^0+(?=\d)/, "");
-  return digits.length === 0 ? 1 : digits.length;
-}
-
-function parseIntegerInput(
-  input: string | number | bigint,
-  label: string,
-  invalidCode: OverflowErrorCode
-): ValidationResult {
-  let raw: string;
-
-  if (typeof input === "bigint") {
-    raw = input.toString();
-  } else if (typeof input === "number") {
-    if (!Number.isFinite(input) || !Number.isInteger(input)) {
-      return {
-        ok: false,
-        error: `${label} must be a finite integer`,
-        code: invalidCode,
-      };
-    }
-    raw = String(input);
-  } else {
-    raw = input.trim();
-    if (!/^-?\d+$/.test(raw)) {
-      return {
-        ok: false,
-        error: `${label} must be an integer numeric value`,
-        code: invalidCode,
-      };
-    }
-  }
-
-  if (digitCount(raw) > MAX_SAFE_DIGITS) {
-    return {
-      ok: false,
-      error: `${label} exceeds maximum of ${MAX_SAFE_DIGITS} digits`,
-      code: ERROR_CODES.EXCESSIVE_DIGITS,
-    };
-  }
-
-  return { ok: true, value: BigInt(raw) };
-}
-
 /**
  * Validate an interest rate (integer scaled factor) against digit limits.
  */
 export function validateInterestRate(
   rate: string | number | bigint
 ): ValidationResult {
-  return parseIntegerInput(rate, "rate", ERROR_CODES.INVALID_RATE);
+  return parseIntegerInput(
+    rate,
+    "rate",
+    ERROR_CODES.INVALID_RATE,
+    ERROR_CODES.EXCESSIVE_DIGITS
+  );
+}
+
+/**
+ * Validate a yield amount (split share or base total) against digit limits.
+ */
+export function validateYieldAmount(
+  input: string | number | bigint,
+  label = "amount"
+): ValidationResult {
+  return parseIntegerInput(input, label, ERROR_CODES.INVALID_RATE);
 }
 
 /**
@@ -84,7 +60,8 @@ export function estimateInterestYield(
   const amount = parseIntegerInput(
     principal,
     "principal",
-    ERROR_CODES.INVALID_RATE
+    ERROR_CODES.INVALID_RATE,
+    ERROR_CODES.EXCESSIVE_DIGITS
   );
   if (!amount.ok) {
     return amount;
@@ -105,4 +82,38 @@ export function estimateInterestYield(
   }
 
   return { ok: true, value: product };
+}
+
+/**
+ * Confirm that a set of split yield amounts sums exactly to the given base
+ * amount, rejecting allocations that over- or under-allocate the total.
+ */
+export function validateYieldSplitSum(
+  parts: Array<string | number | bigint>,
+  baseAmount: string | number | bigint
+): ValidationResult {
+  let total = 0n;
+
+  for (let i = 0; i < parts.length; i++) {
+    const checked = validateYieldAmount(parts[i], `parts[${i}]`);
+    if (!checked.ok) {
+      return checked;
+    }
+    total += checked.value;
+  }
+
+  const baseCheck = validateYieldAmount(baseAmount, "baseAmount");
+  if (!baseCheck.ok) {
+    return baseCheck;
+  }
+
+  if (total !== baseCheck.value) {
+    return {
+      ok: false,
+      error: `split total (${total}) does not match base amount (${baseCheck.value})`,
+      code: ERROR_CODES.SUM_MISMATCH,
+    };
+  }
+
+  return { ok: true, value: total };
 }
