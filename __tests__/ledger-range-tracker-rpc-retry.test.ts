@@ -14,6 +14,7 @@
 import { jest } from "@jest/globals";
 import Database from "better-sqlite3";
 import { setDb, runMigrations } from "../src/indexer/db.js";
+import logger from "../src/utils/logger.js";
 import {
   computeLedgerRangeRpcBackoffMs,
   isLedgerRangeRpcRetryable,
@@ -24,16 +25,19 @@ import {
 
 // ─── logger mock ────────────────────────────────────────────────────────────
 
-const mockLogger = {
-  info: jest.fn<(...args: unknown[]) => void>(),
-  warn: jest.fn<(...args: unknown[]) => void>(),
-  error: jest.fn<(...args: unknown[]) => void>(),
-  debug: jest.fn<(...args: unknown[]) => void>(),
-};
+// Spy on the shared logger instance. A module mock via
+// jest.unstable_mockModule would only apply to modules imported dynamically
+// after it is registered; this suite imports the tracker statically.
+type LoggerSpy = jest.Mock<(...args: unknown[]) => void>;
+const spyOn = (method: "info" | "warn" | "error" | "debug"): LoggerSpy =>
+  jest.spyOn(logger, method) as unknown as LoggerSpy;
 
-jest.unstable_mockModule("../src/utils/logger.js", () => ({
-  default: mockLogger,
-}));
+const mockLogger = {
+  info: spyOn("info"),
+  warn: spyOn("warn"),
+  error: spyOn("error"),
+  debug: spyOn("debug"),
+};
 
 // ─── Database setup ──────────────────────────────────────────────────────────
 
@@ -333,7 +337,7 @@ describe("LedgerRangeTracker — RPC retry backoff (#Task1)", () => {
       expect(result.status).toBe("success");
       // fetchEvents was called twice (1 failure + 1 success)
       expect(calls).toBe(2);
-      expect(result.failureMonitor ?? tracker.failureMonitor.getConsecutiveFailures()).toBe(0);
+      expect(tracker.failureMonitor.getConsecutiveFailures()).toBe(0);
     });
 
     it("exhausts retries and propagates the error after maxRetries transient failures", async () => {

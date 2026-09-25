@@ -1061,7 +1061,7 @@ export class LedgerRangeTracker {
             let pageEvents: EventRow[];
             try {
               pageEvents = await withLedgerRangeRpcRetry(
-                () => options.fetchEvents!(page),
+                async () => options.fetchEvents!(page),
                 this.rpcRetryConfig,
                 `${this.name}_fetchEvents`,
               );
