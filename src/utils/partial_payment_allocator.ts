@@ -15,11 +15,25 @@ export const MAX_INTERMEDIATE_DIGITS = MAX_SAFE_DIGITS * 2;
 /** Scaling factor used to convert floating-point shares into integer numerators. */
 const SHARE_SCALE = 1_000_000;
 
+/** Known Stellar token tickers with their default decimals configuration. */
+export const DEFAULT_TOKEN_CONFIG: Record<string, { decimals: number }> = {
+  XLM: { decimals: 7 },
+  USDC: { decimals: 7 },
+  EURC: { decimals: 6 },
+  XRP: { decimals: 6 },
+};
+
+/** Default fallback configuration for unknown tickers. */
+export const FALLBACK_TOKEN_CONFIG = { decimals: 7 };
+
 export const ERROR_CODES = {
   EXCESSIVE_DIGITS: "ALLOCATOR_EXCESSIVE_DIGITS",
   INVALID_AMOUNT: "ALLOCATOR_INVALID_AMOUNT",
   INVALID_SHARES: "ALLOCATOR_INVALID_SHARES",
   ALLOCATION_OVERFLOW: "ALLOCATOR_OVERFLOW",
+  NEGATIVE_AMOUNT: "ALLOCATOR_NEGATIVE_AMOUNT",
+  UNKNOWN_TICKER: "ALLOCATOR_UNKNOWN_TICKER",
+  SUM_MISMATCH: "ALLOCATOR_SUM_MISMATCH",
 } as const;
 
 export type OverflowErrorCode =
@@ -58,7 +72,7 @@ export function validatePaymentAmount(
       };
     }
     raw = String(input);
-  } else {
+  } else if (typeof input === "string") {
     raw = input.trim();
     if (!/^-?\d+$/.test(raw)) {
       return {
@@ -67,6 +81,21 @@ export function validatePaymentAmount(
         code: ERROR_CODES.INVALID_AMOUNT,
       };
     }
+  } else {
+    return {
+      ok: false,
+      error: `${label} must be a string, number, or bigint`,
+      code: ERROR_CODES.INVALID_AMOUNT,
+    };
+  }
+
+  // Reject negative amounts
+  if (raw.startsWith("-")) {
+    return {
+      ok: false,
+      error: `${label} must be non-negative`,
+      code: ERROR_CODES.NEGATIVE_AMOUNT,
+    };
   }
 
   if (digitCount(raw) > MAX_SAFE_DIGITS) {
@@ -109,6 +138,37 @@ function validateShares(shares: number[]): ValidationResult | null {
   }
 
   return null;
+}
+
+/**
+ * Get token configuration for a given ticker.
+ * Returns fallback configuration for unknown tickers.
+ */
+export function getTokenConfig(ticker: string): { decimals: number } {
+  const normalized = ticker.toUpperCase();
+  if (DEFAULT_TOKEN_CONFIG[normalized]) {
+    return DEFAULT_TOKEN_CONFIG[normalized];
+  }
+  return FALLBACK_TOKEN_CONFIG;
+}
+
+/**
+ * Validate and resolve token configuration.
+ * Returns error with UNKNOWN_TICKER code if ticker is not recognized.
+ */
+export function validateTokenConfig(
+  ticker: string
+): { ok: true; value: { decimals: number } } | { ok: false; error: string; code: OverflowErrorCode } {
+  if (!ticker || typeof ticker !== "string" || ticker.trim().length === 0) {
+    return {
+      ok: false,
+      error: "ticker must be a non-empty string",
+      code: ERROR_CODES.UNKNOWN_TICKER,
+    };
+  }
+
+  const config = getTokenConfig(ticker);
+  return { ok: true, value: config };
 }
 
 /**
@@ -170,4 +230,69 @@ export function allocatePartialPayment(
   const remainder = total - allocatedSum;
 
   return { ok: true, allocations, remainder };
+}
+
+/**
+ * Split a payment amount using token ticker for decimals configuration.
+ * Uses fallback configuration for unknown tickers.
+ */
+export type TickerAllocationOutcome =
+  | { ok: true; allocations: bigint[]; remainder: bigint; ticker: string; decimals: number }
+  | { ok: false; error: string; code: OverflowErrorCode };
+
+export function allocatePartialPaymentWithTicker(
+  totalAmount: string | number | bigint,
+  shares: number[],
+  ticker: string
+): TickerAllocationOutcome {
+  const tokenCheck = validateTokenConfig(ticker);
+  if (!tokenCheck.ok) {
+    // This shouldn't happen with fallback, but keep for safety
+    return tokenCheck;
+  }
+
+  const allocationResult = allocatePartialPayment(totalAmount, shares);
+  if (!allocationResult.ok) {
+    return allocationResult;
+  }
+
+  return {
+    ...allocationResult,
+    ticker: ticker.toUpperCase(),
+    decimals: tokenCheck.value.decimals,
+  };
+}
+
+/**
+ * Confirm that a set of split payment amounts sums exactly to the given base
+ * total amount, rejecting allocations that over- or under-allocate the total.
+ */
+export function validateAllocationSum(
+  parts: Array<string | number | bigint>,
+  baseAmount: string | number | bigint
+): ValidationResult {
+  let total = 0n;
+
+  for (let i = 0; i < parts.length; i++) {
+    const checked = validatePaymentAmount(parts[i], `parts[${i}]`);
+    if (!checked.ok) {
+      return checked;
+    }
+    total += checked.value;
+  }
+
+  const baseCheck = validatePaymentAmount(baseAmount, "baseAmount");
+  if (!baseCheck.ok) {
+    return baseCheck;
+  }
+
+  if (total !== baseCheck.value) {
+    return {
+      ok: false,
+      error: `split total (${total}) does not match base amount (${baseCheck.value})`,
+      code: ERROR_CODES.SUM_MISMATCH,
+    };
+  }
+
+  return { ok: true, value: total };
 }

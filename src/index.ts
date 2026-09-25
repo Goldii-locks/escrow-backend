@@ -6,6 +6,7 @@ import dotenv from "dotenv";
 import jobRoutes from "./routes/jobs.js";
 import adminRoutes from "./routes/admin.js";
 import webhookRoutes from "./routes/webhooks.js";
+import estimateRoutes from "./routes/estimate.js";
 import { runMigrations } from "./indexer/db.js";
 import { generalLimiter } from "./middleware/rateLimiter.js";
 import { startPoller } from "./indexer/poller.js";
@@ -65,6 +66,7 @@ app.use("/api", generalLimiter);
 app.use("/api/jobs", jobRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api/webhooks", webhookRoutes);
+app.use("/api/estimate", estimateRoutes);
 
 // Global error handler – prevents stack trace leakage
 app.use((err: unknown, req: Request, res: Response, _next: NextFunction) => {
