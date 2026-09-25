@@ -236,3 +236,420 @@ export function applyRoundedScale(
 
   return roundHalfEven(product, denomCheck.value);
 }
+
+// ---------------------------------------------------------------------------
+// TASK 5 – Parameter warning codes and error-response shapes
+// ---------------------------------------------------------------------------
+
+/**
+ * Detailed per-parameter warning codes.
+ *
+ * `ERROR_CODES` above describes *why a calculation failed*; these codes
+ * describe *which parameter was at fault*, so a caller (or an API error
+ * handler) can point at the offending argument instead of a generic overflow
+ * message. They are additive: every existing `ERROR_CODES` value keeps its
+ * meaning.
+ */
+export const PARAMETER_WARNING_CODES = {
+  AMOUNT_MISSING: "PARAM_AMOUNT_MISSING",
+  AMOUNT_NOT_INTEGER: "PARAM_AMOUNT_NOT_INTEGER",
+  AMOUNT_NEGATIVE: "PARAM_AMOUNT_NEGATIVE",
+  AMOUNT_EXCESSIVE_DIGITS: "PARAM_AMOUNT_EXCESSIVE_DIGITS",
+  AMOUNTS_NOT_ARRAY: "PARAM_AMOUNTS_NOT_ARRAY",
+  AMOUNTS_EMPTY: "PARAM_AMOUNTS_EMPTY",
+  ENTRY_INVALID: "PARAM_ENTRY_INVALID",
+  LABEL_MISSING: "PARAM_LABEL_MISSING",
+  DIVISOR_NOT_INTEGER: "PARAM_DIVISOR_NOT_INTEGER",
+  DIVISOR_OUT_OF_RANGE: "PARAM_DIVISOR_OUT_OF_RANGE",
+  SCALE_DENOMINATOR_ZERO: "PARAM_SCALE_DENOMINATOR_ZERO",
+  SCALE_NUMERATOR_INVALID: "PARAM_SCALE_NUMERATOR_INVALID",
+  TYPE_INVALID: "PARAM_TYPE_INVALID",
+} as const;
+
+export type ParameterWarningCode =
+  (typeof PARAMETER_WARNING_CODES)[keyof typeof PARAMETER_WARNING_CODES];
+
+/** A single parameter problem, reported without aborting a whole batch. */
+export type ParameterWarning = {
+  code: ParameterWarningCode;
+  /** The parameter that caused the problem, e.g. "amounts[2]". */
+  parameter: string;
+  message: string;
+  /** Position in a list input, when the parameter came from one. */
+  index: number | null;
+  /** The existing calculation code this maps back to, when there is one. */
+  calculationCode: OverflowErrorCode | RoundingErrorCode | null;
+};
+
+/** The published definition of a warning code: what it means and how to reply. */
+export type ParameterErrorDefinition = {
+  code: ParameterWarningCode;
+  parameter: string;
+  httpStatus: number;
+  summary: string;
+};
+
+/**
+ * The error definition list. Every `PARAMETER_WARNING_CODES` entry has exactly
+ * one definition, and the response body built by `toErrorResponse()` is
+ * asserted against these definitions.
+ */
+export const PARAMETER_ERROR_DEFINITIONS: readonly ParameterErrorDefinition[] = [
+  {
+    code: PARAMETER_WARNING_CODES.AMOUNT_MISSING,
+    parameter: "amount",
+    httpStatus: 400,
+    summary: "No amount was supplied for an entry that requires one.",
+  },
+  {
+    code: PARAMETER_WARNING_CODES.AMOUNT_NOT_INTEGER,
+    parameter: "amount",
+    httpStatus: 400,
+    summary: "The amount is not an integer numeric value.",
+  },
+  {
+    code: PARAMETER_WARNING_CODES.AMOUNT_NEGATIVE,
+    parameter: "amount",
+    httpStatus: 400,
+    summary: "The amount is negative, which this check does not accept.",
+  },
+  {
+    code: PARAMETER_WARNING_CODES.AMOUNT_EXCESSIVE_DIGITS,
+    parameter: "amount",
+    httpStatus: 422,
+    summary: `The amount exceeds the safe limit of ${MAX_SAFE_DIGITS} digits.`,
+  },
+  {
+    code: PARAMETER_WARNING_CODES.AMOUNTS_NOT_ARRAY,
+    parameter: "amounts",
+    httpStatus: 400,
+    summary: "The ledger amounts were not supplied as an array.",
+  },
+  {
+    code: PARAMETER_WARNING_CODES.AMOUNTS_EMPTY,
+    parameter: "amounts",
+    httpStatus: 400,
+    summary: "The ledger amounts array is empty.",
+  },
+  {
+    code: PARAMETER_WARNING_CODES.ENTRY_INVALID,
+    parameter: "amounts[i]",
+    httpStatus: 422,
+    summary: "One ledger entry failed validation; the index identifies which.",
+  },
+  {
+    code: PARAMETER_WARNING_CODES.LABEL_MISSING,
+    parameter: "label",
+    httpStatus: 400,
+    summary: "The entry label is empty, so failures cannot be attributed.",
+  },
+  {
+    code: PARAMETER_WARNING_CODES.DIVISOR_NOT_INTEGER,
+    parameter: "divisor",
+    httpStatus: 400,
+    summary: "The divisor is not a finite integer.",
+  },
+  {
+    code: PARAMETER_WARNING_CODES.DIVISOR_OUT_OF_RANGE,
+    parameter: "divisor",
+    httpStatus: 422,
+    summary: "The divisor is zero or negative.",
+  },
+  {
+    code: PARAMETER_WARNING_CODES.SCALE_DENOMINATOR_ZERO,
+    parameter: "scaleDenominator",
+    httpStatus: 422,
+    summary: "The scale denominator is zero, so the factor is undefined.",
+  },
+  {
+    code: PARAMETER_WARNING_CODES.SCALE_NUMERATOR_INVALID,
+    parameter: "scaleNumerator",
+    httpStatus: 400,
+    summary: "The scale numerator is not a valid integer amount.",
+  },
+  {
+    code: PARAMETER_WARNING_CODES.TYPE_INVALID,
+    parameter: "input",
+    httpStatus: 400,
+    summary: "An input was of an unsupported type for this calculation.",
+  },
+];
+
+const DEFINITIONS_BY_CODE = new Map<ParameterWarningCode, ParameterErrorDefinition>(
+  PARAMETER_ERROR_DEFINITIONS.map((definition) => [definition.code, definition])
+);
+
+/** The published definition for a warning code, if it is a known code. */
+export function describeParameterWarning(
+  code: ParameterWarningCode
+): ParameterErrorDefinition | undefined {
+  return DEFINITIONS_BY_CODE.get(code);
+}
+
+/** Every warning code has exactly one definition. */
+export function listUncoveredParameterCodes(): ParameterWarningCode[] {
+  return (Object.values(PARAMETER_WARNING_CODES) as ParameterWarningCode[]).filter(
+    (code) => !DEFINITIONS_BY_CODE.has(code)
+  );
+}
+
+function warn(
+  code: ParameterWarningCode,
+  parameter: string,
+  message: string,
+  index: number | null = null,
+  calculationCode: OverflowErrorCode | RoundingErrorCode | null = null
+): ParameterWarning {
+  return { code, parameter, message, index, calculationCode };
+}
+
+/**
+ * Inspect the parameters of a ledger-sum / rounding call and report every
+ * problem individually instead of stopping at the first one, so a caller can
+ * see all of the arguments it got wrong in a single pass.
+ */
+export function collectParameterWarnings(input: {
+  amounts?: unknown;
+  amount?: unknown;
+  label?: unknown;
+  divisor?: unknown;
+  scaleNumerator?: unknown;
+  scaleDenominator?: unknown;
+}): ParameterWarning[] {
+  const warnings: ParameterWarning[] = [];
+
+  if ("label" in input && (typeof input.label !== "string" || input.label.trim() === "")) {
+    warnings.push(
+      warn(PARAMETER_WARNING_CODES.LABEL_MISSING, "label", "label must be a non-empty string")
+    );
+  }
+
+  if ("amounts" in input) {
+    const { amounts } = input;
+    if (!Array.isArray(amounts)) {
+      warnings.push(
+        warn(PARAMETER_WARNING_CODES.AMOUNTS_NOT_ARRAY, "amounts", "amounts must be an array")
+      );
+    } else if (amounts.length === 0) {
+      warnings.push(
+        warn(PARAMETER_WARNING_CODES.AMOUNTS_EMPTY, "amounts", "amounts must not be empty")
+      );
+    } else {
+      amounts.forEach((entry, index) => {
+        if (entry === undefined || entry === null || entry === "") {
+          warnings.push(
+            warn(
+              PARAMETER_WARNING_CODES.AMOUNT_MISSING,
+              `amounts[${index}]`,
+              "no amount supplied",
+              index,
+              ERROR_CODES.INVALID_AMOUNT
+            )
+          );
+          return;
+        }
+
+        const checked = validateLedgerAmount(entry as string | number | bigint, `amounts[${index}]`);
+        if (checked.ok) {
+          if (checked.value < 0n) {
+            warnings.push(
+              warn(
+                PARAMETER_WARNING_CODES.AMOUNT_NEGATIVE,
+                `amounts[${index}]`,
+                "amounts[i] must not be negative",
+                index,
+                ERROR_CODES.INVALID_AMOUNT
+              )
+            );
+          }
+          return;
+        }
+
+        const isDigits = checked.code === ERROR_CODES.EXCESSIVE_DIGITS;
+        warnings.push(
+          warn(
+            isDigits ? PARAMETER_WARNING_CODES.AMOUNT_EXCESSIVE_DIGITS : PARAMETER_WARNING_CODES.ENTRY_INVALID,
+            `amounts[${index}]`,
+            checked.error,
+            index,
+            checked.code
+          )
+        );
+      });
+    }
+  }
+
+  if ("amount" in input) {
+    const { amount } = input;
+    if (amount === undefined || amount === null || amount === "") {
+      warnings.push(warn(PARAMETER_WARNING_CODES.AMOUNT_MISSING, "amount", "amount is required"));
+    } else {
+      const checked = validateLedgerAmount(amount as string | number | bigint, "amount");
+      if (!checked.ok) {
+        const isDigits = checked.code === ERROR_CODES.EXCESSIVE_DIGITS;
+        warnings.push(
+          warn(
+            isDigits ? PARAMETER_WARNING_CODES.AMOUNT_EXCESSIVE_DIGITS : PARAMETER_WARNING_CODES.AMOUNT_NOT_INTEGER,
+            "amount",
+            checked.error,
+            null,
+            checked.code
+          )
+        );
+      } else if (checked.value < 0n) {
+        warnings.push(
+          warn(
+            PARAMETER_WARNING_CODES.AMOUNT_NEGATIVE,
+            "amount",
+            "amount must not be negative",
+            null,
+            ERROR_CODES.INVALID_AMOUNT
+          )
+        );
+      }
+    }
+  }
+
+  if ("divisor" in input) {
+    const { divisor } = input;
+    if (typeof divisor !== "number" || !Number.isFinite(divisor) || !Number.isInteger(divisor)) {
+      warnings.push(
+        warn(
+          PARAMETER_WARNING_CODES.DIVISOR_NOT_INTEGER,
+          "divisor",
+          "divisor must be a finite integer",
+          null,
+          ERROR_CODES.ROUNDING_SCALE_INVALID
+        )
+      );
+    } else if (divisor <= 0) {
+      warnings.push(
+        warn(
+          PARAMETER_WARNING_CODES.DIVISOR_OUT_OF_RANGE,
+          "divisor",
+          "divisor must be greater than zero",
+          null,
+          ERROR_CODES.ROUNDING_SCALE_INVALID
+        )
+      );
+    }
+  }
+
+  if ("scaleDenominator" in input) {
+    const checked = validateLedgerAmount(
+      input.scaleDenominator as string | number | bigint,
+      "scaleDenominator"
+    );
+    if (checked.ok && checked.value === 0n) {
+      warnings.push(
+        warn(
+          PARAMETER_WARNING_CODES.SCALE_DENOMINATOR_ZERO,
+          "scaleDenominator",
+          "scaleDenominator must not be zero",
+          null,
+          ERROR_CODES.ROUNDING_SCALE_INVALID
+        )
+      );
+    } else if (!checked.ok) {
+      warnings.push(
+        warn(
+          PARAMETER_WARNING_CODES.TYPE_INVALID,
+          "scaleDenominator",
+          checked.error,
+          null,
+          checked.code
+        )
+      );
+    }
+  }
+
+  if ("scaleNumerator" in input) {
+    const checked = validateLedgerAmount(
+      input.scaleNumerator as string | number | bigint,
+      "scaleNumerator"
+    );
+    if (!checked.ok) {
+      warnings.push(
+        warn(
+          PARAMETER_WARNING_CODES.SCALE_NUMERATOR_INVALID,
+          "scaleNumerator",
+          checked.error,
+          null,
+          checked.code
+        )
+      );
+    }
+  }
+
+  return warnings;
+}
+
+/** The JSON body an API handler returns for a parameter warning. */
+export type ParameterErrorResponse = {
+  success: false;
+  error: {
+    code: ParameterWarningCode;
+    parameter: string;
+    message: string;
+    httpStatus: number;
+    summary: string;
+  };
+};
+
+/**
+ * Build the response body for a warning. The shape is driven by
+ * `PARAMETER_ERROR_DEFINITIONS`, so a new code cannot produce an accidental
+ * body shape.
+ */
+export function toErrorResponse(warning: ParameterWarning, detail?: string): ParameterErrorResponse {
+  const definition = describeParameterWarning(warning.code);
+  if (!definition) {
+    throw new Error(`no error definition registered for parameter code "${warning.code}"`);
+  }
+
+  return {
+    success: false,
+    error: {
+      code: definition.code,
+      parameter: warning.parameter || definition.parameter,
+      message: detail ?? warning.message,
+      httpStatus: definition.httpStatus,
+      summary: definition.summary,
+    },
+  };
+}
+
+/** The exact key set every parameter error body must carry. */
+export const PARAMETER_ERROR_BODY_KEYS = [
+  "code",
+  "parameter",
+  "message",
+  "httpStatus",
+  "summary",
+] as const;
+
+/**
+ * Assert a response body matches the definition list: known code, the
+ * documented parameter and status, a non-empty message, and no extra keys.
+ */
+export function matchesErrorDefinition(body: unknown, expectedCode?: ParameterWarningCode): boolean {
+  if (typeof body !== "object" || body === null) return false;
+
+  const response = body as Partial<ParameterErrorResponse>;
+  if (response.success !== false) return false;
+  if (typeof response.error !== "object" || response.error === null) return false;
+
+  const error = response.error as unknown as Record<string, unknown>;
+  const definition = describeParameterWarning(error.code as ParameterWarningCode);
+  if (!definition) return false;
+  if (expectedCode !== undefined && definition.code !== expectedCode) return false;
+
+  if (typeof error.message !== "string" || error.message.trim() === "") return false;
+  if (error.httpStatus !== definition.httpStatus) return false;
+  if (error.summary !== definition.summary) return false;
+  if (typeof error.parameter !== "string" || error.parameter.trim() === "") return false;
+
+  const keys = Object.keys(error).sort();
+  const expected = [...PARAMETER_ERROR_BODY_KEYS].sort();
+  return keys.length === expected.length && keys.every((key, i) => key === expected[i]);
+}
