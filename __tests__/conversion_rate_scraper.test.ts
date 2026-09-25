@@ -1,3 +1,4 @@
+import { jest } from "@jest/globals";
 import {
   MAX_SAFE_DIGITS,
   ERROR_CODES,
@@ -174,24 +175,26 @@ describe("conversion_rate_scraper rate limiting", () => {
   });
 
   it("resets the bucket after the window expires", () => {
-    // Use a 1 ms window so we can expire it immediately
-    process.env.CONVERSION_RATE_WINDOW_MS = "1";
+    // Drive the clock explicitly so the result does not depend on how fast
+    // the test runner executes the calls.
+    process.env.CONVERSION_RATE_WINDOW_MS = "1000";
     resetConversionRateLimitBuckets();
+    let now = 1_700_000_000_000;
+    const nowSpy = jest.spyOn(Date, "now").mockImplementation(() => now);
 
-    for (let i = 0; i < 3; i++) {
-      checkConversionRateLimit("client-f");
+    try {
+      for (let i = 0; i < 3; i++) {
+        checkConversionRateLimit("client-f");
+      }
+      // Exhausted within the window
+      expect(checkConversionRateLimit("client-f").allowed).toBe(false);
+
+      // Once the window has elapsed the bucket resets
+      now += 1000;
+      expect(checkConversionRateLimit("client-f").allowed).toBe(true);
+    } finally {
+      nowSpy.mockRestore();
     }
-    // Exhaust
-    expect(checkConversionRateLimit("client-f").allowed).toBe(false);
-
-    // Wait for window to expire then try again
-    return new Promise<void>((resolve) => {
-      setTimeout(() => {
-        const result = checkConversionRateLimit("client-f");
-        expect(result.allowed).toBe(true);
-        resolve();
-      }, 5);
-    });
   });
 
   it("exposes resetAt timestamp in the result", () => {
