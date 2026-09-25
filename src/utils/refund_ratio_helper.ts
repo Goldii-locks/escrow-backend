@@ -10,6 +10,7 @@ export const ERROR_CODES = {
   EXCESSIVE_DIGITS: "OVERFLOW_EXCESSIVE_DIGITS",
   INVALID_RATIO: "OVERFLOW_INVALID_RATIO",
   PRODUCT_OVERFLOW: "OVERFLOW_PRODUCT_EXCEEDED",
+  SUM_MISMATCH: "OVERFLOW_SUM_MISMATCH",
 } as const;
 
 export type OverflowErrorCode =
@@ -74,6 +75,16 @@ export function validateRefundRatio(
 }
 
 /**
+ * Validate a refund amount (split share or base total) against digit limits.
+ */
+export function validateRefundAmount(
+  input: string | number | bigint,
+  label = "amount"
+): ValidationResult {
+  return parseIntegerInput(input, label, ERROR_CODES.INVALID_RATIO);
+}
+
+/**
  * Split a dispute amount by refund ratio after validating both operands for overflow.
  * Ratio is treated as an integer scaled factor (e.g. basis points).
  */
@@ -105,4 +116,38 @@ export function applyRefundRatio(
   }
 
   return { ok: true, value: product };
+}
+
+/**
+ * Confirm that a set of split refund amounts sums exactly to the given base
+ * amount, rejecting allocations that over- or under-allocate the total.
+ */
+export function validateRefundSplitSum(
+  parts: Array<string | number | bigint>,
+  baseAmount: string | number | bigint
+): ValidationResult {
+  let total = 0n;
+
+  for (let i = 0; i < parts.length; i++) {
+    const checked = validateRefundAmount(parts[i], `parts[${i}]`);
+    if (!checked.ok) {
+      return checked;
+    }
+    total += checked.value;
+  }
+
+  const baseCheck = validateRefundAmount(baseAmount, "baseAmount");
+  if (!baseCheck.ok) {
+    return baseCheck;
+  }
+
+  if (total !== baseCheck.value) {
+    return {
+      ok: false,
+      error: `split total (${total}) does not match base amount (${baseCheck.value})`,
+      code: ERROR_CODES.SUM_MISMATCH,
+    };
+  }
+
+  return { ok: true, value: total };
 }
