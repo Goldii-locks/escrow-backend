@@ -79,6 +79,10 @@ export const ERROR_CODES = {
   TAX_EXCEEDS_AMOUNT: "TAX_ESTIMATOR_TAX_EXCEEDS_AMOUNT",
   INVALID_SCHEMA: "TAX_ESTIMATOR_INVALID_SCHEMA",
   RATE_LIMITED: "TAX_ESTIMATOR_RATE_LIMITED",
+  INVALID_SCALE: "TAX_ESTIMATOR_INVALID_SCALE",
+  INVALID_BRACKET: "TAX_ESTIMATOR_INVALID_BRACKET",
+  RATE_EXCEEDS_SCALE: "TAX_ESTIMATOR_RATE_EXCEEDS_SCALE",
+  EMPTY_BRACKETS: "TAX_ESTIMATOR_EMPTY_BRACKETS",
   INVALID_CSV_INPUT: "TAX_ESTIMATOR_INVALID_CSV_INPUT",
   // Compatibility aliases
   OVERFLOW_EXCESSIVE_DIGITS: "OVERFLOW_EXCESSIVE_DIGITS",
@@ -725,3 +729,243 @@ export function buildTaxDeductionCsvBlock(
 
 /** Alias for buildTaxDeductionCsvBlock. */
 export const exportTaxDeductionsToCsv = buildTaxDeductionCsvBlock;
+
+// ---------------------------------------------------------------------------
+// Progressive (bracket) tax estimation (#457)
+// ---------------------------------------------------------------------------
+
+/**
+ * A single bracket in a progressive/tiered tax schedule.
+ *
+ * upTo  – inclusive upper bound of this bracket in the same integer unit as
+ *         the gross amount; null / undefined marks the top (unlimited) bracket.
+ * rate  – integer tax rate for amounts that fall within this bracket.
+ * scale – denominator for the rate (defaults to DEFAULT_TAX_SCALE).
+ *
+ * Example: { upTo: 50_000, rate: 1000 } -> 10% up to 50,000
+ *          { upTo: null,   rate: 2000 } -> 20% above 50,000
+ */
+export interface TaxBracket {
+  upTo: string | number | bigint | null | undefined;
+  rate: string | number | bigint;
+  scale?: string | number | bigint;
+}
+
+export type BracketTaxOutcome =
+  | {
+      ok: true;
+      grossAmount: bigint;
+      bracketTaxes: bigint[];
+      totalTaxAmount: bigint;
+      netAmount: bigint;
+      effectiveRateBps: bigint;
+    }
+  | { ok: false; error: string; code: TaxEstimatorErrorCode; status?: number };
+
+/** Validate a gross (pre-tax) amount: a non-negative integer within MAX_SAFE_DIGITS. */
+export function validateGrossAmount(
+  input: string | number | bigint,
+  label = "grossAmount"
+): ValidationResult {
+  return validateTaxAmount(input, label);
+}
+
+/**
+ * Validate a rate scale (denominator): a positive integer within
+ * MAX_SAFE_DIGITS. Format errors are reported as INVALID_SCALE.
+ */
+export function validateTaxScale(
+  input: string | number | bigint,
+  label = "taxScale"
+): ValidationResult {
+  const result = validateTaxRate(input, label);
+  if (!result.ok) {
+    return result.code === ERROR_CODES.INVALID_TAX_RATE
+      ? { ...result, code: ERROR_CODES.INVALID_SCALE }
+      : result;
+  }
+  if (result.value <= 0n) {
+    return {
+      ok: false,
+      error: `${label} must be a positive integer`,
+      code: ERROR_CODES.INVALID_SCALE,
+    };
+  }
+  return result;
+}
+
+function validateBracket(
+  bracket: TaxBracket,
+  index: number
+):
+  | { ok: true; upTo: bigint | null; rate: bigint; scale: bigint }
+  | { ok: false; error: string; code: TaxEstimatorErrorCode } {
+  const label = `brackets[${index}]`;
+
+  if (bracket === null || typeof bracket !== "object") {
+    return {
+      ok: false,
+      error: `${label} must be an object`,
+      code: ERROR_CODES.INVALID_BRACKET,
+    };
+  }
+
+  const rateCheck = validateTaxRate(bracket.rate, `${label}.rate`);
+  if (!rateCheck.ok) {
+    return rateCheck;
+  }
+
+  const scaleCheck = validateTaxScale(
+    bracket.scale ?? DEFAULT_TAX_SCALE,
+    `${label}.scale`
+  );
+  if (!scaleCheck.ok) {
+    return scaleCheck;
+  }
+
+  if (rateCheck.value > scaleCheck.value) {
+    return {
+      ok: false,
+      error: `${label}.rate (${rateCheck.value}) exceeds ${label}.scale (${scaleCheck.value}); effective rate would exceed 100%`,
+      code: ERROR_CODES.RATE_EXCEEDS_SCALE,
+    };
+  }
+
+  if (bracket.upTo === null || bracket.upTo === undefined) {
+    return { ok: true, upTo: null, rate: rateCheck.value, scale: scaleCheck.value };
+  }
+
+  const upToCheck = validateTaxAmount(bracket.upTo, `${label}.upTo`);
+  if (!upToCheck.ok) {
+    return upToCheck.code === ERROR_CODES.INVALID_AMOUNT
+      ? { ...upToCheck, code: ERROR_CODES.INVALID_BRACKET }
+      : upToCheck;
+  }
+
+  return {
+    ok: true,
+    upTo: upToCheck.value,
+    rate: rateCheck.value,
+    scale: scaleCheck.value,
+  };
+}
+
+/**
+ * Estimate withholding tax using a progressive bracket schedule. Each
+ * bracket taxes the slice of the gross amount that falls within its band;
+ * the last bracket must be the catch-all (upTo null/undefined) and bounds
+ * must be strictly ascending. Subject to the same rate limit as
+ * calculateTaxDeduction.
+ *
+ *   brackets = [{ upTo: 50_000, rate: 1000 }, { upTo: null, rate: 2000 }]
+ *   grossAmount = 80_000 -> 5_000 + 6_000 = 11_000 tax, 69_000 net
+ */
+export function estimateBracketTax(
+  grossAmount: string | number | bigint,
+  brackets: TaxBracket[]
+): BracketTaxOutcome {
+  const rateLimitCheck = checkTaxEstimatorRateLimit();
+  if (!rateLimitCheck.ok) {
+    return rateLimitCheck;
+  }
+
+  const grossCheck = validateGrossAmount(grossAmount, "grossAmount");
+  if (!grossCheck.ok) {
+    return grossCheck;
+  }
+
+  if (!Array.isArray(brackets) || brackets.length === 0) {
+    return {
+      ok: false,
+      error: "brackets must be a non-empty array of TaxBracket entries",
+      code: ERROR_CODES.EMPTY_BRACKETS,
+    };
+  }
+
+  const gross = grossCheck.value;
+  const resolved: { upTo: bigint | null; rate: bigint; scale: bigint }[] = [];
+
+  for (let i = 0; i < brackets.length; i++) {
+    const bracketResult = validateBracket(brackets[i], i);
+    if (!bracketResult.ok) {
+      return bracketResult;
+    }
+    resolved.push({
+      upTo: bracketResult.upTo,
+      rate: bracketResult.rate,
+      scale: bracketResult.scale,
+    });
+  }
+
+  let prevUpTo: bigint | null = null;
+  for (let i = 0; i < resolved.length; i++) {
+    const { upTo } = resolved[i];
+    if (upTo === null) {
+      if (i !== resolved.length - 1) {
+        return {
+          ok: false,
+          error: `brackets[${i}] has upTo=null (catch-all) but is not the last bracket`,
+          code: ERROR_CODES.INVALID_BRACKET,
+        };
+      }
+    } else if (prevUpTo !== null && upTo <= prevUpTo) {
+      return {
+        ok: false,
+        error: `brackets[${i}].upTo (${upTo}) must be greater than the previous bracket's upTo (${prevUpTo})`,
+        code: ERROR_CODES.INVALID_BRACKET,
+      };
+    }
+    prevUpTo = upTo;
+  }
+
+  const bracketTaxes: bigint[] = [];
+  let totalTaxAmount = 0n;
+  let remaining = gross;
+  let lowerBound = 0n;
+
+  for (let i = 0; i < resolved.length; i++) {
+    const { upTo, rate, scale } = resolved[i];
+
+    if (remaining <= 0n) {
+      bracketTaxes.push(0n);
+      continue;
+    }
+
+    const bandWidth = upTo === null ? remaining : upTo - lowerBound;
+    const slice = remaining < bandWidth ? remaining : bandWidth;
+
+    const product = slice * rate;
+    if (digitCount(product.toString()) > MAX_INTERMEDIATE_DIGITS) {
+      return {
+        ok: false,
+        error: `tax estimation for brackets[${i}] would overflow during multiplication`,
+        code: ERROR_CODES.CALCULATION_OVERFLOW,
+      };
+    }
+
+    const bracketTax = product / scale;
+    bracketTaxes.push(bracketTax);
+    totalTaxAmount += bracketTax;
+    remaining -= slice;
+    if (upTo !== null) {
+      lowerBound = upTo;
+    }
+  }
+
+  if (totalTaxAmount > gross) {
+    return {
+      ok: false,
+      error: "total estimated tax exceeds gross amount",
+      code: ERROR_CODES.TAX_EXCEEDS_AMOUNT,
+    };
+  }
+
+  return {
+    ok: true,
+    grossAmount: gross,
+    bracketTaxes,
+    totalTaxAmount,
+    netAmount: gross - totalTaxAmount,
+    effectiveRateBps: gross > 0n ? (totalTaxAmount * 10_000n) / gross : 0n,
+  };
+}

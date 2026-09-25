@@ -476,3 +476,120 @@ export function applyStablecoinCentsMultiplier(
 /** Aliases for backward compatibility */
 export const applyCentsMultiplier = applyStablecoinCentsMultiplier;
 export const multiplyStablecoinCents = applyStablecoinCentsMultiplier;
+
+// ---------------------------------------------------------------------------
+// Per-ticker precision configuration (#479)
+// ---------------------------------------------------------------------------
+
+export interface StablecoinConfig {
+  /** Number of decimal places used by the asset. */
+  decimals: number;
+  /** Multiplier applied to convert whole units into integer cents. */
+  centsMultiplier: number;
+}
+
+/**
+ * Default configuration applied when a ticker key is missing or unknown.
+ * Mirrors the most common stablecoin layout (2 decimals / 100 cents).
+ */
+export const DEFAULT_STABLECOIN_CONFIG: StablecoinConfig = {
+  decimals: CENTS_DECIMALS,
+  centsMultiplier: CENTS_PER_UNIT,
+};
+
+/**
+ * Known Stellar stablecoin ticker keys mapped to their precision config.
+ * Keys are upper-case; lookups are case-insensitive.
+ */
+export const STABLECOIN_CONFIGS: Record<string, StablecoinConfig> = {
+  USDC: { decimals: 2, centsMultiplier: 100 },
+  USDT: { decimals: 2, centsMultiplier: 100 },
+  USD: { decimals: 2, centsMultiplier: 100 },
+  DAI: { decimals: 2, centsMultiplier: 100 },
+  EURC: { decimals: 2, centsMultiplier: 100 },
+};
+
+function normalizeTicker(ticker?: string | null): string {
+  return typeof ticker === "string" ? ticker.trim().toUpperCase() : "";
+}
+
+/**
+ * Resolve the precision configuration for a ticker key. Unknown, empty or
+ * missing tickers return DEFAULT_STABLECOIN_CONFIG instead of failing.
+ */
+export function getStablecoinConfig(ticker?: string | null): StablecoinConfig {
+  const key = normalizeTicker(ticker);
+  if (!key || !Object.prototype.hasOwnProperty.call(STABLECOIN_CONFIGS, key)) {
+    return DEFAULT_STABLECOIN_CONFIG;
+  }
+  return STABLECOIN_CONFIGS[key];
+}
+
+/**
+ * Cents multiplier for a ticker key, falling back to the default
+ * configuration when the ticker is missing or unknown.
+ */
+export function stablecoin_cents_multiplier(ticker?: string | null): number {
+  return getStablecoinConfig(ticker).centsMultiplier;
+}
+
+/**
+ * Convert a human-readable amount into integer base units using the precision
+ * resolved for `ticker`. Uses exact decimal-string arithmetic and applies the
+ * same rules as `dollarsToCents`: negative amounts, non-numeric input,
+ * sub-unit precision beyond the asset's decimals and digit overflow are
+ * rejected with typed errors.
+ */
+export function toCents(
+  amount: string | number,
+  ticker?: string | null
+): ConversionResult {
+  const { decimals } = getStablecoinConfig(ticker);
+
+  if (typeof amount === "number" && !Number.isFinite(amount)) {
+    return {
+      ok: false,
+      error: "amount must be a finite number",
+      code: ERROR_CODES.INVALID_AMOUNT,
+    };
+  }
+
+  const raw = String(amount).trim();
+  if (raw.startsWith("-")) {
+    return {
+      ok: false,
+      error: "amount cannot be negative",
+      code: ERROR_CODES.INVALID_AMOUNT,
+    };
+  }
+  if (!/^\d+(\.\d+)?$/.test(raw)) {
+    return {
+      ok: false,
+      error: "amount must be a numeric decimal value",
+      code: ERROR_CODES.INVALID_AMOUNT,
+    };
+  }
+
+  const [wholePart, fractionalPart = ""] = raw.split(".");
+  if (fractionalPart.length > decimals) {
+    return {
+      ok: false,
+      error: `amount has more fractional digits than the asset precision (${decimals}) allows`,
+      code: ERROR_CODES.INVALID_AMOUNT,
+    };
+  }
+
+  const combined = `${wholePart}${fractionalPart.padEnd(decimals, "0")}`.replace(
+    /^0+(?=\d)/,
+    ""
+  );
+  if (digitCount(combined) > MAX_SAFE_DIGITS) {
+    return {
+      ok: false,
+      error: `converted amount would exceed maximum of ${MAX_SAFE_DIGITS} digits`,
+      code: ERROR_CODES.CONVERSION_OVERFLOW,
+    };
+  }
+
+  return { ok: true, value: BigInt(combined) };
+}
