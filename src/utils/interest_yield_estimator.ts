@@ -38,6 +38,7 @@ export const ERROR_CODES = {
   INVALID_RATE: "OVERFLOW_INVALID_RATE",
   PRODUCT_OVERFLOW: "OVERFLOW_PRODUCT_EXCEEDED",
   SUM_MISMATCH: "OVERFLOW_SUM_MISMATCH",
+  INVALID_AMOUNT: "OVERFLOW_INVALID_AMOUNT",
 } as const;
 
 export type OverflowErrorCode =
@@ -69,7 +70,12 @@ export function validateYieldAmount(
   input: string | number | bigint,
   label = "amount"
 ): ValidationResult {
-  return parseIntegerInput(input, label, ERROR_CODES.INVALID_RATE);
+  return parseIntegerInput(
+    input,
+    label,
+    ERROR_CODES.INVALID_RATE,
+    ERROR_CODES.EXCESSIVE_DIGITS
+  );
 }
 
 /**
@@ -80,7 +86,12 @@ export function validatePrincipal(
   principal: string | number | bigint,
   label = "principal"
 ): ValidationResult {
-  return parseIntegerInput(principal, label, ERROR_CODES.INVALID_AMOUNT);
+  return parseIntegerInput(
+    principal,
+    label,
+    ERROR_CODES.INVALID_AMOUNT,
+    ERROR_CODES.EXCESSIVE_DIGITS
+  );
 }
 
 /**
