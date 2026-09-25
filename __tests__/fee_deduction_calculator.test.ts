@@ -8,6 +8,7 @@ import {
   validateFeeRate,
   validateFeeShares,
   calculateFeeDeduction,
+  calculateFeeDeductionHalfEven,
   calculateFeeShares,
   calculateFeeShareDeductions,
   checkFeeShareCalculation,
