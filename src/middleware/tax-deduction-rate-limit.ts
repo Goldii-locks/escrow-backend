@@ -1,4 +1,5 @@
 import type { NextFunction, Request, Response } from "express";
+import logger from "../utils/logger.js";
 
 type RateBucket = {
   count: number;
@@ -7,35 +8,29 @@ type RateBucket = {
 
 const buckets = new Map<string, RateBucket>();
 
-export function resetInterestYieldRateLimitBuckets(): void {
+export function resetTaxDeductionRateLimitBuckets(): void {
   buckets.clear();
 }
 
 function resolveWindowMs(): number {
-  const configured = Number(process.env.INTEREST_YIELD_RATE_WINDOW_MS ?? "60000");
+  const configured = Number(process.env.TAX_ESTIMATOR_RATE_WINDOW_MS ?? "60000");
   return Number.isFinite(configured) && configured > 0 ? configured : 60000;
 }
 
 function resolveMaxRequests(): number {
-  const configured = Number(process.env.INTEREST_YIELD_RATE_MAX ?? "30");
+  const configured = Number(process.env.TAX_ESTIMATOR_RATE_MAX ?? "30");
   return Number.isFinite(configured) && configured > 0 ? configured : 30;
 }
 
-/**
- * Dedicated rate limiter for POST /api/estimate/interest-yield.
- *
- * Follows the same per-path bucket pattern as the job-contract rate limiters:
- * a rolling window keyed by client IP, standard X-RateLimit-* headers, and a
- * 429 `{ success: false, error: ... }` body once the threshold is exceeded.
- */
-export function interestYieldRateLimit(
+/** Dedicated path rate limiter for requests hitting tax_deduction_estimator. */
+export function taxDeductionRateLimit(
   req: Request,
   res: Response,
   next: NextFunction
 ): void {
   const windowMs = resolveWindowMs();
   const maxRequests = resolveMaxRequests();
-  const key = req.ip || req.socket.remoteAddress || "unknown";
+  const key = req.ip || req.socket?.remoteAddress || "unknown";
   const now = Date.now();
 
   let bucket = buckets.get(key);
@@ -52,6 +47,11 @@ export function interestYieldRateLimit(
   res.setHeader("X-RateLimit-Reset", String(Math.ceil(bucket.resetAt / 1000)));
 
   if (bucket.count > maxRequests) {
+    logger.warn("Tax deduction estimator rate limit exceeded", {
+      label: "tax-deduction-estimator",
+      ip: key,
+      status: 429,
+    });
     res.status(429).json({
       success: false,
       error: "Too many requests, please try again later",

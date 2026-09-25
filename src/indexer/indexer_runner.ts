@@ -1,4 +1,5 @@
 import logger from "../utils/logger.js";
+import { getDb } from "./db.js";
 
 /**
  * Indexer runner – diagnostics helpers for the main indexer event poller (#252)
@@ -7,6 +8,83 @@ import logger from "../utils/logger.js";
  * High-frequency debug logs track poll speeds (elapsedMs) and payload sizes so
  * operators can spot slow RPC rounds or unexpectedly large event batches.
  */
+
+// ---------------------------------------------------------------------------
+// SQLite transaction isolation for indexer_runner operations (#266)
+// ---------------------------------------------------------------------------
+//
+// All multi-step database writes performed by the indexer_runner execution
+// loop must run inside a single SQLite transaction block. This ensures that:
+//   - A partial batch write can never leave the events table and the ledger
+//     pointer in an inconsistent state if a cycle crashes mid-way.
+//   - Concurrent poll executions that share the same SQLite connection see
+//     a consistent snapshot of committed state at the start of each cycle.
+//   - ROLLBACK on error is automatic – the DB is left exactly as it was
+//     before the failing cycle started.
+
+export type IndexerCycleOperation<T> = () => T;
+
+/**
+ * Execute `operation` inside a SQLite IMMEDIATE transaction on the shared DB
+ * connection. IMMEDIATE acquires a reserved write lock at BEGIN time so no
+ * other writer can interleave between the read of `last_ledger_sequence` and
+ * the subsequent batch insert + pointer update.
+ *
+ * If the operation throws, the transaction is rolled back and the error
+ * propagates to the caller (typically `pollEvents`, which records it as a
+ * failure and schedules a retry). If it succeeds, the transaction commits
+ * and the return value is forwarded.
+ *
+ * @param operation - A synchronous function containing one or more DB writes.
+ * @returns Whatever `operation` returns.
+ */
+export function withIndexerRunnerTransaction<T>(
+  operation: IndexerCycleOperation<T>,
+): T {
+  const db = getDb();
+  const tx = db.transaction(operation);
+  return tx();
+}
+
+/**
+ * Named entry point for running a complete indexer poll cycle's DB writes
+ * inside a transaction block. Callers pass in a pre-built synchronous
+ * write function; this wrapper attaches monitoring so failures are counted
+ * against the runner's failure monitor.
+ *
+ * Unlike `withIndexerRunnerTransaction`, this variant logs the transaction
+ * boundary at debug level so operators can correlate write timing with
+ * diagnostics lines emitted by `logIndexerRunnerPollDiagnostics`.
+ *
+ * @param cycleLabel - Short identifier used in log lines (e.g. "poll_cycle").
+ * @param operation  - Synchronous DB writes for this cycle.
+ * @returns Whatever `operation` returns.
+ */
+export function runIndexerCycleInTransaction<T>(
+  cycleLabel: string,
+  operation: IndexerCycleOperation<T>,
+): T {
+  const startedAt = performance.now();
+  logger.debug("indexer_runner transaction: begin", { cycleLabel });
+
+  try {
+    const result = withIndexerRunnerTransaction(operation);
+    const elapsedMs = Math.round(performance.now() - startedAt);
+    logger.debug("indexer_runner transaction: committed", {
+      cycleLabel,
+      elapsedMs,
+    });
+    return result;
+  } catch (err) {
+    const elapsedMs = Math.round(performance.now() - startedAt);
+    logger.warn("indexer_runner transaction: rolled back", {
+      cycleLabel,
+      elapsedMs,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    throw err;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Failure and stall alerting (#253)
