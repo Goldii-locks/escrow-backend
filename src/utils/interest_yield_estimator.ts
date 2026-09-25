@@ -46,7 +46,12 @@ export function validateYieldAmount(
   input: string | number | bigint,
   label = "amount"
 ): ValidationResult {
-  return parseIntegerInput(input, label, ERROR_CODES.INVALID_RATE);
+  return parseIntegerInput(
+    input,
+    label,
+    ERROR_CODES.INVALID_RATE,
+    ERROR_CODES.EXCESSIVE_DIGITS
+  );
 }
 
 /**
