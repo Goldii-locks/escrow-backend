@@ -9,7 +9,7 @@ import {
   ErrorDefinition,
 } from "../src/utils/conversion_rate_scraper.js";
 
-describe("conversion_rate_scraper overflow validation", () => {
+describe("conversion_rate_scraper overflow and error structure validation", () => {
   describe("validateConversionRate", () => {
     it("accepts rates within the digit limit", () => {
       const result = validateConversionRate("1000000");
