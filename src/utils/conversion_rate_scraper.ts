@@ -30,8 +30,13 @@
  * explicit so the formatter is stateless and trivially testable.
  */
 
-/** Max decimal digits allowed for a conversion rate or notional (below Number.MAX_SAFE_INTEGER). */
-export const MAX_SAFE_DIGITS = 15;
+import {
+  digitCount,
+  parseIntegerInput,
+  MAX_SAFE_DIGITS,
+} from "./digit-limit-validator.js";
+
+export { MAX_SAFE_DIGITS };
 
 export const ERROR_CODES = {
   EXCESSIVE_DIGITS: "OVERFLOW_EXCESSIVE_DIGITS",
@@ -50,132 +55,18 @@ export type ValidationResult =
   | { ok: true; value: bigint }
   | { ok: false; error: string; code: OverflowErrorCode };
 
-// ---------------------------------------------------------------------------
-// TASK 1 – In-process rate limiter for conversion-rate scraper calls
-// ---------------------------------------------------------------------------
-
-type RateBucket = {
-  count: number;
-  resetAt: number;
-};
-
-const conversionRateBuckets = new Map<string, RateBucket>();
-
-/**
- * Reset all in-process rate-limit buckets. Intended for use in tests only.
- */
-export function resetConversionRateLimitBuckets(): void {
-  conversionRateBuckets.clear();
-}
-
-function resolveConversionRateWindowMs(): number {
-  const configured = Number(
-    process.env.CONVERSION_RATE_WINDOW_MS ?? "60000"
-  );
-  return Number.isFinite(configured) && configured > 0 ? configured : 60000;
-}
-
-function resolveConversionRateMax(): number {
-  const configured = Number(
-    process.env.CONVERSION_RATE_MAX ?? "30"
-  );
-  return Number.isFinite(configured) && configured > 0 ? configured : 30;
-}
-
-export type RateLimitResult =
-  | { allowed: true; remaining: number; resetAt: number }
-  | { allowed: false; remaining: 0; resetAt: number; code: typeof ERROR_CODES.RATE_LIMIT_EXCEEDED };
-
-/**
- * Check whether the caller identified by `clientKey` (e.g. an IP address or
- * API-key fingerprint) has exceeded the configured conversion-rate scraper
- * request budget for the current sliding window.
- *
- * Returns `{ allowed: true }` when the request is within budget, or
- * `{ allowed: false, code: "RATE_LIMIT_EXCEEDED" }` when the budget is
- * exhausted so the caller can return HTTP 429.
- */
-export function checkConversionRateLimit(clientKey: string): RateLimitResult {
-  const windowMs = resolveConversionRateWindowMs();
-  const maxRequests = resolveConversionRateMax();
-  const now = Date.now();
-
-  let bucket = conversionRateBuckets.get(clientKey);
-  if (!bucket || now >= bucket.resetAt) {
-    bucket = { count: 0, resetAt: now + windowMs };
-    conversionRateBuckets.set(clientKey, bucket);
-  }
-
-  bucket.count += 1;
-
-  if (bucket.count > maxRequests) {
-    return {
-      allowed: false,
-      remaining: 0,
-      resetAt: bucket.resetAt,
-      code: ERROR_CODES.RATE_LIMIT_EXCEEDED,
-    };
-  }
-
-  return {
-    allowed: true,
-    remaining: Math.max(0, maxRequests - bucket.count),
-    resetAt: bucket.resetAt,
-  };
-}
-
-function digitCount(normalized: string): number {
-  const digits = normalized.replace(/^-/, "").replace(/^0+(?=\d)/, "");
-  return digits.length === 0 ? 1 : digits.length;
-}
-
-function parseIntegerInput(
-  input: string | number | bigint,
-  label: string,
-  invalidCode: OverflowErrorCode
-): ValidationResult {
-  let raw: string;
-
-  if (typeof input === "bigint") {
-    raw = input.toString();
-  } else if (typeof input === "number") {
-    if (!Number.isFinite(input) || !Number.isInteger(input)) {
-      return {
-        ok: false,
-        error: `${label} must be a finite integer`,
-        code: invalidCode,
-      };
-    }
-    raw = String(input);
-  } else {
-    raw = input.trim();
-    if (!/^-?\d+$/.test(raw)) {
-      return {
-        ok: false,
-        error: `${label} must be an integer numeric value`,
-        code: invalidCode,
-      };
-    }
-  }
-
-  if (digitCount(raw) > MAX_SAFE_DIGITS) {
-    return {
-      ok: false,
-      error: `${label} exceeds maximum of ${MAX_SAFE_DIGITS} digits`,
-      code: ERROR_CODES.EXCESSIVE_DIGITS,
-    };
-  }
-
-  return { ok: true, value: BigInt(raw) };
-}
-
 /**
  * Validate an oracle conversion rate against digit limits.
  */
 export function validateConversionRate(
   rate: string | number | bigint
 ): ValidationResult {
-  return parseIntegerInput(rate, "rate", ERROR_CODES.INVALID_RATE);
+  return parseIntegerInput(
+    rate,
+    "rate",
+    ERROR_CODES.INVALID_RATE,
+    ERROR_CODES.EXCESSIVE_DIGITS
+  );
 }
 
 /**
@@ -189,7 +80,8 @@ export function applyConversionRate(
   const amount = parseIntegerInput(
     notional,
     "notional",
-    ERROR_CODES.INVALID_RATE
+    ERROR_CODES.INVALID_RATE,
+    ERROR_CODES.EXCESSIVE_DIGITS
   );
   if (!amount.ok) {
     return amount;

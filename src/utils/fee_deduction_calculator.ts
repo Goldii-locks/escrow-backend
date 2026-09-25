@@ -1,3 +1,6 @@
+import fs from "fs";
+import path from "path";
+
 /**
  * Fee deduction calculator and fee share calculation checker with
  * overflow / digit-limit validation.
@@ -25,6 +28,12 @@ export const ERROR_CODES = {
   INVALID_SHARES: "FEE_CALCULATOR_INVALID_SHARES",
   CALCULATION_OVERFLOW: "FEE_CALCULATOR_OVERFLOW",
   FEE_EXCEEDS_AMOUNT: "FEE_CALCULATOR_FEE_EXCEEDS_AMOUNT",
+  INVALID_INPUT: "FEE_CALCULATOR_INVALID_INPUT",
+  INVALID_ROW: "FEE_CALCULATOR_INVALID_ROW",
+  EMPTY_DATA: "FEE_CALCULATOR_EMPTY_DATA",
+  SERIALIZATION_ERROR: "FEE_CALCULATOR_SERIALIZATION_ERROR",
+  FILE_WRITE_ERROR: "FEE_CALCULATOR_FILE_WRITE_ERROR",
+  FILE_READ_ERROR: "FEE_CALCULATOR_FILE_READ_ERROR",
   // Compatibility aliases
   OVERFLOW_EXCESSIVE_DIGITS: "OVERFLOW_EXCESSIVE_DIGITS",
   OVERFLOW_INVALID_AMOUNT: "OVERFLOW_INVALID_AMOUNT",
@@ -643,3 +652,633 @@ export function calculateFeeDeductionHalfEven(
 
   return { ok: true, feeAmount, netAmount };
 }
+
+// ---------------------------------------------------------------------------
+// CSV format exporters / file serialization (#435)
+// ---------------------------------------------------------------------------
+//
+// File serialization helpers that build CSV formatting blocks (tables) from
+// fee deduction records. Each record is validated step-by-step through
+// calculateFeeDeduction() so overflow / digit-limit violations fail fast
+// before any table output is produced.
+
+/**
+ * Input record representing a fee deduction entry for serialization / export.
+ */
+export interface FeeDeductionRecord {
+  label?: string;
+  grossAmount: string | number | bigint;
+  feeRate: string | number | bigint;
+  scale?: string | number | bigint;
+  [key: string]: unknown;
+}
+
+/**
+ * Resolved and validated fee deduction row used in serialization.
+ */
+export interface ValidatedFeeRow {
+  label?: string;
+  grossAmount: bigint;
+  feeRate: bigint;
+  scale: bigint;
+  feeAmount: bigint;
+  netAmount: bigint;
+  remainder: bigint;
+  [key: string]: unknown;
+}
+
+/**
+ * Options configuring CSV table export and file serialization.
+ */
+export interface CsvExportOptions {
+  /** Delimiter character, defaults to ',' */
+  delimiter?: string;
+  /** Line ending string, defaults to '\n' */
+  lineEnding?: string;
+  /** Whether to output the header row, defaults to true */
+  includeHeader?: boolean;
+  /** Column keys to export in order */
+  columns?: string[];
+  /** Custom header labels matching columns */
+  headers?: string[];
+  /** Whether to allow empty records array (default true). When false, rejects empty arrays. */
+  allowEmpty?: boolean;
+  /** File encoding when writing to disk, defaults to 'utf-8' */
+  encoding?: BufferEncoding;
+}
+
+/**
+ * Outcome of CSV formatting.
+ */
+export type CsvFormattingOutcome =
+  | {
+      ok: true;
+      value: string;
+      rowCount: number;
+      columns: string[];
+    }
+  | {
+      ok: false;
+      error: string;
+      code: FeeCalculatorErrorCode;
+    };
+
+/**
+ * Outcome of file serialization.
+ */
+export type FileSerializationOutcome =
+  | {
+      ok: true;
+      filePath: string;
+      bytesWritten: number;
+      rowCount: number;
+    }
+  | {
+      ok: false;
+      error: string;
+      code: FeeCalculatorErrorCode;
+    };
+
+/**
+ * Outcome of CSV deserialization / parsing.
+ */
+export type CsvParseOutcome =
+  | {
+      ok: true;
+      records: ValidatedFeeRow[];
+      rowCount: number;
+    }
+  | {
+      ok: false;
+      error: string;
+      code: FeeCalculatorErrorCode;
+    };
+
+/**
+ * Escape an individual CSV field following RFC 4180 rules.
+ * If the value contains commas, quotes, or newlines, it will be wrapped in
+ * double quotes, with internal quotes doubled.
+ */
+export function escapeCsvField(value: unknown, delimiter = ","): string {
+  if (value === null || value === undefined) {
+    return "";
+  }
+  let str: string;
+  if (typeof value === "bigint") {
+    str = value.toString();
+  } else if (typeof value === "string") {
+    str = value;
+  } else {
+    str = String(value);
+  }
+
+  const needsQuotes =
+    str.includes(delimiter) ||
+    str.includes('"') ||
+    str.includes("\n") ||
+    str.includes("\r");
+
+  if (needsQuotes) {
+    return `"${str.replace(/"/g, '""')}"`;
+  }
+  return str;
+}
+
+/**
+ * Format an array of values into a single CSV row.
+ */
+export function formatRowToCsv(values: unknown[], delimiter = ","): string {
+  return values.map((v) => escapeCsvField(v, delimiter)).join(delimiter);
+}
+
+/**
+ * Validate a single fee deduction record step-by-step.
+ * Resolves grossAmount / feeRate / scale through calculateFeeDeduction()
+ * ensuring numerical consistency and adherence to digit limits.
+ */
+export function validateFeeDeductionRecord(
+  record: FeeDeductionRecord,
+  index = 0
+):
+  | { ok: true; value: ValidatedFeeRow }
+  | { ok: false; error: string; code: FeeCalculatorErrorCode } {
+  if (!record || typeof record !== "object") {
+    return {
+      ok: false,
+      error: `record at index ${index} must be an object`,
+      code: ERROR_CODES.INVALID_ROW,
+    };
+  }
+
+  if (record.grossAmount === undefined) {
+    return {
+      ok: false,
+      error: `record at index ${index} must provide grossAmount`,
+      code: ERROR_CODES.INVALID_ROW,
+    };
+  }
+
+  if (record.feeRate === undefined) {
+    return {
+      ok: false,
+      error: `record at index ${index} must provide feeRate`,
+      code: ERROR_CODES.INVALID_ROW,
+    };
+  }
+
+  const scaleInput = record.scale !== undefined ? record.scale : DEFAULT_FEE_SCALE;
+  const computed = calculateFeeDeduction(
+    record.grossAmount as string | number | bigint,
+    record.feeRate as string | number | bigint,
+    scaleInput as string | number | bigint
+  );
+  if (!computed.ok) {
+    return computed;
+  }
+
+  const grossCheck = validateAmount(
+    record.grossAmount as string | number | bigint,
+    `records[${index}].grossAmount`
+  );
+  if (!grossCheck.ok) {
+    return grossCheck;
+  }
+  const rateCheck = validateFeeRate(
+    record.feeRate as string | number | bigint,
+    `records[${index}].feeRate`
+  );
+  if (!rateCheck.ok) {
+    return rateCheck;
+  }
+  const scaleCheck = validateAmount(
+    scaleInput as string | number | bigint,
+    `records[${index}].scale`
+  );
+  if (!scaleCheck.ok) {
+    return scaleCheck;
+  }
+
+  const result: ValidatedFeeRow = {
+    grossAmount: computed.grossAmount,
+    feeRate: rateCheck.value,
+    scale: scaleCheck.value,
+    feeAmount: computed.feeAmount,
+    netAmount: computed.netAmount,
+    remainder: computed.remainder,
+  };
+
+  if (typeof record.label === "string") {
+    result.label = record.label;
+  }
+
+  for (const [k, v] of Object.entries(record)) {
+    if (
+      k !== "grossAmount" &&
+      k !== "feeRate" &&
+      k !== "scale" &&
+      k !== "label"
+    ) {
+      result[k] = v;
+    }
+  }
+
+  return { ok: true, value: result };
+}
+
+/**
+ * Build a CSV formatting block from an array of fee deduction records.
+ * Validates each record against overflow and digit limits, and constructs
+ * properly escaped table output rows.
+ */
+export function buildCsvBlock(
+  records: FeeDeductionRecord[],
+  options?: CsvExportOptions
+): CsvFormattingOutcome {
+  if (!Array.isArray(records)) {
+    return {
+      ok: false,
+      error: "records must be an array",
+      code: ERROR_CODES.INVALID_INPUT,
+    };
+  }
+
+  if (records.length === 0 && options?.allowEmpty === false) {
+    return {
+      ok: false,
+      error: "records array cannot be empty",
+      code: ERROR_CODES.EMPTY_DATA,
+    };
+  }
+
+  const delimiter = options?.delimiter ?? ",";
+  const lineEnding = options?.lineEnding ?? "\n";
+  const includeHeader = options?.includeHeader !== false;
+
+  const validatedRows: ValidatedFeeRow[] = [];
+  for (let i = 0; i < records.length; i++) {
+    const check = validateFeeDeductionRecord(records[i], i);
+    if (!check.ok) {
+      return check;
+    }
+    validatedRows.push(check.value);
+  }
+
+  // Determine column list
+  let columns: string[];
+  if (options?.columns && options.columns.length > 0) {
+    columns = [...options.columns];
+  } else {
+    const hasLabel = validatedRows.some((r) => r.label !== undefined);
+    columns = [];
+    if (hasLabel) columns.push("label");
+    columns.push(
+      "grossAmount",
+      "feeRate",
+      "scale",
+      "feeAmount",
+      "netAmount",
+      "remainder"
+    );
+  }
+
+  const headers =
+    options?.headers && options.headers.length === columns.length
+      ? options.headers
+      : columns;
+
+  const lines: string[] = [];
+
+  if (includeHeader) {
+    lines.push(formatRowToCsv(headers, delimiter));
+  }
+
+  for (const row of validatedRows) {
+    const rowValues = columns.map((col) => {
+      if (col === "label") {
+        return row.label ?? "";
+      }
+      if (col === "grossAmount") {
+        return row.grossAmount.toString();
+      }
+      if (col === "feeRate") {
+        return row.feeRate.toString();
+      }
+      if (col === "scale") {
+        return row.scale.toString();
+      }
+      if (col === "feeAmount") {
+        return row.feeAmount.toString();
+      }
+      if (col === "netAmount") {
+        return row.netAmount.toString();
+      }
+      if (col === "remainder") {
+        return row.remainder.toString();
+      }
+      return row[col] !== undefined ? row[col] : "";
+    });
+    lines.push(formatRowToCsv(rowValues, delimiter));
+  }
+
+  const value = lines.join(lineEnding) + (lines.length > 0 ? lineEnding : "");
+  return {
+    ok: true,
+    value,
+    rowCount: validatedRows.length,
+    columns,
+  };
+}
+
+/**
+ * Format exporter aliases to buildCsvBlock.
+ */
+export const exportToCsv = buildCsvBlock;
+export const formatToCsv = buildCsvBlock;
+export const serializeToCsv = buildCsvBlock;
+export const formatFeeTable = buildCsvBlock;
+export const formatDeductionTable = buildCsvBlock;
+
+/**
+ * Exporter specifically for fee deduction entries, generating CSV output.
+ */
+export function exportDeductionToCsv(
+  entries: FeeDeductionRecord[],
+  options?: CsvExportOptions
+): CsvFormattingOutcome {
+  return buildCsvBlock(entries, options);
+}
+
+/**
+ * Exporter specifically for fee share style entries (gross + rate pairs).
+ */
+export function exportFeeToCsv(
+  entries: FeeDeductionRecord[],
+  options?: CsvExportOptions
+): CsvFormattingOutcome {
+  return buildCsvBlock(entries, options);
+}
+
+/**
+ * Serialize fee deduction data or pre-built CSV block to a file on disk.
+ * Creates parent directories if they do not exist.
+ */
+export function exportToCsvFile(
+  filePath: string,
+  data: FeeDeductionRecord[] | string,
+  options?: CsvExportOptions
+): FileSerializationOutcome {
+  if (!filePath || typeof filePath !== "string" || filePath.trim().length === 0) {
+    return {
+      ok: false,
+      error: "filePath must be a non-empty string",
+      code: ERROR_CODES.INVALID_INPUT,
+    };
+  }
+
+  let csvContent: string;
+  let rowCount: number;
+
+  if (typeof data === "string") {
+    csvContent = data;
+    const trimmed = data.trim();
+    if (trimmed.length === 0) {
+      rowCount = 0;
+    } else {
+      const splitLines = trimmed.split(/\r?\n/);
+      rowCount = options?.includeHeader !== false ? Math.max(0, splitLines.length - 1) : splitLines.length;
+    }
+  } else if (Array.isArray(data)) {
+    const formatted = buildCsvBlock(data, options);
+    if (!formatted.ok) {
+      return formatted;
+    }
+    csvContent = formatted.value;
+    rowCount = formatted.rowCount;
+  } else {
+    return {
+      ok: false,
+      error: "data must be an array of fee deduction records or a CSV string",
+      code: ERROR_CODES.INVALID_INPUT,
+    };
+  }
+
+  try {
+    const dir = path.dirname(filePath);
+    if (dir && dir !== "." && !fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    const encoding = options?.encoding ?? "utf-8";
+    fs.writeFileSync(filePath, csvContent, { encoding });
+    const bytesWritten = Buffer.byteLength(csvContent, encoding);
+
+    return {
+      ok: true,
+      filePath,
+      bytesWritten,
+      rowCount,
+    };
+  } catch (err: unknown) {
+    const errorMsg = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      error: `Failed to write CSV file: ${errorMsg}`,
+      code: ERROR_CODES.FILE_WRITE_ERROR,
+    };
+  }
+}
+
+/**
+ * File serialization helper aliases.
+ */
+export const serializeToCsvFile = exportToCsvFile;
+export const serializeFeeRecordsToFile = exportToCsvFile;
+
+/**
+ * Helper to write raw CSV content string directly to a file on disk.
+ */
+export function writeCsvToFile(
+  filePath: string,
+  csvContent: string,
+  encoding: BufferEncoding = "utf-8"
+): FileSerializationOutcome {
+  return exportToCsvFile(filePath, csvContent, { encoding });
+}
+
+/**
+ * Parse a single CSV row line respecting quoted fields and escaped quotes.
+ */
+export function parseCsvLine(line: string, delimiter = ","): string[] {
+  const result: string[] = [];
+  let current = "";
+  let inQuotes = false;
+  let i = 0;
+
+  while (i < line.length) {
+    const char = line[i];
+    if (inQuotes) {
+      if (char === '"') {
+        if (i + 1 < line.length && line[i + 1] === '"') {
+          current += '"';
+          i += 2;
+          continue;
+        } else {
+          inQuotes = false;
+          i++;
+          continue;
+        }
+      } else {
+        current += char;
+        i++;
+        continue;
+      }
+    } else {
+      if (char === '"') {
+        inQuotes = true;
+        i++;
+        continue;
+      } else if (char === delimiter) {
+        result.push(current);
+        current = "";
+        i++;
+        continue;
+      } else {
+        current += char;
+        i++;
+        continue;
+      }
+    }
+  }
+  result.push(current);
+  return result;
+}
+
+/**
+ * Split CSV content into logical rows, preserving multi-line quoted fields.
+ */
+function splitCsvRows(csvContent: string): string[] {
+  const rows: string[] = [];
+  let current = "";
+  let inQuotes = false;
+
+  for (let i = 0; i < csvContent.length; i++) {
+    const char = csvContent[i];
+    if (char === '"') {
+      if (inQuotes && i + 1 < csvContent.length && csvContent[i + 1] === '"') {
+        current += '""';
+        i++;
+      } else {
+        inQuotes = !inQuotes;
+        current += '"';
+      }
+    } else if ((char === "\n" || char === "\r") && !inQuotes) {
+      if (char === "\r" && i + 1 < csvContent.length && csvContent[i + 1] === "\n") {
+        i++;
+      }
+      if (current.trim().length > 0) {
+        rows.push(current);
+      }
+      current = "";
+    } else {
+      current += char;
+    }
+  }
+  if (current.trim().length > 0) {
+    rows.push(current);
+  }
+  return rows;
+}
+
+/**
+ * Parse a CSV formatting block back into validated fee deduction records.
+ */
+export function parseCsvBlock(
+  csvContent: string,
+  options?: { delimiter?: string }
+): CsvParseOutcome {
+  if (typeof csvContent !== "string") {
+    return {
+      ok: false,
+      error: "csvContent must be a string",
+      code: ERROR_CODES.INVALID_INPUT,
+    };
+  }
+
+  const delimiter = options?.delimiter ?? ",";
+  const rows = splitCsvRows(csvContent);
+  if (rows.length === 0) {
+    return { ok: true, records: [], rowCount: 0 };
+  }
+
+  const headerFields = parseCsvLine(rows[0], delimiter).map((h) => h.trim());
+  const records: ValidatedFeeRow[] = [];
+
+  for (let r = 1; r < rows.length; r++) {
+    const fields = parseCsvLine(rows[r], delimiter);
+    const rowObj: FeeDeductionRecord = {
+      grossAmount: "0",
+      feeRate: "0",
+    };
+
+    for (let c = 0; c < headerFields.length; c++) {
+      const header = headerFields[c];
+      const val = fields[c] ?? "";
+
+      if (header === "grossAmount") {
+        if (val !== "") rowObj.grossAmount = val;
+      } else if (header === "feeRate") {
+        if (val !== "") rowObj.feeRate = val;
+      } else if (header === "scale") {
+        if (val !== "") rowObj.scale = val;
+      } else if (header === "label") {
+        if (val !== "") rowObj.label = val;
+      } else if (
+        header === "feeAmount" ||
+        header === "netAmount" ||
+        header === "remainder"
+      ) {
+        continue;
+      } else {
+        rowObj[header] = val;
+      }
+    }
+
+    const check = validateFeeDeductionRecord(rowObj, r - 1);
+    if (!check.ok) {
+      return check;
+    }
+    records.push(check.value);
+  }
+
+  return { ok: true, records, rowCount: records.length };
+}
+
+/**
+ * Read and deserialize a CSV file from disk into fee deduction records.
+ */
+export function readCsvFromFile(
+  filePath: string,
+  options?: { encoding?: BufferEncoding; delimiter?: string }
+): CsvParseOutcome {
+  if (!filePath || typeof filePath !== "string") {
+    return {
+      ok: false,
+      error: "filePath must be a non-empty string",
+      code: ERROR_CODES.INVALID_INPUT,
+    };
+  }
+
+  try {
+    const encoding = options?.encoding ?? "utf-8";
+    const content = fs.readFileSync(filePath, { encoding });
+    return parseCsvBlock(content, { delimiter: options?.delimiter });
+  } catch (err: unknown) {
+    const errorMsg = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      error: `Failed to read CSV file: ${errorMsg}`,
+      code: ERROR_CODES.FILE_READ_ERROR,
+    };
+  }
+}
+
+export const parseCsvFromFile = readCsvFromFile;
