@@ -107,6 +107,14 @@ export function calculateFeeAllocation(
 
   const baseBigInt = baseValidation.value;
 
+  if (baseBigInt < 0n) {
+    return {
+      success: false,
+      error: "baseAmount cannot be negative",
+      code: FEE_CALCULATION_ERRORS.INVALID_BASE_AMOUNT,
+    };
+  }
+
   // Validate shares array
   if (!shares || shares.length === 0) {
     return {
@@ -219,6 +227,15 @@ export function calculatePercentageFeeAllocation(
     percentage: pShare.percentage,
     amount: (baseBigInt * BigInt(Math.round(pShare.percentage * 100))) / 10000n,
   }));
+
+  // Truncating each share can leave rounding dust (e.g. 3 × 33.333333% of
+  // 1000 = 999). Percentages already sum to 100, so assign the dust to the
+  // last share to keep the split equal to the base amount.
+  const allocated = shares.reduce((sum, s) => sum + s.amount, 0n);
+  const dust = baseBigInt - allocated;
+  if (dust > 0n) {
+    shares[shares.length - 1].amount += dust;
+  }
 
   // Use standard allocation calculation
   return calculateFeeAllocation(baseBigInt, shares);

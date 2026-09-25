@@ -161,10 +161,11 @@ describe("Fee Deduction Calculator", () => {
     });
 
     it("works with very large amounts", () => {
-      const baseAmount = "9007199254740991"; // Number.MAX_SAFE_INTEGER
+      // Largest amount the shared ledger validator accepts (MAX_SAFE_DIGITS = 15).
+      const baseAmount = "999999999999999";
       const shares: FeeShare[] = [
-        { recipient: "GAAAA...AAAA", amount: 4503599627370495n },
-        { recipient: "GBBBB...BBBB", amount: 4503599627370496n },
+        { recipient: "GAAAA...AAAA", amount: 499999999999999n },
+        { recipient: "GBBBB...BBBB", amount: 500000000000000n },
       ];
 
       const result = calculateFeeAllocation(baseAmount, shares);
