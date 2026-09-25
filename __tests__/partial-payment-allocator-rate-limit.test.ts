@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "@jest/globals";
+import { describe, it, expect, beforeEach, afterEach, jest } from "@jest/globals";
 import type { Request, Response, NextFunction } from "express";
 import {
   partialPaymentAllocatorRateLimit,
@@ -6,17 +6,17 @@ import {
 } from "../src/middleware/job-contract-rate-limit.js";
 
 // Mock Express Request, Response, and NextFunction
-interface MockRequest extends Partial<Request> {
+interface MockRequest {
   ip?: string;
   socket?: { remoteAddress?: string };
 }
 
-interface MockResponse extends Partial<Response> {
-  status: jest.Mock;
-  json: jest.Mock;
-  setHeader: jest.Mock;
+interface MockResponse {
+  status: jest.Mock<(code: number) => MockResponse>;
+  json: jest.Mock<(data: unknown) => MockResponse>;
+  setHeader: jest.Mock<(name: string, value: string) => void>;
   statusCode?: number;
-  _json?: any;
+  _json?: unknown;
 }
 
 function createMockRequest(ip: string): MockRequest {
@@ -27,17 +27,16 @@ function createMockRequest(ip: string): MockRequest {
 }
 
 function createMockResponse(): MockResponse {
-  const res: MockResponse = {
-    status: jest.fn(function (code: number) {
-      this.statusCode = code;
-      return this;
-    }),
-    json: jest.fn(function (data: any) {
-      this._json = data;
-      return this;
-    }),
-    setHeader: jest.fn(),
-  };
+  const res = {} as MockResponse;
+  res.status = jest.fn((code: number) => {
+    res.statusCode = code;
+    return res;
+  });
+  res.json = jest.fn((data: unknown) => {
+    res._json = data;
+    return res;
+  });
+  res.setHeader = jest.fn<(name: string, value: string) => void>();
   return res;
 }
 
@@ -142,10 +141,10 @@ describe("partialPaymentAllocatorRateLimit", () => {
 
       // Client 2 should still have requests available
       const calls = res2.setHeader.mock.calls;
-      expect(calls.some((call) => call[0] === "X-RateLimit-Remaining")).toBe(
+      expect(calls.some((call: unknown[]) => call[0] === "X-RateLimit-Remaining")).toBe(
         true
       );
-      const remainingCall = calls.find((call) => call[0] === "X-RateLimit-Remaining");
+      const remainingCall = calls.find((call: unknown[]) => call[0] === "X-RateLimit-Remaining");
       expect(remainingCall?.[1]).toBe("49");
 
       // Client 1's 51st request should be rejected
@@ -301,7 +300,7 @@ describe("partialPaymentAllocatorRateLimit", () => {
       partialPaymentAllocatorRateLimit(req, res, next);
 
       const resetCalls = res.setHeader.mock.calls.filter(
-        (call) => call[0] === "X-RateLimit-Reset"
+        (call: unknown[]) => call[0] === "X-RateLimit-Reset"
       );
       expect(resetCalls.length).toBeGreaterThan(0);
 
@@ -378,7 +377,7 @@ describe("partialPaymentAllocatorRateLimit", () => {
       }
 
       const calls = res.setHeader.mock.calls;
-      const remainingCall = calls.find((call) => call[0] === "X-RateLimit-Remaining");
+      const remainingCall = calls.find((call: unknown[]) => call[0] === "X-RateLimit-Remaining");
       expect(remainingCall?.[1]).toBe("0");
     });
 
@@ -395,11 +394,11 @@ describe("partialPaymentAllocatorRateLimit", () => {
 
       // Check that no negative remaining was ever set
       const allRemainingSets = res.setHeader.mock.calls.filter(
-        (call) => call[0] === "X-RateLimit-Remaining"
+        (call: unknown[]) => call[0] === "X-RateLimit-Remaining"
       );
 
-      allRemainingSets.forEach((call) => {
-        const remaining = parseInt(call[1]);
+      allRemainingSets.forEach((call: unknown[]) => {
+        const remaining = parseInt(String(call[1]));
         expect(remaining).toBeGreaterThanOrEqual(0);
       });
     });
