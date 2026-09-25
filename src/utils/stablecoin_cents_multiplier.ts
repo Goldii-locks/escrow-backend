@@ -19,6 +19,8 @@ export const ERROR_CODES = {
   INVALID_AMOUNT: "CENTS_INVALID_AMOUNT",
   CONVERSION_OVERFLOW: "CENTS_CONVERSION_OVERFLOW",
   SUM_MISMATCH: "CENTS_SUM_MISMATCH",
+  INVALID_MULTIPLIER: "CENTS_INVALID_MULTIPLIER",
+  PRODUCT_OVERFLOW: "CENTS_PRODUCT_OVERFLOW",
 } as const;
 
 export type CentsErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];
@@ -218,3 +220,107 @@ export function validateSplitSum(
 
   return { ok: true, value: total };
 }
+
+// ---------------------------------------------------------------------------
+// Cents multiplier with overflow guards (#476)
+// ---------------------------------------------------------------------------
+//
+// The dollars/cents helpers above convert between representations. These apply
+// an arbitrary integer multiplier to an amount already in cents, rejecting a
+// product that would outgrow MAX_SAFE_DIGITS before it is returned.
+//
+// Unlike validateCentsAmount, a multiplier may be negative -- a reversal or a
+// debit adjustment is a legitimate factor -- so this path parses signed input.
+
+function parseSignedInteger(
+  input: string | number | bigint,
+  label: string,
+  invalidCode: CentsErrorCode
+): ConversionResult {
+  let raw: string;
+
+  if (typeof input === "bigint") {
+    raw = input.toString();
+  } else if (typeof input === "number") {
+    if (!Number.isFinite(input) || !Number.isInteger(input)) {
+      return {
+        ok: false,
+        error: `${label} must be a finite integer`,
+        code: invalidCode,
+      };
+    }
+    raw = String(input);
+  } else {
+    raw = input.trim();
+    if (!/^-?\d+$/.test(raw)) {
+      return {
+        ok: false,
+        error: `${label} must be an integer numeric value`,
+        code: invalidCode,
+      };
+    }
+  }
+
+  if (digitCount(raw) > MAX_SAFE_DIGITS) {
+    return {
+      ok: false,
+      error: `${label} exceeds maximum of ${MAX_SAFE_DIGITS} digits`,
+      code: ERROR_CODES.EXCESSIVE_DIGITS,
+    };
+  }
+
+  return { ok: true, value: BigInt(raw) };
+}
+
+/**
+ * Validate a cents multiplier against digit limits.
+ */
+export function validateMultiplier(
+  multiplier: string | number | bigint
+): ConversionResult {
+  return parseSignedInteger(
+    multiplier,
+    "multiplier",
+    ERROR_CODES.INVALID_MULTIPLIER
+  );
+}
+
+/** Alias for validateMultiplier. */
+export const validateCentsMultiplier = validateMultiplier;
+
+/**
+ * Multiply a stablecoin cents amount by a multiplier factor after validating
+ * both operands, and reject a product that exceeds the safe digit limit.
+ */
+export function applyCentsMultiplier(
+  amount: string | number | bigint,
+  multiplier: string | number | bigint
+): ConversionResult {
+  const amountCheck = parseSignedInteger(
+    amount,
+    "amount",
+    ERROR_CODES.INVALID_MULTIPLIER
+  );
+  if (!amountCheck.ok) {
+    return amountCheck;
+  }
+
+  const factor = validateMultiplier(multiplier);
+  if (!factor.ok) {
+    return factor;
+  }
+
+  const product = amountCheck.value * factor.value;
+  if (digitCount(product.toString()) > MAX_SAFE_DIGITS) {
+    return {
+      ok: false,
+      error: `multiplied value exceeds maximum of ${MAX_SAFE_DIGITS} digits`,
+      code: ERROR_CODES.PRODUCT_OVERFLOW,
+    };
+  }
+
+  return { ok: true, value: product };
+}
+
+/** Alias for applyCentsMultiplier. */
+export const multiplyStablecoinCents = applyCentsMultiplier;
