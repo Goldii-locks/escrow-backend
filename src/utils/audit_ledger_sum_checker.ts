@@ -18,6 +18,8 @@ export const ERROR_CODES = {
   SUM_OVERFLOW: "OVERFLOW_SUM_EXCEEDED",
   ROUNDING_INVALID_INPUT: "ROUNDING_INVALID_INPUT",
   ROUNDING_SCALE_INVALID: "ROUNDING_SCALE_INVALID",
+  FORMAT_INVALID_DECIMALS: "FORMAT_INVALID_DECIMALS",
+  FORMAT_PRECISION_LOSS: "FORMAT_PRECISION_LOSS",
 } as const;
 
 export type OverflowErrorCode =
@@ -235,4 +237,189 @@ export function applyRoundedScale(
   const product = amountCheck.value * numCheck.value;
 
   return roundHalfEven(product, denomCheck.value);
+}
+
+// ---------------------------------------------------------------------------
+// TASK 5 – DB-column precision formatting (issue #498)
+// ---------------------------------------------------------------------------
+
+/**
+ * Database precision schema types for ledger columns.
+ * Mirrors `DbPrecisionFormat` in `partial-payment-allocator.ts` so ledger rows
+ * use the same storage vocabulary as the rest of the codebase.
+ */
+export type LedgerDbColumnFormat = "BIGINT" | "DECIMAL" | "TEXT";
+
+export interface LedgerDbColumnSchema {
+  field: string;
+  format: LedgerDbColumnFormat;
+  maxDigits?: number;
+  nullable?: boolean;
+}
+
+/**
+ * Standard database precision schemas for ledger row fields.
+ * Amounts are stored as TEXT (exact bigint rendering, no float round-trip);
+ * counts/ordinals use BIGINT.
+ */
+export const STANDARD_LEDGER_DB_SCHEMAS: Record<string, LedgerDbColumnSchema> = {
+  amount: {
+    field: "amount",
+    format: "TEXT",
+    maxDigits: MAX_SAFE_DIGITS,
+    nullable: false,
+  },
+  total: {
+    field: "total",
+    format: "TEXT",
+    maxDigits: MAX_SAFE_DIGITS,
+    nullable: false,
+  },
+  entry_index: {
+    field: "entry_index",
+    format: "BIGINT",
+    nullable: false,
+  },
+};
+
+export interface FormattedLedgerRow {
+  amount: string;
+  total: string;
+  entry_index: number;
+  precision_preserved: boolean;
+  original_amount_bigint: string;
+  original_total_bigint: string;
+}
+
+export type LedgerFormatResult =
+  | { ok: true; row: FormattedLedgerRow }
+  | { ok: false; error: string; code: RoundingErrorCode | typeof ERROR_CODES.FORMAT_INVALID_DECIMALS | typeof ERROR_CODES.FORMAT_PRECISION_LOSS };
+
+/**
+ * Format a bigint ledger `value` as a decimal string with exactly `decimals`
+ * fractional digits, suitable for a DECIMAL/TEXT column that downstream
+ * queries expect at fixed precision.
+ *
+ * `value` is the already-scaled integer representation; `decimals` restores
+ * the point (e.g. 7 decimals maps 10_000_000n to "1.0000000"). With
+ * `decimals = 0` the value renders as a plain integer string.
+ */
+export function formatLedgerValueForDb(value: bigint, decimals = 0): string {
+  if (typeof value !== "bigint") {
+    throw new TypeError("formatLedgerValueForDb: value must be a bigint");
+  }
+  if (!Number.isInteger(decimals) || decimals < 0) {
+    throw new RangeError(
+      `formatLedgerValueForDb: decimals must be a non-negative integer, got ${decimals}`
+    );
+  }
+
+  if (decimals === 0) {
+    return value.toString();
+  }
+
+  const isNegative = value < 0n;
+  const abs = isNegative ? -value : value;
+  const scale = 10n ** BigInt(decimals);
+  const integerPart = abs / scale;
+  const fractionalPart = abs % scale;
+  const fracStr = fractionalPart.toString().padStart(decimals, "0");
+  const formatted = `${integerPart.toString()}.${fracStr}`;
+  return isNegative ? `-${formatted}` : formatted;
+}
+
+/**
+ * Validate that a formatted ledger value round-trips to the original bigint
+ * (for `decimals = 0`) or to the correctly scaled representation, so a write
+ * never silently loses precision.
+ */
+export function validateLedgerFormatPrecision(
+  original: bigint,
+  formatted: string,
+  decimals = 0
+): { ok: boolean; precisionLoss: boolean } {
+  try {
+    if (decimals === 0) {
+      const parsed = BigInt(formatted);
+      return { ok: true, precisionLoss: parsed !== original };
+    }
+    const expected = formatLedgerValueForDb(original, decimals);
+    return { ok: true, precisionLoss: formatted !== expected };
+  } catch {
+    return { ok: false, precisionLoss: true };
+  }
+}
+
+/**
+ * Format one ledger entry (amount + running total) for database storage.
+ * Both columns render through `formatLedgerValueForDb` and are checked for
+ * precision loss before the row is returned, so callers never write a row
+ * whose attributes drift from full precision.
+ */
+export function formatLedgerRowForDb(
+  amount: string | number | bigint,
+  total: string | number | bigint,
+  entryIndex: number,
+  decimals = 0
+): LedgerFormatResult {
+  if (
+    typeof entryIndex !== "number" ||
+    !Number.isInteger(entryIndex) ||
+    entryIndex < 0
+  ) {
+    return {
+      ok: false,
+      error: "entryIndex must be a non-negative integer",
+      code: ERROR_CODES.FORMAT_INVALID_DECIMALS,
+    };
+  }
+  if (!Number.isInteger(decimals) || decimals < 0) {
+    return {
+      ok: false,
+      error: `decimals must be a non-negative integer, got ${decimals}`,
+      code: ERROR_CODES.FORMAT_INVALID_DECIMALS,
+    };
+  }
+
+  const amountCheck = validateLedgerAmount(amount, "amount");
+  if (!amountCheck.ok) {
+    return amountCheck as LedgerFormatResult;
+  }
+  const totalCheck = validateLedgerAmount(total, "total");
+  if (!totalCheck.ok) {
+    return totalCheck as LedgerFormatResult;
+  }
+
+  const formattedAmount = formatLedgerValueForDb(amountCheck.value, decimals);
+  const formattedTotal = formatLedgerValueForDb(totalCheck.value, decimals);
+
+  const amountPrecision = validateLedgerFormatPrecision(
+    amountCheck.value,
+    formattedAmount,
+    decimals
+  );
+  const totalPrecision = validateLedgerFormatPrecision(
+    totalCheck.value,
+    formattedTotal,
+    decimals
+  );
+  if (!amountPrecision.ok || amountPrecision.precisionLoss || !totalPrecision.ok || totalPrecision.precisionLoss) {
+    return {
+      ok: false,
+      error: "precision loss detected while formatting ledger row for DB storage",
+      code: ERROR_CODES.FORMAT_PRECISION_LOSS,
+    };
+  }
+
+  return {
+    ok: true,
+    row: {
+      amount: formattedAmount,
+      total: formattedTotal,
+      entry_index: entryIndex,
+      precision_preserved: true,
+      original_amount_bigint: amountCheck.value.toString(),
+      original_total_bigint: totalCheck.value.toString(),
+    },
+  };
 }
