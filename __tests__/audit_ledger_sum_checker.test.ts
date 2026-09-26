@@ -7,6 +7,8 @@ import {
   roundHalfEven,
   divideWithRounding,
   applyRoundedScale,
+  // Issue #501 â€“ split-sum assertions
+  assertLedgerSplitSum,
 } from "../src/utils/audit_ledger_sum_checker.js";
 
 // ---------------------------------------------------------------------------
@@ -350,5 +352,69 @@ describe("audit_ledger_sum_checker rounding policies", () => {
         expect(result.value * denom + result.remainder).toBe(amount * num);
       }
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #501 – split-sum assertions
+// ---------------------------------------------------------------------------
+
+describe("audit_ledger_sum_checker split-sum assertions", () => {
+  it("confirms matching split totals", () => {
+    const result = assertLedgerSplitSum(["10", "20", 5n], "35");
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.isMatch).toBe(true);
+      expect(result.total).toBe(35n);
+    }
+  });
+
+  it("reports mismatched allocations without failing in default mode", () => {
+    const result = assertLedgerSplitSum(["10", "20"], "35");
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.isMatch).toBe(false);
+      expect(result.total).toBe(30n);
+    }
+  });
+
+  it("rejects mismatched allocations in reject mode", () => {
+    const result = assertLedgerSplitSum(["10", "20"], "35", "reject");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.code).toBe(ERROR_CODES.SUM_MISMATCH);
+      expect(result.error).toMatch(/does not match/);
+    }
+  });
+
+  it("rejects an empty splits array", () => {
+    const result = assertLedgerSplitSum([], "0");
+    expect(result.ok).toBe(false);
+  });
+
+  it("rejects splits with excessive digits before summing", () => {
+    const excessive = "9".repeat(MAX_SAFE_DIGITS + 1);
+    const result = assertLedgerSplitSum(["1", excessive], "1");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.code).toBe(ERROR_CODES.EXCESSIVE_DIGITS);
+    }
+  });
+
+  it("rejects an invalid base amount", () => {
+    const result = assertLedgerSplitSum(["10"], "10.5");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.code).toBe(ERROR_CODES.INVALID_AMOUNT);
+    }
+  });
+
+  it("blocks a running total that overflows the digit limit", () => {
+    const half = "9".repeat(MAX_SAFE_DIGITS);
+    const result = assertLedgerSplitSum([half, half], half);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.code).toBe(ERROR_CODES.SUM_OVERFLOW);
+    }
   });
 });
