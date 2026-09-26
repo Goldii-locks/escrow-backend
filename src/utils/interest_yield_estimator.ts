@@ -39,6 +39,10 @@ export const ERROR_CODES = {
   PRODUCT_OVERFLOW: "OVERFLOW_PRODUCT_EXCEEDED",
   SUM_MISMATCH: "OVERFLOW_SUM_MISMATCH",
   INVALID_AMOUNT: "OVERFLOW_INVALID_AMOUNT",
+  MISSING_PARAMETER: "MISSING_PARAMETER",
+  INVALID_PARAMETER_TYPE: "INVALID_PARAMETER_TYPE",
+  CALCULATION_EXCEPTION: "CALCULATION_EXCEPTION",
+  PARAM_STRUCTURE_MISMATCH: "PARAM_STRUCTURE_MISMATCH",
 } as const;
 
 export type OverflowErrorCode =
@@ -46,36 +50,91 @@ export type OverflowErrorCode =
 
 export type ValidationResult =
   | { ok: true; value: bigint }
-  | { ok: false; error: string; code: OverflowErrorCode };
+  | {
+      ok: false;
+      error: string;
+      code: OverflowErrorCode;
+      parameters: { parameter: string; reason: string };
+      details?: { context: unknown; reason: string };
+    };
+
+export const ERROR_DEFINITIONS = Object.values(ERROR_CODES).map((code) => ({
+  code,
+  parameters: [
+    { name: "parameter", type: "string" as const, required: true },
+    { name: "reason", type: "string" as const, required: true },
+  ],
+}));
+
+function failure(
+  error: string,
+  code: OverflowErrorCode,
+  parameter: string,
+  details?: { context: unknown; reason: string }
+): ValidationResult {
+  return {
+    ok: false,
+    error,
+    code,
+    parameters: { parameter, reason: error },
+    ...(details ? { details } : {}),
+  };
+}
+
+function calculationFailure(
+  operation: string,
+  context: unknown,
+  cause: unknown
+): ValidationResult {
+  const reason = cause instanceof Error ? cause.message : String(cause);
+  return failure(
+    `Calculation exception during ${operation}: ${reason}`,
+    ERROR_CODES.CALCULATION_EXCEPTION,
+    operation,
+    { context, reason }
+  );
+}
 
 /**
  * Validate an interest rate (integer scaled factor) against digit limits.
  * Rejects negative rates as yields cannot be computed from negative factors.
  */
 export function validateInterestRate(
-  rate: string | number | bigint
+  rate: unknown
 ): ValidationResult {
-  return parseIntegerInput(
+  const parsed = parseIntegerInput(
     rate,
     "rate",
     ERROR_CODES.INVALID_RATE,
-    ERROR_CODES.EXCESSIVE_DIGITS
+    ERROR_CODES.EXCESSIVE_DIGITS,
+    {
+      nonNegative: true,
+      missingCode: ERROR_CODES.MISSING_PARAMETER,
+      invalidTypeCode: ERROR_CODES.INVALID_PARAMETER_TYPE,
+    }
   );
+  return parsed.ok ? parsed : failure(parsed.error, parsed.code, "rate");
 }
 
 /**
  * Validate a yield amount (split share or base total) against digit limits.
  */
 export function validateYieldAmount(
-  input: string | number | bigint,
+  input: unknown,
   label = "amount"
 ): ValidationResult {
-  return parseIntegerInput(
+  const parsed = parseIntegerInput(
     input,
     label,
-    ERROR_CODES.INVALID_RATE,
-    ERROR_CODES.EXCESSIVE_DIGITS
+    ERROR_CODES.INVALID_AMOUNT,
+    ERROR_CODES.EXCESSIVE_DIGITS,
+    {
+      nonNegative: true,
+      missingCode: ERROR_CODES.MISSING_PARAMETER,
+      invalidTypeCode: ERROR_CODES.INVALID_PARAMETER_TYPE,
+    }
   );
+  return parsed.ok ? parsed : failure(parsed.error, parsed.code, label);
 }
 
 /**
@@ -83,15 +142,21 @@ export function validateYieldAmount(
  * Rejects negative principals as balances cannot be negative.
  */
 export function validatePrincipal(
-  principal: string | number | bigint,
+  principal: unknown,
   label = "principal"
 ): ValidationResult {
-  return parseIntegerInput(
+  const parsed = parseIntegerInput(
     principal,
     label,
     ERROR_CODES.INVALID_AMOUNT,
-    ERROR_CODES.EXCESSIVE_DIGITS
+    ERROR_CODES.EXCESSIVE_DIGITS,
+    {
+      nonNegative: true,
+      missingCode: ERROR_CODES.MISSING_PARAMETER,
+      invalidTypeCode: ERROR_CODES.INVALID_PARAMETER_TYPE,
+    }
   );
+  return parsed.ok ? parsed : failure(parsed.error, parsed.code, label);
 }
 
 /**
@@ -100,15 +165,10 @@ export function validatePrincipal(
  * Rejects negative principals and rates.
  */
 export function estimateInterestYield(
-  principal: string | number | bigint,
-  rate: string | number | bigint
+  principal: unknown,
+  rate: unknown
 ): ValidationResult {
-  const amount = parseIntegerInput(
-    principal,
-    "principal",
-    ERROR_CODES.INVALID_RATE,
-    ERROR_CODES.EXCESSIVE_DIGITS
-  );
+  const amount = validatePrincipal(principal);
   if (!amount.ok) {
     return amount;
   }
@@ -118,32 +178,20 @@ export function estimateInterestYield(
     return factor;
   }
 
-  if (amount.value < 0n) {
-    return {
-      ok: false,
-      error: "principal cannot be negative",
-      code: ERROR_CODES.INVALID_RATE,
-    };
-  }
+  try {
+    const product = amount.value * factor.value;
+    if (digitCount(product.toString()) > MAX_SAFE_DIGITS) {
+      return failure(
+        `yield estimate exceeds maximum of ${MAX_SAFE_DIGITS} digits`,
+        ERROR_CODES.PRODUCT_OVERFLOW,
+        "product"
+      );
+    }
 
-  if (factor.value < 0n) {
-    return {
-      ok: false,
-      error: "rate cannot be negative",
-      code: ERROR_CODES.INVALID_RATE,
-    };
+    return { ok: true, value: product };
+  } catch (error) {
+    return calculationFailure("estimateInterestYield", { principal, rate }, error);
   }
-
-  const product = amount.value * factor.value;
-  if (digitCount(product.toString()) > MAX_SAFE_DIGITS) {
-    return {
-      ok: false,
-      error: `yield estimate exceeds maximum of ${MAX_SAFE_DIGITS} digits`,
-      code: ERROR_CODES.PRODUCT_OVERFLOW,
-    };
-  }
-
-  return { ok: true, value: product };
 }
 
 /**
@@ -151,9 +199,17 @@ export function estimateInterestYield(
  * amount, rejecting allocations that over- or under-allocate the total.
  */
 export function validateYieldSplitSum(
-  parts: Array<string | number | bigint>,
-  baseAmount: string | number | bigint
+  parts: unknown,
+  baseAmount: unknown
 ): ValidationResult {
+  if (!Array.isArray(parts)) {
+    return failure(
+      "parts must be an array",
+      ERROR_CODES.PARAM_STRUCTURE_MISMATCH,
+      "parts"
+    );
+  }
+
   let total = 0n;
 
   for (let i = 0; i < parts.length; i++) {
@@ -161,7 +217,11 @@ export function validateYieldSplitSum(
     if (!checked.ok) {
       return checked;
     }
-    total += checked.value;
+    try {
+      total += checked.value;
+    } catch (error) {
+      return calculationFailure("validateYieldSplitSum", { parts, baseAmount }, error);
+    }
   }
 
   const baseCheck = validateYieldAmount(baseAmount, "baseAmount");
@@ -170,11 +230,8 @@ export function validateYieldSplitSum(
   }
 
   if (total !== baseCheck.value) {
-    return {
-      ok: false,
-      error: `split total (${total}) does not match base amount (${baseCheck.value})`,
-      code: ERROR_CODES.SUM_MISMATCH,
-    };
+    const error = `split total (${total}) does not match base amount (${baseCheck.value})`;
+    return failure(error, ERROR_CODES.SUM_MISMATCH, "parts");
   }
 
   return { ok: true, value: total };
