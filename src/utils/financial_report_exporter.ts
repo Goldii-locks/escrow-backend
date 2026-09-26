@@ -12,7 +12,7 @@
 
 import { writeFile } from "node:fs/promises";
 import { escapeCSVField } from "./csv-serializer.js";
-import { parseIntegerInput } from "./digit-limit-validator.js";
+import { digitCount, MAX_SAFE_DIGITS, parseIntegerInput } from "./digit-limit-validator.js";
 
 export const FINANCIAL_REPORT_EXPORTER_ERRORS = {
   EMPTY_ROWS: "FRE_EMPTY_ROWS",
@@ -1410,4 +1410,274 @@ export function buildAndValidateWarningBody(
 ): ParameterValidationResult {
   const body = { code, parameters };
   return validateErrorStructure(body, FINANCIAL_REPORT_ERROR_DEFINITIONS);
+}
+
+// ---------------------------------------------------------------------------
+// Negative parameter rejection and spreadsheet/CSV generation (#496, #497, #505)
+// ---------------------------------------------------------------------------
+
+export { MAX_SAFE_DIGITS };
+
+export enum FinancialReportExporterError {
+  NEGATIVE_PARAMETER = "NEGATIVE_PARAMETER",
+  INVALID_PARAMETER = "INVALID_PARAMETER",
+  OVERFLOW_EXCESSIVE_DIGITS = "OVERFLOW_EXCESSIVE_DIGITS",
+  EMPTY_DATA = "EMPTY_DATA",
+  INVALID_ROW = "INVALID_ROW",
+}
+
+export const EXPORTER_PARAM_ERROR_CODES = {
+  NEGATIVE_PARAMETER: "NEGATIVE_PARAMETER",
+  INVALID_PARAMETER: "INVALID_PARAMETER",
+  INVALID_AMOUNT: "INVALID_AMOUNT",
+  EXCESSIVE_DIGITS: "OVERFLOW_EXCESSIVE_DIGITS",
+  OVERFLOW_EXCESSIVE_DIGITS: "OVERFLOW_EXCESSIVE_DIGITS",
+  EMPTY_DATA: "EMPTY_DATA",
+  INVALID_ROW: "INVALID_ROW",
+} as const;
+
+export type FinancialReportParamErrorCode =
+  | (typeof EXPORTER_PARAM_ERROR_CODES)[keyof typeof EXPORTER_PARAM_ERROR_CODES]
+  | FinancialReportExporterError;
+
+export class FinancialReportExporterErrorException extends Error {
+  public readonly code: FinancialReportParamErrorCode;
+
+  constructor(code: FinancialReportParamErrorCode, message: string) {
+    super(message);
+    this.name = "FinancialReportExporterErrorException";
+    this.code = code;
+  }
+}
+
+export type ValidationResult =
+  | { ok: true; value: bigint }
+  | { ok: false; error: string; code: FinancialReportParamErrorCode };
+
+export interface FinancialReportEntry {
+  id?: string | number;
+  label?: string;
+  category?: string;
+  amount: number | string | bigint;
+  currency?: string;
+  timestamp?: number;
+}
+
+export interface FinancialReportExporterParams {
+  amount: number | string | bigint;
+  currency?: string;
+  entries?: FinancialReportEntry[];
+}
+
+/**
+ * Validate a non-negative numeric amount parameter.
+ * Rejects negative amounts with error code NEGATIVE_PARAMETER / INVALID_AMOUNT.
+ */
+export function validateFinancialAmount(
+  value: number | string | bigint,
+  name = "amount"
+): ValidationResult {
+  if (typeof value === "bigint") {
+    if (value < 0n) {
+      return {
+        ok: false,
+        error: `Parameter "${name}" must not be negative`,
+        code: EXPORTER_PARAM_ERROR_CODES.NEGATIVE_PARAMETER,
+      };
+    }
+    const raw = value.toString();
+    if (digitCount(raw) > MAX_SAFE_DIGITS) {
+      return {
+        ok: false,
+        error: `Parameter "${name}" exceeds maximum of ${MAX_SAFE_DIGITS} digits`,
+        code: EXPORTER_PARAM_ERROR_CODES.EXCESSIVE_DIGITS,
+      };
+    }
+    return { ok: true, value };
+  }
+
+  if (typeof value === "number") {
+    if (!Number.isFinite(value) || Number.isNaN(value)) {
+      return {
+        ok: false,
+        error: `Parameter "${name}" must be a valid finite number`,
+        code: EXPORTER_PARAM_ERROR_CODES.INVALID_PARAMETER,
+      };
+    }
+    if (value < 0 || Object.is(value, -0)) {
+      return {
+        ok: false,
+        error: `Parameter "${name}" must not be negative`,
+        code: EXPORTER_PARAM_ERROR_CODES.NEGATIVE_PARAMETER,
+      };
+    }
+    if (!Number.isInteger(value)) {
+      // Human decimal representation: check digit count
+      const raw = String(value).replace(".", "");
+      if (digitCount(raw) > MAX_SAFE_DIGITS) {
+        return {
+          ok: false,
+          error: `Parameter "${name}" exceeds maximum of ${MAX_SAFE_DIGITS} digits`,
+          code: EXPORTER_PARAM_ERROR_CODES.EXCESSIVE_DIGITS,
+        };
+      }
+      return { ok: true, value: BigInt(Math.round(value)) };
+    }
+    const raw = String(value);
+    if (digitCount(raw) > MAX_SAFE_DIGITS) {
+      return {
+        ok: false,
+        error: `Parameter "${name}" exceeds maximum of ${MAX_SAFE_DIGITS} digits`,
+        code: EXPORTER_PARAM_ERROR_CODES.EXCESSIVE_DIGITS,
+      };
+    }
+    return { ok: true, value: BigInt(value) };
+  }
+
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (trimmed.startsWith("-")) {
+      return {
+        ok: false,
+        error: `Parameter "${name}" must not be negative`,
+        code: EXPORTER_PARAM_ERROR_CODES.NEGATIVE_PARAMETER,
+      };
+    }
+    return parseIntegerInput(
+      trimmed,
+      name,
+      EXPORTER_PARAM_ERROR_CODES.INVALID_PARAMETER,
+      EXPORTER_PARAM_ERROR_CODES.EXCESSIVE_DIGITS
+    );
+  }
+
+  return {
+    ok: false,
+    error: `Parameter "${name}" must be a string, number, or bigint`,
+    code: EXPORTER_PARAM_ERROR_CODES.INVALID_PARAMETER,
+  };
+}
+
+/**
+ * Validate input parameters for financial report exporter.
+ * Throws FinancialReportExporterErrorException when parameters are invalid or negative.
+ */
+export function validateFinancialReportExporterParams(
+  params: FinancialReportExporterParams
+): void {
+  if (!params || typeof params !== "object") {
+    throw new FinancialReportExporterErrorException(
+      EXPORTER_PARAM_ERROR_CODES.INVALID_PARAMETER,
+      "Parameters object is required"
+    );
+  }
+
+  const check = validateFinancialAmount(params.amount, "amount");
+  if (!check.ok) {
+    throw new FinancialReportExporterErrorException(check.code, check.error);
+  }
+
+  if (params.entries) {
+    if (!Array.isArray(params.entries)) {
+      throw new FinancialReportExporterErrorException(
+        EXPORTER_PARAM_ERROR_CODES.INVALID_PARAMETER,
+        'Parameter "entries" must be an array'
+      );
+    }
+    for (let i = 0; i < params.entries.length; i++) {
+      const entry = params.entries[i];
+      if (!entry || typeof entry !== "object") {
+        throw new FinancialReportExporterErrorException(
+          EXPORTER_PARAM_ERROR_CODES.INVALID_ROW,
+          `Entry at index ${i} must be an object`
+        );
+      }
+      const entryCheck = validateFinancialAmount(
+        entry.amount,
+        `entries[${i}].amount`
+      );
+      if (!entryCheck.ok) {
+        throw new FinancialReportExporterErrorException(
+          entryCheck.code,
+          entryCheck.error
+        );
+      }
+    }
+  }
+}
+
+/**
+ * Main financial report exporter function.
+ * Validates inputs, rejects negative parameters, and generates report output.
+ */
+export async function financial_report_exporter(
+  params: FinancialReportExporterParams
+): Promise<{ ok: true; data: string; rowCount: number }> {
+  validateFinancialReportExporterParams(params);
+
+  const lines = ["category,amount,currency"];
+  let rowCount = 0;
+
+  if (params.entries && params.entries.length > 0) {
+    for (const entry of params.entries) {
+      lines.push(
+        `${entry.category ?? "general"},${entry.amount},${entry.currency ?? params.currency ?? "XLM"}`
+      );
+      rowCount += 1;
+    }
+  } else {
+    lines.push(`total,${params.amount},${params.currency ?? "XLM"}`);
+    rowCount = 1;
+  }
+
+  return {
+    ok: true,
+    data: lines.join("\n") + "\n",
+    rowCount,
+  };
+}
+
+/**
+ * Synchronous exporter alias.
+ */
+export function exportFinancialReport(
+  params: FinancialReportExporterParams
+): { ok: true; data: string; rowCount: number } | { ok: false; error: string; code: FinancialReportParamErrorCode } {
+  const check = validateFinancialAmount(params.amount, "amount");
+  if (!check.ok) {
+    return check;
+  }
+
+  if (params.entries) {
+    for (let i = 0; i < params.entries.length; i++) {
+      const entryCheck = validateFinancialAmount(
+        params.entries[i].amount,
+        `entries[${i}].amount`
+      );
+      if (!entryCheck.ok) {
+        return entryCheck;
+      }
+    }
+  }
+
+  const lines = ["category,amount,currency"];
+  let rowCount = 0;
+
+  if (params.entries && params.entries.length > 0) {
+    for (const entry of params.entries) {
+      lines.push(
+        `${entry.category ?? "general"},${entry.amount},${entry.currency ?? params.currency ?? "XLM"}`
+      );
+      rowCount += 1;
+    }
+  } else {
+    lines.push(`total,${params.amount},${params.currency ?? "XLM"}`);
+    rowCount = 1;
+  }
+
+  return {
+    ok: true,
+    data: lines.join("\n") + "\n",
+    rowCount,
+  };
 }
