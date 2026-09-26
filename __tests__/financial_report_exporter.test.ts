@@ -4,6 +4,9 @@ import {
   resolveReportTicker,
   resolveReportRow,
   resolveReportRows,
+  formatReportValueForDb,
+  formatReportRowForDb,
+  reportFormatPreservesPrecision,
 } from "../src/utils/financial_report_exporter.js";
 
 describe("financial_report_exporter unknown ticker fallback", () => {
@@ -99,5 +102,43 @@ describe("financial_report_exporter unknown ticker fallback", () => {
         expect(result.code).toBe(REPORT_EXPORTER_ERRORS.EMPTY_ROWS);
       }
     });
+  });
+});
+
+describe("financial_report_exporter DB-column formatting", () => {
+  it("renders fixed-point values at ticker precision", () => {
+    expect(formatReportValueForDb(10_000_000n, 7)).toBe("1.0000000");
+    expect(formatReportValueForDb(100n, 0)).toBe("100");
+    expect(formatReportValueForDb(-5_000_000n, 7)).toBe("-0.5000000");
+  });
+
+  it("formats rows with full precision preserved", () => {
+    const result = formatReportRowForDb({ ticker: "USDC", amount: "10000000" });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.row.amount).toBe("1.0000000");
+      expect(result.row.precision_preserved).toBe(true);
+      expect(result.row.original_amount_bigint).toBe("10000000");
+      expect(result.row.fallback).toBe(false);
+    }
+  });
+
+  it("formats unknown-ticker rows at fallback precision", () => {
+    const result = formatReportRowForDb({ ticker: "MYSTERY", amount: 5_000_000n });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.row.amount).toBe("0.5000000");
+      expect(result.row.fallback).toBe(true);
+    }
+  });
+
+  it("round-trips formatted values without loss", () => {
+    expect(reportFormatPreservesPrecision(100n, "100", 0)).toBe(true);
+    expect(reportFormatPreservesPrecision(10_000_000n, "1.0000000", 7)).toBe(true);
+    expect(reportFormatPreservesPrecision(100n, "101", 0)).toBe(false);
+  });
+
+  it("rejects invalid rows before formatting", () => {
+    expect(formatReportRowForDb({ ticker: "XLM", amount: "bad" }).ok).toBe(false);
   });
 });

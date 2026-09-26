@@ -159,6 +159,119 @@ export function resolveReportRow(row: ReportTransactionRow): ResolveReportRowRes
 }
 
 /**
+ * Database precision schemas for report row columns (issue #507).
+ * Amounts render as exact TEXT (bigint-safe); the ticker column is TEXT.
+ */
+export type ReportDbColumnFormat = "BIGINT" | "DECIMAL" | "TEXT";
+
+export interface ReportDbColumnSchema {
+  field: string;
+  format: ReportDbColumnFormat;
+  maxDigits?: number;
+  nullable?: boolean;
+}
+
+export const STANDARD_REPORT_DB_SCHEMAS: Record<string, ReportDbColumnSchema> = {
+  amount: { field: "amount", format: "TEXT", nullable: false },
+  total: { field: "total", format: "TEXT", nullable: false },
+  ticker: { field: "ticker", format: "TEXT", nullable: false },
+};
+
+export interface FormattedReportRow {
+  ticker: string;
+  amount: string;
+  decimals: number;
+  fallback: boolean;
+  precision_preserved: boolean;
+  original_amount_bigint: string;
+  txHash?: string;
+}
+
+export type FormatReportRowResult =
+  | { ok: true; row: FormattedReportRow }
+  | { ok: false; error: string; code: ReportExporterErrorCode };
+
+/**
+ * Format a bigint report `value` as a decimal string with exactly `decimals`
+ * fractional digits for DB storage. `decimals = 0` renders a plain integer.
+ */
+export function formatReportValueForDb(value: bigint, decimals: number): string {
+  if (typeof value !== "bigint") {
+    throw new TypeError("formatReportValueForDb: value must be a bigint");
+  }
+  if (!Number.isInteger(decimals) || decimals < 0) {
+    throw new RangeError(
+      `formatReportValueForDb: decimals must be a non-negative integer, got ${decimals}`
+    );
+  }
+  if (decimals === 0) {
+    return value.toString();
+  }
+  const isNegative = value < 0n;
+  const abs = isNegative ? -value : value;
+  const scale = 10n ** BigInt(decimals);
+  const integerPart = abs / scale;
+  const fractionalPart = abs % scale;
+  const fracStr = fractionalPart.toString().padStart(decimals, "0");
+  const formatted = `${integerPart.toString()}.${fracStr}`;
+  return isNegative ? `-${formatted}` : formatted;
+}
+
+/**
+ * Confirm a formatted value round-trips to the original bigint: exact parse
+ * for `decimals = 0`, or point-stripped comparison at fixed scale otherwise.
+ */
+export function reportFormatPreservesPrecision(
+  original: bigint,
+  formatted: string,
+  decimals: number
+): boolean {
+  try {
+    if (decimals === 0) {
+      return BigInt(formatted) === original;
+    }
+    const negative = formatted.startsWith("-");
+    const digits = (negative ? formatted.slice(1) : formatted).replace(".", "");
+    return BigInt((negative ? "-" : "") + digits) === original;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Format one transaction row for database storage at the precision dictated
+ * by its ticker configuration (unknown tickers use the 7-decimal fallback).
+ * The written attributes are checked for precision loss before return.
+ */
+export function formatReportRowForDb(row: ReportTransactionRow): FormatReportRowResult {
+  const resolved = resolveReportRow(row);
+  if (!resolved.ok) {
+    return resolved;
+  }
+  const { ticker, amount, decimals, fallback, txHash } = resolved.row;
+  const formatted = formatReportValueForDb(amount, decimals);
+  if (!reportFormatPreservesPrecision(amount, formatted, decimals)) {
+    return {
+      ok: false,
+      error: "precision loss detected while formatting report row for DB storage",
+      code: REPORT_EXPORTER_ERRORS.INVALID_ROW,
+    };
+  }
+  return {
+    ok: true,
+    row: {
+      ticker,
+      amount: formatted,
+      decimals,
+      fallback,
+      precision_preserved: true,
+      original_amount_bigint: amount.toString(),
+      ...(txHash !== undefined ? { txHash } : {}),
+    },
+  };
+}
+
+/**
  * Resolve a batch of rows, short-circuiting on the first invalid amount.
  * Unknown tickers never short-circuit — each resolves with its fallback.
  */
