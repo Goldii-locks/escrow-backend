@@ -7,6 +7,11 @@ import {
   roundHalfEven,
   divideWithRounding,
   applyRoundedScale,
+  // Issue #498 â€“ DB-column precision formatting
+  STANDARD_LEDGER_DB_SCHEMAS,
+  formatLedgerValueForDb,
+  validateLedgerFormatPrecision,
+  formatLedgerRowForDb,
 } from "../src/utils/audit_ledger_sum_checker.js";
 
 // ---------------------------------------------------------------------------
@@ -349,6 +354,99 @@ describe("audit_ledger_sum_checker rounding policies", () => {
       if (result.ok) {
         expect(result.value * denom + result.remainder).toBe(amount * num);
       }
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #498 – DB-column precision formatting
+// ---------------------------------------------------------------------------
+
+describe("audit_ledger_sum_checker DB-column formatting", () => {
+  describe("STANDARD_LEDGER_DB_SCHEMAS", () => {
+    it("stores amounts as exact TEXT within the digit limit", () => {
+      expect(STANDARD_LEDGER_DB_SCHEMAS.amount.format).toBe("TEXT");
+      expect(STANDARD_LEDGER_DB_SCHEMAS.amount.maxDigits).toBe(MAX_SAFE_DIGITS);
+      expect(STANDARD_LEDGER_DB_SCHEMAS.total.format).toBe("TEXT");
+    });
+  });
+
+  describe("formatLedgerValueForDb", () => {
+    it("renders plain integers with zero decimals", () => {
+      expect(formatLedgerValueForDb(123456789012345n)).toBe("123456789012345");
+    });
+
+    it("renders fixed-point decimals with zero padding", () => {
+      expect(formatLedgerValueForDb(10_000_000n, 7)).toBe("1.0000000");
+      expect(formatLedgerValueForDb(12_345_678n, 7)).toBe("1.2345678");
+      expect(formatLedgerValueForDb(1n, 7)).toBe("0.0000001");
+    });
+
+    it("preserves the sign of negative values", () => {
+      expect(formatLedgerValueForDb(-5_000_000n, 7)).toBe("-0.5000000");
+    });
+
+    it("rejects negative or fractional decimals", () => {
+      expect(() => formatLedgerValueForDb(1n, -1)).toThrow(RangeError);
+      expect(() => formatLedgerValueForDb(1n, 1.5)).toThrow(RangeError);
+    });
+  });
+
+  describe("validateLedgerFormatPrecision", () => {
+    it("confirms exact round-trips preserve full precision", () => {
+      expect(validateLedgerFormatPrecision(100n, "100").precisionLoss).toBe(false);
+      expect(validateLedgerFormatPrecision(10_000_000n, "1.0000000", 7).precisionLoss).toBe(false);
+    });
+
+    it("flags drifted values as precision loss", () => {
+      expect(validateLedgerFormatPrecision(100n, "101").precisionLoss).toBe(true);
+      expect(validateLedgerFormatPrecision(10_000_000n, "1.0000001", 7).precisionLoss).toBe(true);
+    });
+  });
+
+  describe("formatLedgerRowForDb", () => {
+    it("formats amount and total with full precision preserved", () => {
+      const result = formatLedgerRowForDb("100", "350", 2);
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.row.amount).toBe("100");
+        expect(result.row.total).toBe("350");
+        expect(result.row.entry_index).toBe(2);
+        expect(result.row.precision_preserved).toBe(true);
+        expect(result.row.original_amount_bigint).toBe("100");
+        expect(result.row.original_total_bigint).toBe("350");
+      }
+    });
+
+    it("applies decimal scaling to both columns", () => {
+      const result = formatLedgerRowForDb(10_000_000n, 25_000_000n, 0, 7);
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.row.amount).toBe("1.0000000");
+        expect(result.row.total).toBe("2.5000000");
+      }
+    });
+
+    it("rejects invalid amounts before formatting", () => {
+      const result = formatLedgerRowForDb("12.5", "10", 0);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.code).toBe(ERROR_CODES.INVALID_AMOUNT);
+      }
+    });
+
+    it("rejects excessive-digit totals", () => {
+      const excessive = "9".repeat(MAX_SAFE_DIGITS + 1);
+      const result = formatLedgerRowForDb("1", excessive, 0);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.code).toBe(ERROR_CODES.EXCESSIVE_DIGITS);
+      }
+    });
+
+    it("rejects negative entry indexes and decimals", () => {
+      expect(formatLedgerRowForDb("1", "1", -1).ok).toBe(false);
+      expect(formatLedgerRowForDb("1", "1", 0, -2).ok).toBe(false);
     });
   });
 });
