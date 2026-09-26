@@ -7,6 +7,23 @@ import {
   roundHalfEven,
   divideWithRounding,
   applyRoundedScale,
+  // Issue #498 – DB-column precision formatting
+  STANDARD_LEDGER_DB_SCHEMAS,
+  formatLedgerValueForDb,
+  validateLedgerFormatPrecision,
+  formatLedgerRowForDb,
+  // Issue #501 – split-sum assertions
+  assertLedgerSplitSum,
+  // Issue #499 - Rate limiting
+  checkAuditLedgerRateLimit,
+  resetAuditRateLimitBuckets,
+  setAuditRateLimitMax,
+  // Issue #497 - Unknown asset ticker fallbacks
+  resolveAssetTicker,
+  getAssetFormatConfig,
+  DEFAULT_ASSET_FALLBACK,
+  DEFAULT_ASSET_FORMAT_CONFIG,
+  KNOWN_ASSETS,
 } from "../src/utils/audit_ledger_sum_checker.js";
 
 // ---------------------------------------------------------------------------
@@ -350,5 +367,350 @@ describe("audit_ledger_sum_checker rounding policies", () => {
         expect(result.value * denom + result.remainder).toBe(amount * num);
       }
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #498 � DB-column precision formatting
+// ---------------------------------------------------------------------------
+
+describe("audit_ledger_sum_checker DB-column formatting", () => {
+  describe("STANDARD_LEDGER_DB_SCHEMAS", () => {
+    it("stores amounts as exact TEXT within the digit limit", () => {
+      expect(STANDARD_LEDGER_DB_SCHEMAS.amount.format).toBe("TEXT");
+      expect(STANDARD_LEDGER_DB_SCHEMAS.amount.maxDigits).toBe(MAX_SAFE_DIGITS);
+      expect(STANDARD_LEDGER_DB_SCHEMAS.total.format).toBe("TEXT");
+    });
+  });
+
+  describe("formatLedgerValueForDb", () => {
+    it("renders plain integers with zero decimals", () => {
+      expect(formatLedgerValueForDb(123456789012345n)).toBe("123456789012345");
+    });
+
+    it("renders fixed-point decimals with zero padding", () => {
+      expect(formatLedgerValueForDb(10_000_000n, 7)).toBe("1.0000000");
+      expect(formatLedgerValueForDb(12_345_678n, 7)).toBe("1.2345678");
+      expect(formatLedgerValueForDb(1n, 7)).toBe("0.0000001");
+    });
+
+    it("preserves the sign of negative values", () => {
+      expect(formatLedgerValueForDb(-5_000_000n, 7)).toBe("-0.5000000");
+    });
+
+    it("rejects negative or fractional decimals", () => {
+      expect(() => formatLedgerValueForDb(1n, -1)).toThrow(RangeError);
+      expect(() => formatLedgerValueForDb(1n, 1.5)).toThrow(RangeError);
+    });
+  });
+
+  describe("validateLedgerFormatPrecision", () => {
+    it("confirms exact round-trips preserve full precision", () => {
+      expect(validateLedgerFormatPrecision(100n, "100").precisionLoss).toBe(false);
+      expect(validateLedgerFormatPrecision(10_000_000n, "1.0000000", 7).precisionLoss).toBe(false);
+    });
+
+    it("flags drifted values as precision loss", () => {
+      expect(validateLedgerFormatPrecision(100n, "101").precisionLoss).toBe(true);
+      expect(validateLedgerFormatPrecision(10_000_000n, "1.0000001", 7).precisionLoss).toBe(true);
+    });
+  });
+
+  describe("formatLedgerRowForDb", () => {
+    it("formats amount and total with full precision preserved", () => {
+      const result = formatLedgerRowForDb("100", "350", 2);
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.row.amount).toBe("100");
+        expect(result.row.total).toBe("350");
+        expect(result.row.entry_index).toBe(2);
+        expect(result.row.precision_preserved).toBe(true);
+        expect(result.row.original_amount_bigint).toBe("100");
+        expect(result.row.original_total_bigint).toBe("350");
+      }
+    });
+
+    it("applies decimal scaling to both columns", () => {
+      const result = formatLedgerRowForDb(10_000_000n, 25_000_000n, 0, 7);
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.row.amount).toBe("1.0000000");
+        expect(result.row.total).toBe("2.5000000");
+      }
+    });
+
+    it("rejects invalid amounts before formatting", () => {
+      const result = formatLedgerRowForDb("12.5", "10", 0);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.code).toBe(ERROR_CODES.INVALID_AMOUNT);
+      }
+    });
+
+    it("rejects excessive-digit totals", () => {
+      const excessive = "9".repeat(MAX_SAFE_DIGITS + 1);
+      const result = formatLedgerRowForDb("1", excessive, 0);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.code).toBe(ERROR_CODES.EXCESSIVE_DIGITS);
+      }
+    });
+
+    it("rejects negative entry indexes and decimals", () => {
+      expect(formatLedgerRowForDb("1", "1", -1).ok).toBe(false);
+      expect(formatLedgerRowForDb("1", "1", 0, -2).ok).toBe(false);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #496 – Negative parameter rejection
+// ---------------------------------------------------------------------------
+
+describe("audit_ledger_sum_checker negative parameter rejection (#496)", () => {
+  const negativeAmounts = [
+    -1,
+    -100,
+    "-1",
+    "-50",
+    "-999999999999999",
+    -1n,
+    -10000000n,
+  ];
+
+  negativeAmounts.forEach((val) => {
+    it(`rejects negative amount ${val} in validateLedgerAmount`, () => {
+      const res = validateLedgerAmount(val);
+      expect(res.ok).toBe(false);
+      if (!res.ok) {
+        expect(res.code).toBe(ERROR_CODES.INVALID_AMOUNT);
+        expect(res.error).toMatch(/negative/i);
+      }
+    });
+
+    it(`rejects negative amount ${val} within sumLedgerAmounts`, () => {
+      const res = sumLedgerAmounts(["100", val, "50"]);
+      expect(res.ok).toBe(false);
+      if (!res.ok) {
+        expect(res.code).toBe(ERROR_CODES.INVALID_AMOUNT);
+        expect(res.error).toMatch(/negative/i);
+      }
+    });
+  });
+
+  it("rejects negative zero (-0) correctly", () => {
+    const res = validateLedgerAmount(-0);
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.code).toBe(ERROR_CODES.INVALID_AMOUNT);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #501 � split-sum assertions
+// ---------------------------------------------------------------------------
+
+describe("audit_ledger_sum_checker split-sum assertions", () => {
+  it("confirms matching split totals", () => {
+    const result = assertLedgerSplitSum(["10", "20", 5n], "35");
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.isMatch).toBe(true);
+      expect(result.total).toBe(35n);
+    }
+  });
+
+  it("reports mismatched allocations without failing in default mode", () => {
+    const result = assertLedgerSplitSum(["10", "20"], "35");
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.isMatch).toBe(false);
+      expect(result.total).toBe(30n);
+    }
+  });
+
+  it("rejects mismatched allocations in reject mode", () => {
+    const result = assertLedgerSplitSum(["10", "20"], "35", "reject");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.code).toBe(ERROR_CODES.SUM_MISMATCH);
+      expect(result.error).toMatch(/does not match/);
+    }
+  });
+
+  it("rejects an empty splits array", () => {
+    const result = assertLedgerSplitSum([], "0");
+    expect(result.ok).toBe(false);
+  });
+
+  it("rejects splits with excessive digits before summing", () => {
+    const excessive = "9".repeat(MAX_SAFE_DIGITS + 1);
+    const result = assertLedgerSplitSum(["1", excessive], "1");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.code).toBe(ERROR_CODES.EXCESSIVE_DIGITS);
+    }
+  });
+
+  it("rejects an invalid base amount", () => {
+    const result = assertLedgerSplitSum(["10"], "10.5");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.code).toBe(ERROR_CODES.INVALID_AMOUNT);
+    }
+  });
+
+  it("blocks a running total that overflows the digit limit", () => {
+    const half = "9".repeat(MAX_SAFE_DIGITS);
+    const result = assertLedgerSplitSum([half, half], half);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.code).toBe(ERROR_CODES.SUM_OVERFLOW);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #499 – Rate limiting checks
+// ---------------------------------------------------------------------------
+
+describe("audit_ledger_sum_checker rate limiting checks (#499)", () => {
+  beforeEach(() => {
+    resetAuditRateLimitBuckets();
+    process.env.AUDIT_LEDGER_RATE_MAX = "3";
+    process.env.AUDIT_LEDGER_RATE_WINDOW_MS = "10000";
+  });
+
+  afterEach(() => {
+    resetAuditRateLimitBuckets();
+    delete process.env.AUDIT_LEDGER_RATE_MAX;
+    delete process.env.AUDIT_LEDGER_RATE_WINDOW_MS;
+  });
+
+  it("permits requests within configured threshold", () => {
+    for (let i = 0; i < 3; i++) {
+      const res = checkAuditLedgerRateLimit("client-1");
+      expect(res.ok).toBe(true);
+      if (res.ok) {
+        expect(res.allowed).toBe(true);
+        expect(res.remaining).toBe(3 - (i + 1));
+      }
+    }
+  });
+
+  it("returns 429 warning and denial when threshold is exceeded", () => {
+    for (let i = 0; i < 3; i++) {
+      checkAuditLedgerRateLimit("client-2");
+    }
+
+    const denied = checkAuditLedgerRateLimit("client-2");
+    expect(denied.ok).toBe(false);
+    if (!denied.ok) {
+      expect(denied.allowed).toBe(false);
+      expect(denied.status).toBe(429);
+      expect(denied.code).toBe(ERROR_CODES.RATE_LIMIT_EXCEEDED);
+      expect(denied.remaining).toBe(0);
+      expect(denied.error).toMatch(/rate limit exceeded/i);
+    }
+  });
+
+  it("enforces rate limits inside sumLedgerAmounts with clientKey option", () => {
+    for (let i = 0; i < 3; i++) {
+      const ok = sumLedgerAmounts(["10", "20"], { clientKey: "client-sum" });
+      expect(ok.ok).toBe(true);
+    }
+
+    const exceeded = sumLedgerAmounts(["10", "20"], { clientKey: "client-sum" });
+    expect(exceeded.ok).toBe(false);
+    if (!exceeded.ok) {
+      expect(exceeded.status).toBe(429);
+    }
+  });
+
+  it("enforces global rate limits when clientKey is omitted", () => {
+    setAuditRateLimitMax(2);
+    expect(checkAuditLedgerRateLimit().ok).toBe(true);
+    expect(checkAuditLedgerRateLimit().ok).toBe(true);
+    const globalDenied = checkAuditLedgerRateLimit();
+    expect(globalDenied.ok).toBe(false);
+    if (!globalDenied.ok) {
+      expect(globalDenied.status).toBe(429);
+      expect(globalDenied.code).toBe(ERROR_CODES.RATE_LIMITED);
+    }
+  });
+
+  it("tracks independent client buckets per IP / client key", () => {
+    for (let i = 0; i < 3; i++) {
+      checkAuditLedgerRateLimit("client-A");
+    }
+    expect(checkAuditLedgerRateLimit("client-A").ok).toBe(false);
+    expect(checkAuditLedgerRateLimit("client-B").ok).toBe(true);
+  });
+
+  it("resets rate limit buckets on demand", () => {
+    for (let i = 0; i < 3; i++) {
+      checkAuditLedgerRateLimit("client-reset");
+    }
+    expect(checkAuditLedgerRateLimit("client-reset").ok).toBe(false);
+    resetAuditRateLimitBuckets();
+    expect(checkAuditLedgerRateLimit("client-reset").ok).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #497 – Unknown asset ticker key fallbacks
+// ---------------------------------------------------------------------------
+
+describe("audit_ledger_sum_checker unknown asset ticker fallbacks (#497)", () => {
+  it("resolves well-known Stellar tickers (XLM, USDC, USDT, BTC, ETH)", () => {
+    const knownList = ["XLM", "USDC", "USDT", "BTC", "ETH"];
+    knownList.forEach((ticker) => {
+      const res = resolveAssetTicker(ticker);
+      expect(res.known).toBe(true);
+      expect(res.ticker).toBe(ticker);
+      expect(res.config.decimals).toBe(7);
+      expect(res.config.ticker).toBe(ticker);
+    });
+  });
+
+  it("handles case-insensitivity and whitespace in ticker keys", () => {
+    const res = resolveAssetTicker("  xlm  ");
+    expect(res.known).toBe(true);
+    expect(res.ticker).toBe("XLM");
+  });
+
+  it("applies default format configuration for unfamiliar Stellar token types without throwing", () => {
+    const unknownTickers = ["RANDOM_TOKEN", "XYZ", "UNKNOWN_ASSET", "CUSTOM_STOKEN_123"];
+
+    unknownTickers.forEach((ticker) => {
+      const res = resolveAssetTicker(ticker);
+      expect(res.known).toBe(false);
+      if (!res.known) {
+        expect(res.fallback).toBe(true);
+        expect(res.config.decimals).toBe(7);
+        expect(res.config.label).toBe(DEFAULT_ASSET_FALLBACK.label);
+      }
+    });
+  });
+
+  it("handles missing/null/undefined tickers with default fallback", () => {
+    expect(resolveAssetTicker(null).known).toBe(false);
+    expect(resolveAssetTicker(undefined).known).toBe(false);
+    expect(resolveAssetTicker("").known).toBe(false);
+  });
+
+  it("resolves format configs via getAssetFormatConfig", () => {
+    expect(getAssetFormatConfig("XLM")).toEqual({ ticker: "XLM", decimals: 7 });
+    expect(getAssetFormatConfig("UNKNOWN_TOK")).toEqual({ ticker: "UNKNOWN_TOK", decimals: 7 });
+    expect(getAssetFormatConfig(null)).toEqual(DEFAULT_ASSET_FORMAT_CONFIG);
+  });
+
+  it("accepts ticker in sumLedgerAmounts options without error", () => {
+    const res = sumLedgerAmounts(["10", "20"], { ticker: "NOVEL_TOKEN" });
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      expect(res.value).toBe(30n);
+    }
   });
 });

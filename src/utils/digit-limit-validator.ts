@@ -7,9 +7,9 @@
  * across three of them. This module is the single source of truth; callers
  * keep their own ERROR_CODES and pass the invalid-input code in (as before).
  *
- * Behaviour is intentionally unchanged: the shared validator's regex is
- * /^-?\d+$/, which accepts negative values. Per-caller negativity policy
- * is out of scope here (see issue #468 for refund_ratio_helper).
+ * Negative values remain accepted by default for callers that allow them.
+ * Callers can opt into non-negative validation and distinct missing/type codes
+ * through the options argument.
  */
 
 /** Max decimal digits allowed for a single amount (below Number.MAX_SAFE_INTEGER). */
@@ -35,14 +35,28 @@ export function digitCount(normalized: string): number {
  * @param label - human-readable label used in error messages
  * @param invalidCode - caller's invalid-input error code (codes differ per caller)
  * @param excessiveCode - caller's excessive-digits error code
+ * @param options - optional non-negative, missing-value, and type policies
  */
 export function parseIntegerInput<TCode extends string>(
-  input: string | number | bigint,
+  input: unknown,
   label: string,
   invalidCode: TCode,
-  excessiveCode: TCode
+  excessiveCode: TCode,
+  options: {
+    nonNegative?: boolean;
+    missingCode?: TCode;
+    invalidTypeCode?: TCode;
+  } = {}
 ): SharedValidationResult<TCode> {
   let raw: string;
+
+  if (input === undefined || input === null) {
+    return {
+      ok: false,
+      error: `${label} is required`,
+      code: options.missingCode ?? invalidCode,
+    };
+  }
 
   if (typeof input === "bigint") {
     raw = input.toString();
@@ -55,7 +69,7 @@ export function parseIntegerInput<TCode extends string>(
       };
     }
     raw = String(input);
-  } else {
+  } else if (typeof input === "string") {
     raw = input.trim();
     if (!/^-?\d+$/.test(raw)) {
       return {
@@ -64,6 +78,12 @@ export function parseIntegerInput<TCode extends string>(
         code: invalidCode,
       };
     }
+  } else {
+    return {
+      ok: false,
+      error: `${label} must be a string, number, or bigint`,
+      code: options.invalidTypeCode ?? invalidCode,
+    };
   }
 
   if (digitCount(raw) > MAX_SAFE_DIGITS) {
@@ -74,5 +94,14 @@ export function parseIntegerInput<TCode extends string>(
     };
   }
 
-  return { ok: true, value: BigInt(raw) };
+  const value = BigInt(raw);
+  if (options.nonNegative && value < 0n) {
+    return {
+      ok: false,
+      error: `${label} must be non-negative`,
+      code: invalidCode,
+    };
+  }
+
+  return { ok: true, value };
 }
