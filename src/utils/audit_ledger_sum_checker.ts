@@ -20,6 +20,7 @@ export const ERROR_CODES = {
   ROUNDING_SCALE_INVALID: "ROUNDING_SCALE_INVALID",
   FORMAT_INVALID_DECIMALS: "FORMAT_INVALID_DECIMALS",
   FORMAT_PRECISION_LOSS: "FORMAT_PRECISION_LOSS",
+  SUM_MISMATCH: "OVERFLOW_SUM_MISMATCH",
 } as const;
 
 export type OverflowErrorCode =
@@ -70,6 +71,75 @@ export function sumLedgerAmounts(
   }
 
   return { ok: true, value: total };
+}
+
+// ---------------------------------------------------------------------------
+// Split-sum assertions (issue #501)
+// ---------------------------------------------------------------------------
+
+export type SplitSumResult =
+  | { ok: true; total: bigint; isMatch: boolean }
+  | { ok: false; error: string; code: OverflowErrorCode };
+
+/**
+ * Assert that a set of split amounts adds up to an expected base amount.
+ *
+ * Every split and the base are validated against the digit limit before any
+ * arithmetic, so the function never operates on unsafe integers. The running
+ * total is guarded against digit-limit overflow on each addition.
+ *
+ * When `strict` is true (the default) a total that does not equal the base
+ * is returned as `{ ok: true, isMatch: false }` so the caller can decide how
+ * to handle the mismatch; pass `strict: "reject"` to receive a hard
+ * `SUM_MISMATCH` failure instead.
+ */
+export function assertLedgerSplitSum(
+  splits: Array<string | number | bigint>,
+  expectedBase: string | number | bigint,
+  strict: "mismatch" | "reject" = "mismatch"
+): SplitSumResult {
+  if (!Array.isArray(splits) || splits.length === 0) {
+    return {
+      ok: false,
+      error: "splits must be a non-empty array",
+      code: ERROR_CODES.INVALID_AMOUNT,
+    };
+  }
+
+  const baseCheck = validateLedgerAmount(expectedBase, "expectedBase");
+  if (!baseCheck.ok) {
+    return baseCheck;
+  }
+
+  let total = 0n;
+  for (let i = 0; i < splits.length; i++) {
+    const splitCheck = validateLedgerAmount(splits[i], `splits[${i}]`);
+    if (!splitCheck.ok) {
+      return splitCheck;
+    }
+    const next = total + splitCheck.value;
+    if (digitCount(next.toString()) > MAX_SAFE_DIGITS) {
+      return {
+        ok: false,
+        error: `split total exceeds maximum of ${MAX_SAFE_DIGITS} digits`,
+        code: ERROR_CODES.SUM_OVERFLOW,
+      };
+    }
+    total = next;
+  }
+
+  if (total !== baseCheck.value) {
+    if (strict === "reject") {
+      return {
+        ok: false,
+        error: `split total (${total}) does not match base amount (${baseCheck.value})`,
+        code: ERROR_CODES.SUM_MISMATCH,
+      };
+    }
+    return { ok: true, total, isMatch: false };
+  }
+
+  return { ok: true, total, isMatch: true };
 }
 
 // ---------------------------------------------------------------------------
