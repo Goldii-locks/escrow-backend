@@ -122,12 +122,16 @@ export interface CalculateTaxOptions {
 
 /**
  * Perform deterministic integer division applying specified rounding policy on remainders.
- * Default policy ("half-even" / "round-to-nearest-even") uses Banker's Rounding to break half ties to the nearest even integer.
+ * The default policy is "truncate" (round toward zero), which matches plain
+ * bigint division and keeps existing results unchanged. "half-even" /
+ * "round-to-nearest-even" use Banker's Rounding to break half ties to the
+ * nearest even integer; "floor" rounds toward negative infinity and "ceil"
+ * toward positive infinity.
  */
 export function roundIntegerDivision(
   numerator: bigint,
   divisor: bigint,
-  mode: RoundingPolicy = "half-even"
+  mode: RoundingPolicy = "truncate"
 ): bigint {
   let N = numerator;
   let D = divisor;
@@ -148,8 +152,13 @@ export function roundIntegerDivision(
   const absR = r >= 0n ? r : -r;
   const twiceR = 2n * absR;
 
-  if (mode === "truncate" || mode === "floor") {
-    return N < 0n ? (twiceR !== 0n ? q - 1n : q) : q;
+  if (mode === "truncate") {
+    // bigint division already truncates toward zero.
+    return q;
+  }
+
+  if (mode === "floor") {
+    return N < 0n ? q - 1n : q;
   }
 
   if (mode === "ceil") {
@@ -456,7 +465,8 @@ export function validateDbPrecisionSchema(
 /**
  * Calculate estimated withholding tax deduction for a given gross amount and tax rate.
  * Rejects calls when rate limit is exceeded or inputs overflow limits.
- * Applies specified rounding policy (default: "half-even" / round-to-nearest-even).
+ * Applies the specified rounding policy (default: "truncate", i.e. the
+ * fractional part of the tax is dropped, as before rounding policies existed).
  */
 export function calculateTaxDeduction(
   grossAmount: string | number | bigint,
@@ -464,7 +474,7 @@ export function calculateTaxDeduction(
   taxScale: string | number | bigint = DEFAULT_TAX_SCALE,
   roundingModeOrOptions?: RoundingPolicy | CalculateTaxOptions
 ): TaxDeductionOutcome {
-  let roundingMode: RoundingPolicy = "half-even";
+  let roundingMode: RoundingPolicy = "truncate";
 
   if (roundingModeOrOptions !== undefined && roundingModeOrOptions !== null) {
     if (typeof roundingModeOrOptions === "string") {
@@ -1016,13 +1026,16 @@ function validateBracket(
  *
  *   brackets = [{ upTo: 50_000, rate: 1000 }, { upTo: null, rate: 2000 }]
  *   grossAmount = 80_000 -> 5_000 + 6_000 = 11_000 tax, 69_000 net
+ *
+ * Each bracket's tax is rounded with its own `roundingMode` if set, else the
+ * call's rounding policy (default: "truncate").
  */
 export function estimateBracketTax(
   grossAmount: string | number | bigint,
   brackets: TaxBracket[],
   roundingModeOrOptions?: RoundingPolicy | { roundingMode?: RoundingPolicy }
 ): BracketTaxOutcome {
-  let roundingMode: RoundingPolicy = "half-even";
+  let roundingMode: RoundingPolicy = "truncate";
 
   if (roundingModeOrOptions !== undefined && roundingModeOrOptions !== null) {
     if (typeof roundingModeOrOptions === "string") {
