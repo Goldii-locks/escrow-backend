@@ -84,6 +84,7 @@ export const ERROR_CODES = {
   RATE_EXCEEDS_SCALE: "TAX_ESTIMATOR_RATE_EXCEEDS_SCALE",
   EMPTY_BRACKETS: "TAX_ESTIMATOR_EMPTY_BRACKETS",
   INVALID_CSV_INPUT: "TAX_ESTIMATOR_INVALID_CSV_INPUT",
+  INVALID_ROUNDING_MODE: "TAX_ESTIMATOR_INVALID_ROUNDING_MODE",
   // Compatibility aliases
   OVERFLOW_EXCESSIVE_DIGITS: "OVERFLOW_EXCESSIVE_DIGITS",
   OVERFLOW_INVALID_AMOUNT: "OVERFLOW_INVALID_AMOUNT",
@@ -97,6 +98,95 @@ export type ValidationResult =
   | { ok: true; value: bigint }
   | { ok: false; error: string; code: TaxEstimatorErrorCode; status?: number };
 
+export type RoundingPolicy =
+  | "half-even"
+  | "round-to-nearest-even"
+  | "half-up"
+  | "truncate"
+  | "ceil"
+  | "floor";
+
+export const VALID_ROUNDING_POLICIES: RoundingPolicy[] = [
+  "half-even",
+  "round-to-nearest-even",
+  "half-up",
+  "truncate",
+  "ceil",
+  "floor",
+];
+
+export interface CalculateTaxOptions {
+  roundingMode?: RoundingPolicy;
+  roundingPolicy?: RoundingPolicy;
+}
+
+/**
+ * Perform deterministic integer division applying specified rounding policy on remainders.
+ * The default policy is "truncate" (round toward zero), which matches plain
+ * bigint division and keeps existing results unchanged. "half-even" /
+ * "round-to-nearest-even" use Banker's Rounding to break half ties to the
+ * nearest even integer; "floor" rounds toward negative infinity and "ceil"
+ * toward positive infinity.
+ */
+export function roundIntegerDivision(
+  numerator: bigint,
+  divisor: bigint,
+  mode: RoundingPolicy = "truncate"
+): bigint {
+  let N = numerator;
+  let D = divisor;
+
+  if (D < 0n) {
+    N = -N;
+    D = -D;
+  }
+
+  const q = N / D;
+  const r = N % D;
+
+  if (r === 0n) {
+    return q;
+  }
+
+  const sign = N >= 0n ? 1n : -1n;
+  const absR = r >= 0n ? r : -r;
+  const twiceR = 2n * absR;
+
+  if (mode === "truncate") {
+    // bigint division already truncates toward zero.
+    return q;
+  }
+
+  if (mode === "floor") {
+    return N < 0n ? q - 1n : q;
+  }
+
+  if (mode === "ceil") {
+    return N > 0n ? q + 1n : q;
+  }
+
+  if (mode === "half-up") {
+    if (twiceR >= D) {
+      return q + sign;
+    }
+    return q;
+  }
+
+  // mode is "half-even" or "round-to-nearest-even" (Banker's rounding)
+  if (twiceR < D) {
+    return q;
+  } else if (twiceR > D) {
+    return q + sign;
+  } else {
+    // Exact halfway tie
+    if (q % 2n === 0n) {
+      return q;
+    } else {
+      return q + sign;
+    }
+  }
+}
+
 export type TaxDeductionOutcome =
   | {
       ok: true;
@@ -106,8 +196,41 @@ export type TaxDeductionOutcome =
       netAmount: bigint;
       remainder: bigint;
       taxScale: bigint;
+      roundingMode?: RoundingPolicy;
     }
   | { ok: false; error: string; code: TaxEstimatorErrorCode; status?: number };
+
+/**
+ * Validation check ensuring calculation results preserve exact division remainders and conserve amounts.
+ * Verifies that:
+ * 1. grossAmount * taxRate === (unroundedTax * taxScale) + remainder (remainder is not dropped or lost).
+ * 2. grossAmount === netAmount + taxAmount (conservation of funds).
+ */
+export function verifyTaxDeductionRemainder(
+  outcome: TaxDeductionOutcome
+):
+  | { ok: true; isValid: boolean; product: bigint; accounted: bigint; remainderPreserved: boolean }
+  | { ok: false; error: string; code: TaxEstimatorErrorCode } {
+  if (!outcome.ok) {
+    return outcome;
+  }
+  const product = outcome.grossAmount * outcome.taxRate;
+  const unroundedTax = product / outcome.taxScale;
+  const accounted = unroundedTax * outcome.taxScale + outcome.remainder;
+  const remainderPreserved = product === accounted;
+  const isValid = remainderPreserved && outcome.grossAmount === outcome.netAmount + outcome.taxAmount;
+
+  return {
+    ok: true,
+    isValid,
+    product,
+    accounted,
+    remainderPreserved,
+  };
+}
+
+/** Alias for verifyTaxDeductionRemainder */
+export const validateTaxDeductionRemainder = verifyTaxDeductionRemainder;
 
 /**
  * Configuration options for database precision schema and column mapping.
@@ -124,6 +247,8 @@ export interface DbPrecisionSchema {
   fixedScale?: boolean;
   /** Input type: auto, raw, or human. Defaults to "auto". */
   inputType?: "auto" | "raw" | "human";
+  /** Rounding policy applied during tax calculations. */
+  roundingMode?: RoundingPolicy;
   /** Custom column names for database storage mapping. */
   columns?: {
     grossAmount?: string;
@@ -340,12 +465,37 @@ export function validateDbPrecisionSchema(
 /**
  * Calculate estimated withholding tax deduction for a given gross amount and tax rate.
  * Rejects calls when rate limit is exceeded or inputs overflow limits.
+ * Applies the specified rounding policy (default: "truncate", i.e. the
+ * fractional part of the tax is dropped, as before rounding policies existed).
  */
 export function calculateTaxDeduction(
   grossAmount: string | number | bigint,
   taxRate: string | number | bigint,
-  taxScale: string | number | bigint = DEFAULT_TAX_SCALE
+  taxScale: string | number | bigint = DEFAULT_TAX_SCALE,
+  roundingModeOrOptions?: RoundingPolicy | CalculateTaxOptions
 ): TaxDeductionOutcome {
+  let roundingMode: RoundingPolicy = "truncate";
+
+  if (roundingModeOrOptions !== undefined && roundingModeOrOptions !== null) {
+    if (typeof roundingModeOrOptions === "string") {
+      roundingMode = roundingModeOrOptions;
+    } else if (typeof roundingModeOrOptions === "object") {
+      if (roundingModeOrOptions.roundingMode !== undefined) {
+        roundingMode = roundingModeOrOptions.roundingMode;
+      } else if (roundingModeOrOptions.roundingPolicy !== undefined) {
+        roundingMode = roundingModeOrOptions.roundingPolicy;
+      }
+    }
+  }
+
+  if (!VALID_ROUNDING_POLICIES.includes(roundingMode)) {
+    return {
+      ok: false,
+      error: `Invalid rounding mode: ${String(roundingMode)}`,
+      code: ERROR_CODES.INVALID_ROUNDING_MODE,
+    };
+  }
+
   const rateLimitCheck = checkTaxEstimatorRateLimit();
   if (!rateLimitCheck.ok) {
     return rateLimitCheck;
@@ -391,7 +541,7 @@ export function calculateTaxDeduction(
     };
   }
 
-  const taxAmount = product / scaleRes.value;
+  const taxAmount = roundIntegerDivision(product, scaleRes.value, roundingMode);
   const remainder = product % scaleRes.value;
   const netAmount = grossRes.value - taxAmount;
 
@@ -411,6 +561,7 @@ export function calculateTaxDeduction(
     netAmount,
     remainder,
     taxScale: scaleRes.value,
+    roundingMode,
   };
 }
 
@@ -461,7 +612,7 @@ export function formatForDbStorage(
     }
     outcome = amount;
   } else {
-    outcome = calculateTaxDeduction(amount, taxRate);
+    outcome = calculateTaxDeduction(amount, taxRate, DEFAULT_TAX_SCALE, schema?.roundingMode);
     if (!outcome.ok) {
       return outcome;
     }
@@ -570,6 +721,7 @@ export interface TaxDeductionCsvRecord {
   taxRate: string | number | bigint;
   taxScale?: string | number | bigint;
   label?: string;
+  roundingMode?: RoundingPolicy;
 }
 
 /** Columns the tax deduction CSV exporter can emit. */
@@ -602,6 +754,8 @@ export interface TaxCsvExportOptions {
   scale?: number;
   /** Whether an empty records array is allowed. Defaults to true. */
   allowEmpty?: boolean;
+  /** Rounding policy applied during tax calculations. */
+  roundingMode?: RoundingPolicy;
 }
 
 export type TaxCsvOutcome =
@@ -702,7 +856,8 @@ export function buildTaxDeductionCsvBlock(
     const outcome = calculateTaxDeduction(
       record.grossAmount,
       record.taxRate,
-      record.taxScale ?? DEFAULT_TAX_SCALE
+      record.taxScale ?? DEFAULT_TAX_SCALE,
+      record.roundingMode ?? options.roundingMode
     );
     if (!outcome.ok) {
       return { ...outcome, error: `record at index ${i}: ${outcome.error}` };
@@ -749,6 +904,7 @@ export interface TaxBracket {
   upTo: string | number | bigint | null | undefined;
   rate: string | number | bigint;
   scale?: string | number | bigint;
+  roundingMode?: RoundingPolicy;
 }
 
 export type BracketTaxOutcome =
@@ -759,6 +915,7 @@ export type BracketTaxOutcome =
       totalTaxAmount: bigint;
       netAmount: bigint;
       effectiveRateBps: bigint;
+      roundingMode?: RoundingPolicy;
     }
   | { ok: false; error: string; code: TaxEstimatorErrorCode; status?: number };
 
@@ -798,7 +955,7 @@ function validateBracket(
   bracket: TaxBracket,
   index: number
 ):
-  | { ok: true; upTo: bigint | null; rate: bigint; scale: bigint }
+  | { ok: true; upTo: bigint | null; rate: bigint; scale: bigint; roundingMode?: RoundingPolicy }
   | { ok: false; error: string; code: TaxEstimatorErrorCode } {
   const label = `brackets[${index}]`;
 
@@ -831,8 +988,17 @@ function validateBracket(
     };
   }
 
+  const mode = bracket.roundingMode;
+  if (mode !== undefined && !VALID_ROUNDING_POLICIES.includes(mode)) {
+    return {
+      ok: false,
+      error: `Invalid rounding mode for ${label}: ${String(mode)}`,
+      code: ERROR_CODES.INVALID_ROUNDING_MODE,
+    };
+  }
+
   if (bracket.upTo === null || bracket.upTo === undefined) {
-    return { ok: true, upTo: null, rate: rateCheck.value, scale: scaleCheck.value };
+    return { ok: true, upTo: null, rate: rateCheck.value, scale: scaleCheck.value, roundingMode: mode };
   }
 
   const upToCheck = validateTaxAmount(bracket.upTo, `${label}.upTo`);
@@ -847,6 +1013,7 @@ function validateBracket(
     upTo: upToCheck.value,
     rate: rateCheck.value,
     scale: scaleCheck.value,
+    roundingMode: mode,
   };
 }
 
@@ -859,11 +1026,33 @@ function validateBracket(
  *
  *   brackets = [{ upTo: 50_000, rate: 1000 }, { upTo: null, rate: 2000 }]
  *   grossAmount = 80_000 -> 5_000 + 6_000 = 11_000 tax, 69_000 net
+ *
+ * Each bracket's tax is rounded with its own `roundingMode` if set, else the
+ * call's rounding policy (default: "truncate").
  */
 export function estimateBracketTax(
   grossAmount: string | number | bigint,
-  brackets: TaxBracket[]
+  brackets: TaxBracket[],
+  roundingModeOrOptions?: RoundingPolicy | { roundingMode?: RoundingPolicy }
 ): BracketTaxOutcome {
+  let roundingMode: RoundingPolicy = "truncate";
+
+  if (roundingModeOrOptions !== undefined && roundingModeOrOptions !== null) {
+    if (typeof roundingModeOrOptions === "string") {
+      roundingMode = roundingModeOrOptions;
+    } else if (typeof roundingModeOrOptions === "object" && roundingModeOrOptions.roundingMode !== undefined) {
+      roundingMode = roundingModeOrOptions.roundingMode;
+    }
+  }
+
+  if (!VALID_ROUNDING_POLICIES.includes(roundingMode)) {
+    return {
+      ok: false,
+      error: `Invalid rounding mode: ${String(roundingMode)}`,
+      code: ERROR_CODES.INVALID_ROUNDING_MODE,
+    };
+  }
+
   const rateLimitCheck = checkTaxEstimatorRateLimit();
   if (!rateLimitCheck.ok) {
     return rateLimitCheck;
@@ -883,7 +1072,7 @@ export function estimateBracketTax(
   }
 
   const gross = grossCheck.value;
-  const resolved: { upTo: bigint | null; rate: bigint; scale: bigint }[] = [];
+  const resolved: { upTo: bigint | null; rate: bigint; scale: bigint; roundingMode?: RoundingPolicy }[] = [];
 
   for (let i = 0; i < brackets.length; i++) {
     const bracketResult = validateBracket(brackets[i], i);
@@ -894,6 +1083,7 @@ export function estimateBracketTax(
       upTo: bracketResult.upTo,
       rate: bracketResult.rate,
       scale: bracketResult.scale,
+      roundingMode: bracketResult.roundingMode,
     });
   }
 
@@ -924,7 +1114,7 @@ export function estimateBracketTax(
   let lowerBound = 0n;
 
   for (let i = 0; i < resolved.length; i++) {
-    const { upTo, rate, scale } = resolved[i];
+    const { upTo, rate, scale, roundingMode: bracketRounding } = resolved[i];
 
     if (remaining <= 0n) {
       bracketTaxes.push(0n);
@@ -943,7 +1133,8 @@ export function estimateBracketTax(
       };
     }
 
-    const bracketTax = product / scale;
+    const modeToUse = bracketRounding ?? roundingMode;
+    const bracketTax = roundIntegerDivision(product, scale, modeToUse);
     bracketTaxes.push(bracketTax);
     totalTaxAmount += bracketTax;
     remaining -= slice;
@@ -967,5 +1158,6 @@ export function estimateBracketTax(
     totalTaxAmount,
     netAmount: gross - totalTaxAmount,
     effectiveRateBps: gross > 0n ? (totalTaxAmount * 10_000n) / gross : 0n,
+    roundingMode,
   };
 }

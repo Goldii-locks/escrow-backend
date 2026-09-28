@@ -3,6 +3,11 @@ import {
   MAX_INTERMEDIATE_DIGITS,
   DEFAULT_TAX_SCALE,
   ERROR_CODES,
+  RoundingPolicy,
+  VALID_ROUNDING_POLICIES,
+  roundIntegerDivision,
+  verifyTaxDeductionRemainder,
+  validateTaxDeductionRemainder,
   validateTaxAmount,
   validateTaxRate,
   calculateTaxDeduction,
@@ -395,6 +400,215 @@ describe("tax_deduction_estimator", () => {
         expect(res.code).toBe(ERROR_CODES.INVALID_AMOUNT);
         expect(res.error).toMatch(/^record at index 1:/);
       }
+    });
+  });
+
+  describe("Issue #449: Configurable decimal rounding policies & remainder validation", () => {
+    describe("roundIntegerDivision unit tests", () => {
+      it("handles half-even (round-to-nearest-even / Banker's rounding) correctly", () => {
+        // 25 / 10 = 2.5 -> q=2 (even), rounds to 2
+        expect(roundIntegerDivision(25n, 10n, "half-even")).toBe(2n);
+        expect(roundIntegerDivision(25n, 10n, "round-to-nearest-even")).toBe(2n);
+
+        // 35 / 10 = 3.5 -> q=3 (odd), rounds to 4
+        expect(roundIntegerDivision(35n, 10n, "half-even")).toBe(4n);
+        expect(roundIntegerDivision(35n, 10n, "round-to-nearest-even")).toBe(4n);
+
+        // 10 / 3 = 3.333 -> rounds to 3
+        expect(roundIntegerDivision(10n, 3n, "half-even")).toBe(3n);
+
+        // 17 / 3 = 5.666 -> rounds to 6
+        expect(roundIntegerDivision(17n, 3n, "half-even")).toBe(6n);
+      });
+
+      it("handles half-up rounding policy correctly", () => {
+        // 25 / 10 = 2.5 -> rounds up to 3
+        expect(roundIntegerDivision(25n, 10n, "half-up")).toBe(3n);
+
+        // 35 / 10 = 3.5 -> rounds up to 4
+        expect(roundIntegerDivision(35n, 10n, "half-up")).toBe(4n);
+
+        // 10 / 3 = 3.333 -> rounds to 3
+        expect(roundIntegerDivision(10n, 3n, "half-up")).toBe(3n);
+      });
+
+      it("handles truncate / floor rounding policy correctly", () => {
+        // 25 / 10 = 2.5 -> truncates to 2
+        expect(roundIntegerDivision(25n, 10n, "truncate")).toBe(2n);
+        expect(roundIntegerDivision(25n, 10n, "floor")).toBe(2n);
+
+        // 35 / 10 = 3.5 -> truncates to 3
+        expect(roundIntegerDivision(35n, 10n, "truncate")).toBe(3n);
+
+        // 17 / 3 = 5.666 -> truncates to 5
+        expect(roundIntegerDivision(17n, 3n, "truncate")).toBe(5n);
+      });
+
+      it("defaults to truncation and distinguishes truncate from floor for negatives", () => {
+        expect(roundIntegerDivision(29n, 10n)).toBe(2n);
+        // -25 / 10 = -2.5: truncate rounds toward zero, floor toward -infinity
+        expect(roundIntegerDivision(-25n, 10n, "truncate")).toBe(-2n);
+        expect(roundIntegerDivision(-25n, 10n, "floor")).toBe(-3n);
+        expect(roundIntegerDivision(-20n, 10n, "floor")).toBe(-2n);
+      });
+
+      it("handles ceil rounding policy correctly", () => {
+        // 25 / 10 = 2.5 -> rounds up to 3
+        expect(roundIntegerDivision(25n, 10n, "ceil")).toBe(3n);
+
+        // 21 / 10 = 2.1 -> rounds up to 3
+        expect(roundIntegerDivision(21n, 10n, "ceil")).toBe(3n);
+
+        // 20 / 10 = 2.0 -> exact 2
+        expect(roundIntegerDivision(20n, 10n, "ceil")).toBe(2n);
+      });
+    });
+
+    describe("calculateTaxDeduction with configurable rounding policies", () => {
+      it("truncates by default, preserving the pre-#449 results", () => {
+        // Gross 10, rate 35, scale 100 -> product 350 / 100 = 3.5 -> truncates to 3
+        const outcome = calculateTaxDeduction(10, 35, 100);
+        expect(outcome.ok).toBe(true);
+        if (outcome.ok) {
+          expect(outcome.taxAmount).toBe(3n);
+          expect(outcome.netAmount).toBe(7n);
+          expect(outcome.remainder).toBe(50n);
+          expect(outcome.roundingMode).toBe("truncate");
+        }
+
+        // Gross 10, rate 29, scale 100 -> product 290 / 100 = 2.9 -> truncates to 2
+        const outcomeHigh = calculateTaxDeduction(10, 29, 100);
+        expect(outcomeHigh.ok).toBe(true);
+        if (outcomeHigh.ok) {
+          expect(outcomeHigh.taxAmount).toBe(2n);
+          expect(outcomeHigh.netAmount).toBe(8n);
+        }
+      });
+
+      it("supports explicit half-even (round-to-nearest-even) rounding policy", () => {
+        // Gross 10, rate 35, scale 100 -> product 350 / 100 = 3.5 -> rounds to 4 (q=3 is odd)
+        const outcome = calculateTaxDeduction(10, 35, 100, "half-even");
+        expect(outcome.ok).toBe(true);
+        if (outcome.ok) {
+          expect(outcome.taxAmount).toBe(4n);
+          expect(outcome.netAmount).toBe(6n);
+          expect(outcome.remainder).toBe(50n);
+          expect(outcome.roundingMode).toBe("half-even");
+        }
+
+        // Gross 10, rate 25, scale 100 -> product 250 / 100 = 2.5 -> rounds to 2 (q=2 is even)
+        const outcomeEven = calculateTaxDeduction(10, 25, 100, "round-to-nearest-even");
+        expect(outcomeEven.ok).toBe(true);
+        if (outcomeEven.ok) {
+          expect(outcomeEven.taxAmount).toBe(2n);
+          expect(outcomeEven.netAmount).toBe(8n);
+          expect(outcomeEven.remainder).toBe(50n);
+        }
+      });
+
+      it("supports explicit half-up rounding policy", () => {
+        // Gross 10, rate 25, scale 100 -> product 250 / 100 = 2.5 -> half-up rounds to 3
+        const outcome = calculateTaxDeduction(10, 25, 100, "half-up");
+        expect(outcome.ok).toBe(true);
+        if (outcome.ok) {
+          expect(outcome.taxAmount).toBe(3n);
+          expect(outcome.netAmount).toBe(7n);
+          expect(outcome.roundingMode).toBe("half-up");
+        }
+      });
+
+      it("supports explicit truncate rounding policy", () => {
+        // Gross 10, rate 35, scale 100 -> product 350 / 100 = 3.5 -> truncate rounds to 3
+        const outcome = calculateTaxDeduction(10, 35, 100, "truncate");
+        expect(outcome.ok).toBe(true);
+        if (outcome.ok) {
+          expect(outcome.taxAmount).toBe(3n);
+          expect(outcome.netAmount).toBe(7n);
+          expect(outcome.roundingMode).toBe("truncate");
+        }
+      });
+
+      it("supports explicit ceil rounding policy", () => {
+        // Gross 10, rate 21, scale 100 -> product 210 / 100 = 2.1 -> ceil rounds to 3
+        const outcome = calculateTaxDeduction(10, 21, 100, "ceil");
+        expect(outcome.ok).toBe(true);
+        if (outcome.ok) {
+          expect(outcome.taxAmount).toBe(3n);
+          expect(outcome.netAmount).toBe(7n);
+          expect(outcome.roundingMode).toBe("ceil");
+        }
+      });
+
+      it("supports passing rounding policy inside an options object", () => {
+        const outcome = calculateTaxDeduction(10, 25, 100, { roundingMode: "half-up" });
+        expect(outcome.ok).toBe(true);
+        if (outcome.ok) {
+          expect(outcome.taxAmount).toBe(3n);
+          expect(outcome.roundingMode).toBe("half-up");
+        }
+      });
+
+      it("rejects invalid rounding mode with INVALID_ROUNDING_MODE error", () => {
+        const outcome = calculateTaxDeduction(100, 50, 1000, "invalid-policy" as unknown as RoundingPolicy);
+        expect(outcome.ok).toBe(false);
+        if (!outcome.ok) {
+          expect(outcome.code).toBe(ERROR_CODES.INVALID_ROUNDING_MODE);
+          expect(outcome.error).toMatch(/Invalid rounding mode/i);
+        }
+      });
+    });
+
+    describe("verifyTaxDeductionRemainder & remainder preservation check", () => {
+      it("verifies that calculation results preserve exact division remainders and conserve amounts", () => {
+        const outcome = calculateTaxDeduction(100, 333, 10000);
+        expect(outcome.ok).toBe(true);
+        if (outcome.ok) {
+          const check = verifyTaxDeductionRemainder(outcome);
+          expect(check.ok).toBe(true);
+          if (check.ok) {
+            expect(check.isValid).toBe(true);
+            expect(check.remainderPreserved).toBe(true);
+            expect(check.product).toBe(33300n);
+            expect(check.accounted).toBe(33300n); // (3 * 10000) + 3300 = 33300
+          }
+        }
+      });
+
+      it("alias validateTaxDeductionRemainder produces identical result", () => {
+        const outcome = calculateTaxDeduction(500, 1250, 10000, "half-up");
+        const check = validateTaxDeductionRemainder(outcome);
+        expect(check.ok).toBe(true);
+        if (check.ok) {
+          expect(check.isValid).toBe(true);
+        }
+      });
+    });
+
+    describe("Integration with CSV export & DB formatting", () => {
+      it("applies configured rounding policy in buildTaxDeductionCsvBlock", () => {
+        // Gross 10, rate 25, scale 100 => product 250 / 100 = 2.5. With half-up -> taxAmount 3
+        const csvRes = buildTaxDeductionCsvBlock(
+          [{ grossAmount: 10, taxRate: 25, taxScale: 100 }],
+          { roundingMode: "half-up" }
+        );
+        expect(csvRes.ok).toBe(true);
+        if (csvRes.ok) {
+          expect(csvRes.value).toContain("10,25,3,7,50");
+        }
+      });
+
+      it("applies configured rounding policy in formatForDbStorage", () => {
+        // Gross 10, taxRate 2500 (25%), default scale 10000 => product 25000 / 10000 = 2.5. With half-up -> taxAmount 3
+        const dbRes = formatForDbStorage("10", "2500", 0, {
+          roundingMode: "half-up",
+          scale: 0,
+        });
+        expect(dbRes.ok).toBe(true);
+        if (dbRes.ok) {
+          expect(dbRes.value.tax_amount).toBe("3");
+          expect(dbRes.value.net_amount).toBe("7");
+        }
+      });
     });
   });
 });
