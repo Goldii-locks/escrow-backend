@@ -1424,6 +1424,7 @@ export enum FinancialReportExporterError {
   OVERFLOW_EXCESSIVE_DIGITS = "OVERFLOW_EXCESSIVE_DIGITS",
   EMPTY_DATA = "EMPTY_DATA",
   INVALID_ROW = "INVALID_ROW",
+  SUM_MISMATCH = "FINANCIAL_REPORT_SUM_MISMATCH",
 }
 
 export const EXPORTER_PARAM_ERROR_CODES = {
@@ -1434,6 +1435,7 @@ export const EXPORTER_PARAM_ERROR_CODES = {
   OVERFLOW_EXCESSIVE_DIGITS: "OVERFLOW_EXCESSIVE_DIGITS",
   EMPTY_DATA: "EMPTY_DATA",
   INVALID_ROW: "INVALID_ROW",
+  SUM_MISMATCH: "FINANCIAL_REPORT_SUM_MISMATCH",
 } as const;
 
 export type FinancialReportParamErrorCode =
@@ -1467,6 +1469,76 @@ export interface FinancialReportExporterParams {
   amount: number | string | bigint;
   currency?: string;
   entries?: FinancialReportEntry[];
+}
+
+export type SplitSumCheckResult =
+  | { ok: true; value: bigint }
+  | { ok: false; error: string; code: FinancialReportParamErrorCode };
+
+/**
+ * Confirm that split/allocation amounts sum exactly to the report base amount.
+ * Comparison is bigint-exact; a mismatch is `SUM_MISMATCH`, never a silent export.
+ */
+export function assertFinancialReportSplitSum(
+  splits: Array<string | number | bigint>,
+  expectedBase: string | number | bigint
+): SplitSumCheckResult {
+  if (!Array.isArray(splits) || splits.length === 0) {
+    return {
+      ok: false,
+      error: "splits must be a non-empty array",
+      code: EXPORTER_PARAM_ERROR_CODES.INVALID_PARAMETER,
+    };
+  }
+
+  const baseCheck = validateFinancialAmount(expectedBase, "amount");
+  if (!baseCheck.ok) {
+    return baseCheck;
+  }
+
+  let total = 0n;
+  for (let i = 0; i < splits.length; i++) {
+    const splitCheck = validateFinancialAmount(splits[i], `splits[${i}]`);
+    if (!splitCheck.ok) {
+      return splitCheck;
+    }
+    const next = total + splitCheck.value;
+    if (digitCount(next.toString()) > MAX_SAFE_DIGITS) {
+      return {
+        ok: false,
+        error: `split total exceeds maximum of ${MAX_SAFE_DIGITS} digits`,
+        code: EXPORTER_PARAM_ERROR_CODES.EXCESSIVE_DIGITS,
+      };
+    }
+    total = next;
+  }
+
+  if (total !== baseCheck.value) {
+    return {
+      ok: false,
+      error: `split total (${total}) does not match base amount (${baseCheck.value})`,
+      code: EXPORTER_PARAM_ERROR_CODES.SUM_MISMATCH,
+    };
+  }
+
+  return { ok: true, value: total };
+}
+
+function reconcileExporterEntrySplits(
+  params: FinancialReportExporterParams
+): SplitSumCheckResult | { ok: true; value: bigint; skipped: true } {
+  if (!params.entries || params.entries.length === 0) {
+    const baseCheck = validateFinancialAmount(params.amount, "amount");
+    if (!baseCheck.ok) {
+      return baseCheck;
+    }
+    return { ok: true, value: baseCheck.value, skipped: true };
+  }
+
+  return assertFinancialReportSplitSum(
+    params.entries.map((entry) => entry.amount),
+    params.amount
+  );
 }
 
 /**
@@ -1603,6 +1675,18 @@ export function validateFinancialReportExporterParams(
         );
       }
     }
+    if (params.entries.length > 0) {
+      const splitCheck = assertFinancialReportSplitSum(
+        params.entries.map((entry) => entry.amount),
+        params.amount
+      );
+      if (!splitCheck.ok) {
+        throw new FinancialReportExporterErrorException(
+          splitCheck.code,
+          splitCheck.error
+        );
+      }
+    }
   }
 }
 
@@ -1658,6 +1742,11 @@ export function exportFinancialReport(
         return entryCheck;
       }
     }
+  }
+
+  const splitCheck = reconcileExporterEntrySplits(params);
+  if (!splitCheck.ok) {
+    return splitCheck;
   }
 
   const lines = ["category,amount,currency"];
