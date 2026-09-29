@@ -13,6 +13,7 @@
 import { writeFile } from "node:fs/promises";
 import { escapeCSVField } from "./csv-serializer.js";
 import { digitCount, MAX_SAFE_DIGITS, parseIntegerInput } from "./digit-limit-validator.js";
+import { divideHalfEven } from "./financial_report_math.js";
 
 export const FINANCIAL_REPORT_EXPORTER_ERRORS = {
   EMPTY_ROWS: "FRE_EMPTY_ROWS",
@@ -162,6 +163,69 @@ export function formatMinorUnits(minor: bigint, decimals = 7): string {
   const whole = padded.slice(0, padded.length - decimals);
   const fraction = padded.slice(padded.length - decimals);
   return `${negative ? "-" : ""}${whole}.${fraction}`;
+}
+
+/**
+ * Central rounding policy for exporter calculations that produce a remainder.
+ * Matches `financial_report_math.divideHalfEven` and the ledger checker:
+ * IEEE 754 roundTiesToEven (banker's rounding) on integer minor units.
+ */
+export const FINANCIAL_REPORT_ROUNDING_MODE = "half_even" as const;
+
+export const FINANCIAL_REPORT_ROUNDING_POLICY = {
+  mode: FINANCIAL_REPORT_ROUNDING_MODE,
+  precision: "integer_minor_units",
+} as const;
+
+export type FinancialReportRoundedDivision =
+  | {
+      ok: true;
+      value: bigint;
+      truncated: bigint;
+      remainder: bigint;
+    }
+  | { ok: false; error: string; code: FinancialReportErrorCode };
+
+/**
+ * Divide two non-negative minor-unit integers with round-half-to-even.
+ * `remainder` is the unused portion of `numerator` *before* rounding
+ * (`numerator === truncated * denominator + remainder`), so no remainder
+ * is dropped from the calculation record.
+ */
+export function roundFinancialReportDivision(
+  numerator: bigint,
+  denominator: bigint
+): FinancialReportRoundedDivision {
+  if (typeof numerator !== "bigint" || typeof denominator !== "bigint") {
+    return {
+      ok: false,
+      error: "numerator and denominator must be bigint minor units",
+      code: FINANCIAL_REPORT_EXPORTER_ERRORS.INVALID_AMOUNT,
+    };
+  }
+  if (numerator < 0n) {
+    return {
+      ok: false,
+      error: "numerator must not be negative",
+      code: FINANCIAL_REPORT_EXPORTER_ERRORS.INVALID_AMOUNT,
+    };
+  }
+  if (denominator <= 0n) {
+    return {
+      ok: false,
+      error: "denominator must be a positive bigint",
+      code: FINANCIAL_REPORT_EXPORTER_ERRORS.INVALID_OPTION,
+    };
+  }
+
+  const truncated = numerator / denominator;
+  const remainder = numerator % denominator;
+  return {
+    ok: true,
+    value: divideHalfEven(numerator, denominator),
+    truncated,
+    remainder,
+  };
 }
 
 function isNonEmptyString(value: unknown): value is string {
@@ -1628,6 +1692,117 @@ export function validateFinancialAmount(
     error: `Parameter "${name}" must be a string, number, or bigint`,
     code: EXPORTER_PARAM_ERROR_CODES.INVALID_PARAMETER,
   };
+}
+
+export type FinancialReportSplitResult =
+  | { ok: true; parts: bigint[]; roundedShare: bigint; remainder: bigint }
+  | { ok: false; error: string; code: FinancialReportParamErrorCode };
+
+/**
+ * Split a base amount into `partCount` integer shares that sum exactly back
+ * to the original. The documented per-share figure is round-half-to-even;
+ * leftover minor units (`amount % partCount`) are assigned to leading parts
+ * so the remainder cannot leak out of the export calculation.
+ */
+export function splitFinancialReportAmount(
+  amount: number | string | bigint,
+  partCount: number
+): FinancialReportSplitResult {
+  const amountCheck = validateFinancialAmount(amount, "amount");
+  if (!amountCheck.ok) {
+    return amountCheck;
+  }
+
+  if (
+    typeof partCount !== "number" ||
+    !Number.isInteger(partCount) ||
+    partCount <= 0
+  ) {
+    return {
+      ok: false,
+      error: "partCount must be a positive integer",
+      code: EXPORTER_PARAM_ERROR_CODES.INVALID_PARAMETER,
+    };
+  }
+
+  const total = amountCheck.value;
+  const denom = BigInt(partCount);
+  const rounded = roundFinancialReportDivision(total, denom);
+  if (!rounded.ok) {
+    return {
+      ok: false,
+      error: rounded.error,
+      code: EXPORTER_PARAM_ERROR_CODES.INVALID_PARAMETER,
+    };
+  }
+
+  const truncated = total / denom;
+  const dustCount = total - truncated * denom;
+  const parts: bigint[] = [];
+  for (let i = 0; i < partCount; i++) {
+    parts.push(BigInt(i) < dustCount ? truncated + 1n : truncated);
+  }
+
+  return {
+    ok: true,
+    parts,
+    roundedShare: rounded.value,
+    remainder: rounded.remainder,
+  };
+}
+
+export type FinancialReportRowRounding =
+  | {
+      ok: true;
+      rounded: bigint[];
+      remainders: bigint[];
+      roundedSum: bigint;
+      exactSum: bigint;
+    }
+  | { ok: false; error: string; code: FinancialReportParamErrorCode };
+
+/**
+ * Round each row amount independently, keeping per-row remainders so a
+ * reviewer can see when the sum of rounded rows diverges from rounding the
+ * combined total.
+ */
+export function roundFinancialReportAmountList(
+  amounts: Array<number | string | bigint>,
+  denominator: bigint
+): FinancialReportRowRounding {
+  if (!Array.isArray(amounts) || amounts.length === 0) {
+    return {
+      ok: false,
+      error: "amounts must be a non-empty array",
+      code: EXPORTER_PARAM_ERROR_CODES.INVALID_PARAMETER,
+    };
+  }
+
+  const rounded: bigint[] = [];
+  const remainders: bigint[] = [];
+  let exactSum = 0n;
+  let roundedSum = 0n;
+
+  for (let i = 0; i < amounts.length; i++) {
+    const parsed = validateFinancialAmount(amounts[i], `amounts[${i}]`);
+    if (!parsed.ok) {
+      return parsed;
+    }
+    const division = roundFinancialReportDivision(parsed.value, denominator);
+    if (!division.ok) {
+      return {
+        ok: false,
+        error: division.error,
+        code: EXPORTER_PARAM_ERROR_CODES.INVALID_PARAMETER,
+      };
+    }
+    exactSum += parsed.value;
+    roundedSum += division.value;
+    rounded.push(division.value);
+    remainders.push(division.remainder);
+  }
+
+  return { ok: true, rounded, remainders, roundedSum, exactSum };
 }
 
 /**
