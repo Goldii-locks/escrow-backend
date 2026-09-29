@@ -4,6 +4,8 @@
  * Rejects inputs whose digit count would risk unsafe numeric overflow.
  */
 
+import fs from "node:fs";
+import path from "node:path";
 import {
   digitCount,
   parseIntegerInput,
@@ -23,6 +25,8 @@ export const ERROR_CODES = {
   SUM_MISMATCH: "OVERFLOW_SUM_MISMATCH",
   RATE_LIMITED: "AUDIT_RATE_LIMITED",
   RATE_LIMIT_EXCEEDED: "RATE_LIMIT_EXCEEDED",
+  INVALID_CSV_INPUT: "AUDIT_INVALID_CSV_INPUT",
+  EMPTY_CSV_DATA: "AUDIT_EMPTY_CSV_DATA",
 } as const;
 
 export type OverflowErrorCode =
@@ -1208,4 +1212,278 @@ export function formatLedgerRowForDb(
       original_total_bigint: totalCheck.value.toString(),
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// CSV format exporters / file serialization (#500)
+// ---------------------------------------------------------------------------
+//
+// File serialization helpers that build CSV formatting blocks (tables) from
+// checker data. Each amount is validated through validateLedgerAmount before
+// any table output is produced, so overflow / digit-limit violations fail
+// fast. Running totals use the same digit-limit guard as sumLedgerAmounts.
+
+/** A single ledger entry destined for CSV / table export. */
+export interface AuditLedgerCsvRecord {
+  label?: string | null;
+  amount: string | number | bigint;
+  ticker?: string | null;
+  memo?: string | null;
+}
+
+export const AUDIT_LEDGER_CSV_COLUMNS = [
+  "index",
+  "label",
+  "amount",
+  "running_total",
+  "ticker",
+  "memo",
+] as const;
+
+export type AuditLedgerCsvColumn = (typeof AUDIT_LEDGER_CSV_COLUMNS)[number];
+
+export interface AuditLedgerCsvExportOptions {
+  delimiter?: string;
+  lineEnding?: "\n" | "\r\n";
+  includeHeader?: boolean;
+  columns?: AuditLedgerCsvColumn[];
+  headers?: string[];
+  allowEmpty?: boolean;
+  encoding?: BufferEncoding;
+}
+
+export type AuditLedgerCsvOutcome =
+  | {
+      ok: true;
+      value: string;
+      rowCount: number;
+      columns: AuditLedgerCsvColumn[];
+      total: bigint;
+    }
+  | { ok: false; error: string; code: OverflowErrorCode };
+
+export type AuditLedgerCsvFileOutcome =
+  | {
+      ok: true;
+      filePath: string;
+      bytesWritten: number;
+      rowCount: number;
+    }
+  | { ok: false; error: string; code: OverflowErrorCode };
+
+/**
+ * Escape a CSV field (RFC 4180). Empty/optional values become empty cells.
+ * Numeric bigints keep their exact decimal-digit representation.
+ */
+export function escapeAuditLedgerCsvField(
+  value: unknown,
+  delimiter = ","
+): string {
+  if (value === null || value === undefined) {
+    return "";
+  }
+  const str = typeof value === "bigint" ? value.toString() : String(value);
+  if (
+    str.includes(delimiter) ||
+    str.includes('"') ||
+    str.includes("\n") ||
+    str.includes("\r")
+  ) {
+    return `"${str.replace(/"/g, '""')}"`;
+  }
+  return str;
+}
+
+/** Format an array of values into a single escaped CSV row. */
+export function formatAuditLedgerCsvRow(
+  values: unknown[],
+  delimiter = ","
+): string {
+  return values
+    .map((value) => escapeAuditLedgerCsvField(value, delimiter))
+    .join(delimiter);
+}
+
+function csvInputError(error: string): AuditLedgerCsvOutcome {
+  return { ok: false, error, code: ERROR_CODES.INVALID_CSV_INPUT };
+}
+
+/**
+ * Build a deterministic CSV formatting block from checker records.
+ * Column order is fixed unless `options.columns` is supplied.
+ */
+export function buildAuditLedgerCsvBlock(
+  records: AuditLedgerCsvRecord[],
+  options: AuditLedgerCsvExportOptions = {}
+): AuditLedgerCsvOutcome {
+  if (!Array.isArray(records)) {
+    return csvInputError("records must be an array");
+  }
+  if (records.length === 0 && options.allowEmpty === false) {
+    return {
+      ok: false,
+      error: "records array cannot be empty",
+      code: ERROR_CODES.EMPTY_CSV_DATA,
+    };
+  }
+
+  const delimiter = options.delimiter ?? ",";
+  if (delimiter.length !== 1 || /["\r\n]/.test(delimiter)) {
+    return csvInputError(
+      "delimiter must be a single character other than a quote or line break"
+    );
+  }
+  const lineEnding = options.lineEnding ?? "\n";
+  if (lineEnding !== "\n" && lineEnding !== "\r\n") {
+    return csvInputError("lineEnding must be '\\n' or '\\r\\n'");
+  }
+
+  let columns: AuditLedgerCsvColumn[];
+  if (options.columns && options.columns.length > 0) {
+    const unknown = options.columns.find(
+      (column) =>
+        !(AUDIT_LEDGER_CSV_COLUMNS as readonly string[]).includes(column)
+    );
+    if (unknown !== undefined) {
+      return csvInputError(`unknown column: ${String(unknown)}`);
+    }
+    columns = [...options.columns];
+  } else {
+    columns = [...AUDIT_LEDGER_CSV_COLUMNS];
+  }
+
+  if (options.headers && options.headers.length !== columns.length) {
+    return csvInputError(
+      `headers length (${options.headers.length}) must match columns length (${columns.length})`
+    );
+  }
+
+  const lines: string[] = [];
+  if (options.includeHeader !== false) {
+    lines.push(
+      formatAuditLedgerCsvRow(options.headers ?? columns, delimiter)
+    );
+  }
+
+  let runningTotal = 0n;
+  for (let i = 0; i < records.length; i++) {
+    const record = records[i];
+    if (typeof record !== "object" || record === null) {
+      return csvInputError(`record at index ${i} must be an object`);
+    }
+
+    const amountCheck = validateLedgerAmount(record.amount, `records[${i}].amount`);
+    if (!amountCheck.ok) {
+      return amountCheck;
+    }
+
+    const next = runningTotal + amountCheck.value;
+    if (digitCount(next.toString()) > MAX_SAFE_DIGITS) {
+      return {
+        ok: false,
+        error: `ledger sum exceeds maximum of ${MAX_SAFE_DIGITS} digits`,
+        code: ERROR_CODES.SUM_OVERFLOW,
+      };
+    }
+    runningTotal = next;
+
+    const ticker =
+      record.ticker === undefined || record.ticker === null
+        ? ""
+        : getAssetFormatConfig(record.ticker).ticker;
+
+    const cells: Record<AuditLedgerCsvColumn, string> = {
+      index: String(i),
+      label: record.label ?? "",
+      amount: amountCheck.value.toString(),
+      running_total: runningTotal.toString(),
+      ticker,
+      memo: record.memo ?? "",
+    };
+
+    lines.push(
+      formatAuditLedgerCsvRow(
+        columns.map((column) => cells[column]),
+        delimiter
+      )
+    );
+  }
+
+  return {
+    ok: true,
+    value: lines.length > 0 ? lines.join(lineEnding) + lineEnding : "",
+    rowCount: records.length,
+    columns,
+    total: runningTotal,
+  };
+}
+
+/** Alias for buildAuditLedgerCsvBlock. */
+export const exportAuditLedgerToCsv = buildAuditLedgerCsvBlock;
+/** Alias for buildAuditLedgerCsvBlock. */
+export const serializeAuditLedgerToCsv = buildAuditLedgerCsvBlock;
+/** Alias for buildAuditLedgerCsvBlock. */
+export const formatAuditLedgerTable = buildAuditLedgerCsvBlock;
+
+/**
+ * Serialize checker data to a CSV file. Parent directories are created as
+ * needed. Downstream consumers receive UTF-8 table output by default.
+ */
+export function writeAuditLedgerCsvFile(
+  filePath: string,
+  records: AuditLedgerCsvRecord[] | string,
+  options: AuditLedgerCsvExportOptions = {}
+): AuditLedgerCsvFileOutcome {
+  if (!filePath || typeof filePath !== "string" || filePath.trim().length === 0) {
+    return {
+      ok: false,
+      error: "filePath must be a non-empty string",
+      code: ERROR_CODES.INVALID_CSV_INPUT,
+    };
+  }
+
+  let csvContent: string;
+  let rowCount: number;
+
+  if (typeof records === "string") {
+    csvContent = records;
+    const trimmed = records.trim();
+    if (trimmed.length === 0) {
+      rowCount = 0;
+    } else {
+      const splitLines = trimmed.split(/\r?\n/);
+      rowCount =
+        options.includeHeader !== false
+          ? Math.max(0, splitLines.length - 1)
+          : splitLines.length;
+    }
+  } else {
+    const formatted = buildAuditLedgerCsvBlock(records, options);
+    if (!formatted.ok) {
+      return formatted;
+    }
+    csvContent = formatted.value;
+    rowCount = formatted.rowCount;
+  }
+
+  try {
+    const dir = path.dirname(filePath);
+    if (dir && dir !== "." && !fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    const encoding = options.encoding ?? "utf8";
+    fs.writeFileSync(filePath, csvContent, { encoding });
+    return {
+      ok: true,
+      filePath,
+      bytesWritten: Buffer.byteLength(csvContent, encoding),
+      rowCount,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : "failed to write CSV file",
+      code: ERROR_CODES.INVALID_CSV_INPUT,
+    };
+  }
 }
