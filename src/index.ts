@@ -69,17 +69,53 @@ app.use("/api/webhooks", webhookRoutes);
 // Global error handler – prevents stack trace leakage
 app.use((err: unknown, req: Request, res: Response, _next: NextFunction) => {
   const message = err instanceof Error ? err.message : String(err);
+  const errRecord =
+    typeof err === "object" && err !== null
+      ? (err as Record<string, unknown>)
+      : undefined;
+  const rawStatus =
+    typeof errRecord?.status === "number"
+      ? errRecord.status
+      : typeof errRecord?.statusCode === "number"
+        ? errRecord.statusCode
+        : undefined;
+  const errType =
+    typeof errRecord?.type === "string" ? errRecord.type : undefined;
+
+  if (
+    rawStatus !== undefined &&
+    rawStatus >= 400 &&
+    rawStatus <= 499 &&
+    errType !== undefined &&
+    errType.startsWith("entity.")
+  ) {
+    const clientMessage =
+      errType === "entity.too.large" || rawStatus === 413
+        ? "Payload too large"
+        : "Malformed JSON body";
+    logger.warn("Client request body error", {
+      error: message,
+      status: rawStatus,
+      type: errType,
+      path: req.path,
+    });
+    res.status(rawStatus).json({ success: false, error: clientMessage });
+    return;
+  }
+
   logger.error("Unhandled error", { error: message, path: req.path });
   res.status(500).json({ success: false, error: "Internal server error" });
 });
 
-// Run DB migrations then start the indexer poller
-runMigrations();
-markIndexerStarted();
-startPoller();
+if (process.env.NODE_ENV !== "test") {
+  // Run DB migrations then start the indexer poller
+  runMigrations();
+  markIndexerStarted();
+  startPoller();
 
-app.listen(PORT, () => {
-  logger.info("Escrow backend started", { port: PORT });
-});
+  app.listen(PORT, () => {
+    logger.info("Escrow backend started", { port: PORT });
+  });
+}
 
 export default app;
