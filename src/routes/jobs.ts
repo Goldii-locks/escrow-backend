@@ -1409,6 +1409,8 @@ router.options("/:contractId/milestones/:index/claim-auto-release", claimAutoRel
 
 router.post(
   "/:contractId/milestones/:index/claim-auto-release",
+  claimAutoReleaseCors,
+  claimAutoReleaseSecurityHeaders,
   claimAutoReleaseRateLimit,
   validate(contractMilestoneParamsSchema, "params", (req) =>
     logger.warn("Invalid params for claim-auto-release", { params: req.params }),

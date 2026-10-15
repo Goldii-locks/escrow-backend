@@ -42,6 +42,53 @@ const MOCK_ACCOUNT = {
   incrementSequenceNumber: () => {},
 };
 
+describe("POST /api/jobs/:contractId/milestones/:index/claim-auto-release – CORS and security headers", () => {
+  const originalAllowedOrigins = process.env.ALLOWED_ORIGINS;
+
+  beforeEach(() => {
+    process.env.ALLOWED_ORIGINS = "http://localhost:3000";
+    mockGetAccount.mockReset();
+    mockPrepareTransaction.mockReset();
+  });
+
+  afterEach(() => {
+    if (originalAllowedOrigins === undefined) delete process.env.ALLOWED_ORIGINS;
+    else process.env.ALLOWED_ORIGINS = originalAllowedOrigins;
+  });
+
+  it("rejects requests from unauthorized origins with 403", async () => {
+    const res = await request(buildApp())
+      .post(ENDPOINT)
+      .set("Origin", "http://malicious.com")
+      .send(VALID_BODY)
+      .expect(403);
+
+    expect(res.body).toEqual({
+      success: false,
+      error: "Origin not allowed by CORS policy",
+    });
+    expect(res.headers["access-control-allow-origin"]).toBeUndefined();
+  });
+
+  it("sets required security headers on the response", async () => {
+    mockGetAccount.mockResolvedValue(MOCK_ACCOUNT);
+    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==" });
+
+    const res = await request(buildApp())
+      .post(ENDPOINT)
+      .set("Origin", "http://localhost:3000")
+      .send(VALID_BODY)
+      .expect(200);
+
+    expect(res.headers["x-content-type-options"]).toBe("nosniff");
+    expect(res.headers["x-frame-options"]).toBe("DENY");
+    expect(res.headers["referrer-policy"]).toBe("no-referrer");
+    expect(res.headers["x-xss-protection"]).toBe("0");
+    expect(res.headers["content-security-policy"]).toBe("default-src 'none'");
+    expect(res.headers["permissions-policy"]).toContain("camera=()");
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Params validation
 // ---------------------------------------------------------------------------
