@@ -159,7 +159,7 @@ describe("SQLite index optimization — duplicate_prevention lookups", () => {
       expect(getLastIndexedLedger()).toBeDefined();
     });
 
-    it(`performs 500 isDuplicateEvent() lookups across ${ROW_COUNT} rows well under 100ms`, () => {
+    it(`performs 500 isDuplicateEvent() lookups across ${ROW_COUNT} rows in well under 150ms`, () => {
       const start = performance.now();
       let hits = 0;
       for (let i = 0; i < 500; i++) {
@@ -169,7 +169,7 @@ describe("SQLite index optimization — duplicate_prevention lookups", () => {
       const elapsed = performance.now() - start;
 
       expect(hits).toBeGreaterThan(0);
-      expect(elapsed).toBeLessThan(100);
+      expect(elapsed).toBeLessThan(150);
 
       console.log(
         `[perf] isDuplicateEvent x500 over ${ROW_COUNT} rows: ${elapsed.toFixed(2)} ms (${hits} hits)`

@@ -200,6 +200,19 @@ export type TaxDeductionOutcome =
     }
   | { ok: false; error: string; code: TaxEstimatorErrorCode; status?: number };
 
+export type TaxWithholdingPreviewOutcome =
+  | {
+      ok: true;
+      remainingBalance: bigint;
+      taxRateBps: bigint;
+      withholdingAmount: bigint;
+      netAmount: bigint;
+      remainder: bigint;
+      taxScale: bigint;
+      roundingMode: "truncate";
+    }
+  | { ok: false; error: string; code: TaxEstimatorErrorCode; status?: number };
+
 /**
  * Validation check ensuring calculation results preserve exact division remainders and conserve amounts.
  * Verifies that:
@@ -231,6 +244,67 @@ export function verifyTaxDeductionRemainder(
 
 /** Alias for verifyTaxDeductionRemainder */
 export const validateTaxDeductionRemainder = verifyTaxDeductionRemainder;
+
+const CONTRACT_TAX_BPS_SCALE = 10_000n;
+
+/**
+ * Preview on-chain tax withholding using the same flat-bps arithmetic as the
+ * contract: withholding = floor(remainingBalance * taxRateBps / 10_000).
+ *
+ * This is intentionally separate from estimateBracketTax, which models a
+ * progressive off-chain schedule and does not represent on-chain withholding.
+ */
+export function previewTaxWithholding(
+  remainingBalance: string | number | bigint,
+  taxRateBps: string | number | bigint
+): TaxWithholdingPreviewOutcome {
+  const rateLimitCheck = checkTaxEstimatorRateLimit();
+  if (!rateLimitCheck.ok) {
+    return rateLimitCheck;
+  }
+
+  const balanceCheck = validateGrossAmount(remainingBalance, "remainingBalance");
+  if (!balanceCheck.ok) {
+    return balanceCheck;
+  }
+
+  const taxRateCheck = validateTaxRate(taxRateBps, "taxRateBps");
+  if (!taxRateCheck.ok) {
+    return taxRateCheck;
+  }
+
+  if (taxRateCheck.value > CONTRACT_TAX_BPS_SCALE) {
+    return {
+      ok: false,
+      error: `taxRateBps (${taxRateCheck.value}) cannot exceed ${CONTRACT_TAX_BPS_SCALE}`,
+      code: ERROR_CODES.RATE_EXCEEDS_SCALE,
+    };
+  }
+
+  const product = balanceCheck.value * taxRateCheck.value;
+  if (digitCount(product.toString()) > MAX_INTERMEDIATE_DIGITS) {
+    return {
+      ok: false,
+      error: `intermediate calculation product exceeds maximum of ${MAX_INTERMEDIATE_DIGITS} digits`,
+      code: ERROR_CODES.CALCULATION_OVERFLOW,
+    };
+  }
+
+  const withholdingAmount = product / CONTRACT_TAX_BPS_SCALE;
+  const remainder = product % CONTRACT_TAX_BPS_SCALE;
+  const netAmount = balanceCheck.value - withholdingAmount;
+
+  return {
+    ok: true,
+    remainingBalance: balanceCheck.value,
+    taxRateBps: taxRateCheck.value,
+    withholdingAmount,
+    netAmount,
+    remainder,
+    taxScale: CONTRACT_TAX_BPS_SCALE,
+    roundingMode: "truncate",
+  };
+}
 
 /**
  * Configuration options for database precision schema and column mapping.
@@ -1023,6 +1097,9 @@ function validateBracket(
  * the last bracket must be the catch-all (upTo null/undefined) and bounds
  * must be strictly ascending. Subject to the same rate limit as
  * calculateTaxDeduction.
+ *
+ * This is an off-chain planner only. It does not mirror the contract's
+ * on-chain withholding arithmetic; use previewTaxWithholding for that path.
  *
  *   brackets = [{ upTo: 50_000, rate: 1000 }, { upTo: null, rate: 2000 }]
  *   grossAmount = 80_000 -> 5_000 + 6_000 = 11_000 tax, 69_000 net

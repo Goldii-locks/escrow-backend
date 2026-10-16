@@ -23,7 +23,7 @@ services:
       # probing won't trip it. Note it's liveness only — it returns ok
       # even if SQLite is broken or the poller has died.
       #
-      # Probe with node, not wget: node:20-bookworm-slim ships neither wget
+      # Probe with node, not wget: node:24-bookworm-slim ships neither wget
       # nor curl, so a wget probe exits 127 (command not found) and Compose
       # reports the container unhealthy however healthy the app is. This
       # healthcheck also overrides the image's own HEALTHCHECK, so fixing

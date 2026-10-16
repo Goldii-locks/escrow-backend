@@ -9,7 +9,7 @@ export default tseslint.config(
       "coverage/**",
       "eslint.config.mjs",
       "jest.config.js",
-      "verify-ci.js",
+      "scripts/**",
     ],
   },
   js.configs.recommended,

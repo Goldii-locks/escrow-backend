@@ -12,6 +12,7 @@ Express + TypeScript backend for the Soroban milestone escrow platform.
 ## Table of Contents
 
 - [Setup](#setup)
+- [Architecture](#architecture)
 - [API Endpoints](#api-endpoints)
   - [GET /health](#get-health)
   - [GET /api/jobs/:contractid](#get-apijobss-contractid)
@@ -27,6 +28,11 @@ npm install
 cp .env.example .env  # add your contract ID and deployer address
 npm run dev
 ```
+
+## Architecture
+
+- [Architecture overview](./docs/ARCHITECTURE.md) — live request/indexer paths and reachability table
+- [CSV serialization guide](./docs/CSV_SERIALIZATION_GUIDE.md)
 
 ## API Endpoints
 

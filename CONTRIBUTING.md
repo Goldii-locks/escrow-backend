@@ -18,6 +18,11 @@ Thank you for your interest in contributing! This document outlines the process 
 4. Verify the app runs correctly: `npm run dev`
 5. Ensure the code builds: `npm run build`
 
+Before changing runtime behavior, review:
+
+- [Architecture overview](./docs/ARCHITECTURE.md)
+- [CSV serialization guide](./docs/CSV_SERIALIZATION_GUIDE.md)
+
 ## Code Style
 
 Follow the project's existing code style and use ESLint to check:

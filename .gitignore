@@ -2,6 +2,7 @@ node_modules/
 dist/
 .env
 .tools/
+.kiro/
 *.log
 data/
 .agents/

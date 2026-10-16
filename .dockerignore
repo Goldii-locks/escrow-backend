@@ -6,11 +6,9 @@ data/*.db
 .git
 .gitignore
 .github
-.kiro
 .claude
 *.md
 __tests__
 jest.config.js
 jest.setup.ts
-verify-ci.js
 npm-debug.log*

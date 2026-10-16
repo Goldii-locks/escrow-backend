@@ -15,7 +15,7 @@
   "license": "ISC",
   "description": "",
   "engines": {
-    "node": "20.x"
+    "node": "24.x"
   },
   "overrides": {
     "axios": "^1.18.1"
