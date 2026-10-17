@@ -63,6 +63,7 @@ import {
   whitelistUpdateBodySchema,
   whitelistUpdateRequestSchema,
   feePreviewQuerySchema,
+  historyQuerySchema,
   type ByWalletQuery,
   type CreateJobDraftBody,
   type CreateJobDraftLegacyBody,
@@ -649,27 +650,27 @@ router.get("/whitelisted-tokens", (req: Request, res: Response) => {
 
 // GET /api/jobs/:contractId/history - event timeline for a single job
 
-router.get("/:contractId/history", (req: Request, res: Response) => {
+router.options("/:contractId/history", jobContractCors);
+
+router.get(
+  "/:contractId/history",
+  jobContractCors,
+  jobContractSecurityHeaders,
+  jobContractRateLimit,
+  validate(contractIdParamsSchema, "params", (req) =>
+    logger.warn("Invalid contractId provided", { contractId: req.params.contractId }),
+  ),
+  validate(historyQuerySchema, "query", (req) =>
+    logger.warn("Invalid history query", { query: req.query }),
+  ),
+  (req: Request, res: Response) => {
   try {
     const contractId = req.params.contractId as string;
-    const page = parseInt((req.query.page as string) || "1", 10);
-    const limit = parseInt((req.query.limit as string) || "10", 10);
-
-    if (!contractId || contractId.trim() === "") {
-      res.status(400).json({ success: false, error: "contractId is required" });
-      return;
-    }
-    if (isNaN(page) || page < 1) {
-      res.status(400).json({ success: false, error: "page must be a positive integer" });
-      return;
-    }
-    if (isNaN(limit) || limit < 1 || limit > 100) {
-      res.status(400).json({ success: false, error: "limit must be between 1 and 100" });
-      return;
-    }
+    const { page, limit } = (req as RequestWithValidatedQuery)
+      .validatedQuery as ByWalletQuery;
 
     const result = getEventsByContract(contractId, page, limit);
-    res.json({ success: true, ...result });
+    sendSuccess(res, result);
   } catch (err: any) {
     // Log the detail server-side only; never forward raw DB errors (#672).
     logger.error("Failed to fetch job history", {
@@ -678,7 +679,8 @@ router.get("/:contractId/history", (req: Request, res: Response) => {
     });
     sendError(res, 500, "Internal server error");
   }
-});
+  },
+);
 
 // ---------------------------------------------------------------------------
 // GET /api/jobs/:contractId/fee-preview – simulate calculate_platform_fee_split
@@ -1071,6 +1073,11 @@ router.post(
       }
     }
 
+    // Bulk form ({ addresses | tokens }) is not executed on-chain: Soroban
+    // allows only one host function call per transaction, so there is no
+    // single signed transaction that applies a whole list. Reject it and
+    // point the caller at the single-token form instead of replying
+    // `updated: true` for work that was never done (#613).
     try {
       const contract = new Contract(contractId);
       const account = await server.getAccount(process.env.DEPLOYER_ADDRESS || "");
@@ -1105,8 +1112,12 @@ router.post(
       }
 
       whitelistCache.del(contractId);
-      logger.info("Whitelist updated successfully", { contractId, count: targetAddresses.length });
-      sendSuccess(res, { contractId, addresses: targetAddresses, updated: true });
+      logger.warn("Bulk whitelist update rejected", { contractId, count: targetAddresses.length });
+      sendError(
+        res,
+        400,
+        "Bulk whitelist update is not supported: submit one { token, action, adminAddress } request per address to receive a signable transaction",
+      );
     } catch (err: any) {
       const message = err?.message ?? String(err);
       if (/unauthorized|invalid authentication/i.test(message)) {
@@ -1930,7 +1941,14 @@ router.post(
         const { TransactionBuilder: TB } = await import("@stellar/stellar-sdk");
         const tx = TB.fromXDR(signedXdr, NETWORK_PASSPHRASE);
         const result = await server.sendTransaction(tx);
-        submitCache.set(cacheKey, result);
+        // Only cache successful submissions. ERROR and TRY_AGAIN_LATER must
+        // never be cached: the former would mask the failure as success on
+        // retry, the latter would serve stale advice instead of resubmitting
+        // (#614).
+        const txStatus = (result as { status?: string })?.status;
+        if (txStatus === "PENDING" || txStatus === "DUPLICATE") {
+          submitCache.set(cacheKey, result);
+        }
         return result;
       })();
 
@@ -1946,6 +1964,27 @@ router.post(
       }
 
       const txResult = result as Record<string, unknown>;
+      const txStatus = txResult?.status as string | undefined;
+
+      // The RPC resolves (does not throw) for rejected and overloaded
+      // states — classify them instead of reporting success (#614).
+      if (txStatus === "ERROR") {
+        const rawDetail =
+          typeof txResult?.errorResult === "string"
+            ? (txResult.errorResult as string)
+            : JSON.stringify(txResult?.errorResult ?? txResult);
+        logger.warn("Transaction rejected by network", { traceId, detail: rawDetail });
+        const { status, message } = classifySubmitError(rawDetail);
+        sendError(res, status === 500 ? 422 : status, message);
+        return;
+      }
+      if (txStatus === "TRY_AGAIN_LATER") {
+        logger.warn("RPC overloaded, client should retry", { traceId });
+        res.setHeader("Retry-After", "5");
+        sendError(res, 503, "Network busy, retry submission");
+        return;
+      }
+
       logger.info("Transaction submitted successfully", {
         traceId,
         status: txResult?.status,

@@ -465,3 +465,8 @@ export const feePreviewQuerySchema = z.object({
 });
 
 export type FeePreviewQuery = z.infer<typeof feePreviewQuerySchema>;
+
+/** Query params: ?page=&limit= for GET /:contractId/history (#612). */
+export const historyQuerySchema = byWalletQuerySchema;
+
+export type HistoryQuery = z.infer<typeof historyQuerySchema>;

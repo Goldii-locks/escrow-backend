@@ -85,14 +85,25 @@ export async function deliverToUrl(
   event: EventDbRow
 ): Promise<DeliveryOutcome> {
   const startedAt = Date.now();
-  const payload = {
-    version: WEBHOOK_PAYLOAD_VERSION,
-    event_type: event.event_type,
-    contract_id: event.contract_id,
-    ledger_sequence: event.ledger_sequence,
-    timestamp: event.timestamp,
-    data: JSON.parse(event.data_json),
-  };
+  // Parse inside the try: one malformed row must fail only its own delivery
+  // instead of rejecting the whole deliverWebhooks call (#611).
+  let payload: unknown;
+  try {
+    payload = {
+      version: WEBHOOK_PAYLOAD_VERSION,
+      event_type: event.event_type,
+      contract_id: event.contract_id,
+      ledger_sequence: event.ledger_sequence,
+      timestamp: event.timestamp,
+      data: JSON.parse(event.data_json),
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      errorCode: "PAYLOAD_PARSE_ERROR",
+      durationMs: Date.now() - startedAt,
+    };
+  }
 
   try {
     const response = await fetch(webhookUrl, {
@@ -113,6 +124,251 @@ export async function deliverToUrl(
       durationMs: Date.now() - startedAt,
     };
   }
+}
+
+/**
+ * Retry state for failed webhook deliveries (#611).
+ *
+ * Failures are recorded per (subscription, event) so a subscriber that is
+ * down for more than the inline backoff window still receives the event on
+ * a later sweep, and operators can list dead deliveries.
+ */
+export const WEBHOOK_RETRY_BASE_DELAY_MS = parseInt(
+  process.env.WEBHOOK_RETRY_BASE_DELAY_MS || "60000",
+  10
+);
+export const WEBHOOK_RETRY_MAX_AGE_MS =
+  parseInt(process.env.WEBHOOK_RETRY_MAX_AGE_DAYS || "7", 10) *
+  24 * 60 * 60 * 1000;
+export const WEBHOOK_MAX_DELIVERY_ATTEMPTS = parseInt(
+  process.env.WEBHOOK_MAX_DELIVERY_ATTEMPTS || "25",
+  10
+);
+
+export interface DeadDelivery {
+  id: number;
+  subscription_id: number;
+  event_id: number;
+  attempts: number;
+  last_error: string | null;
+  next_attempt_at: number | null;
+  status: string;
+}
+
+const CREATE_DELIVERIES_TABLE_SQL = `
+  CREATE TABLE IF NOT EXISTS webhook_deliveries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    subscription_id INTEGER NOT NULL,
+    event_id INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    next_attempt_at INTEGER,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(subscription_id, event_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_retry
+    ON webhook_deliveries (status, next_attempt_at);
+  CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_event
+    ON webhook_deliveries (event_id);
+`;
+
+/** Lazily create the table so in-memory test databases work without migrations. */
+function ensureDeliveriesTable(): void {
+  getDb().exec(CREATE_DELIVERIES_TABLE_SQL);
+}
+
+export function computeWebhookRetryDelayMs(attempts: number): number {
+  return Math.min(
+    WEBHOOK_RETRY_BASE_DELAY_MS * 2 ** Math.max(0, attempts - 1),
+    60 * 60 * 1000
+  );
+}
+
+function recordDeliveryOutcome(
+  subscriptionId: number,
+  eventId: number,
+  success: boolean,
+  attempts: number,
+  lastError?: string
+): void {
+  try {
+    ensureDeliveriesTable();
+    const db = getDb();
+    const now = Date.now();
+    if (success) {
+      db.prepare(
+        `INSERT INTO webhook_deliveries
+           (subscription_id, event_id, status, attempts, last_error, next_attempt_at, updated_at)
+         VALUES (?, ?, 'delivered', ?, NULL, NULL, CURRENT_TIMESTAMP)
+         ON CONFLICT(subscription_id, event_id) DO UPDATE SET
+           status = 'delivered', attempts = excluded.attempts,
+           last_error = NULL, next_attempt_at = NULL,
+           updated_at = CURRENT_TIMESTAMP`
+      ).run(subscriptionId, eventId, attempts);
+    } else {
+      db.prepare(
+        `INSERT INTO webhook_deliveries
+           (subscription_id, event_id, status, attempts, last_error, next_attempt_at, updated_at)
+         VALUES (?, ?, 'failed', ?, ?, ?, CURRENT_TIMESTAMP)
+         ON CONFLICT(subscription_id, event_id) DO UPDATE SET
+           status = 'failed', attempts = excluded.attempts,
+           last_error = excluded.last_error,
+           next_attempt_at = excluded.next_attempt_at,
+           updated_at = CURRENT_TIMESTAMP`
+      ).run(
+        subscriptionId,
+        eventId,
+        attempts,
+        lastError ?? "delivery failed",
+        now + computeWebhookRetryDelayMs(attempts)
+      );
+    }
+  } catch (err) {
+    logger.warn("Failed to record webhook delivery outcome", {
+      subscriptionId,
+      eventId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+/** Admin visibility into permanently failed deliveries (#611). */
+export function getDeadDeliveries(limit = 100): DeadDelivery[] {
+  try {
+    ensureDeliveriesTable();
+    return getDb()
+      .prepare(
+        `SELECT id, subscription_id, event_id, attempts, last_error,
+                next_attempt_at, status
+         FROM webhook_deliveries WHERE status = 'dead'
+         ORDER BY id DESC LIMIT ?`
+      )
+      .all(limit) as DeadDelivery[];
+  } catch {
+    return [];
+  }
+}
+
+export function getFailedDeliveryCount(): number {
+  try {
+    ensureDeliveriesTable();
+    const row = getDb()
+      .prepare(
+        `SELECT COUNT(*) AS cnt FROM webhook_deliveries WHERE status IN ('failed', 'dead')`
+      )
+      .get() as { cnt: number };
+    return row?.cnt ?? 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Periodic sweep: retry failed rows whose backoff has expired, with
+ * exponential backoff up to a maximum age, then mark them dead (#611).
+ * Called at the start of every deliverWebhooks cycle so a subscriber that
+ * was down for one cycle receives the missed event on the next one.
+ */
+export async function retryFailedDeliveries(): Promise<number> {
+  try {
+    ensureDeliveriesTable();
+  } catch {
+    return 0;
+  }
+  const db = getDb();
+  const now = Date.now();
+  let rows: Array<{
+    subscription_id: number;
+    event_id: number;
+    attempts: number;
+    last_error: string | null;
+  }>;
+  try {
+    rows = db
+      .prepare(
+        `SELECT subscription_id, event_id, attempts, last_error
+         FROM webhook_deliveries
+         WHERE status = 'failed' AND next_attempt_at IS NOT NULL
+           AND next_attempt_at <= ?
+         LIMIT 100`
+      )
+      .all(now) as Array<{
+      subscription_id: number;
+      event_id: number;
+      attempts: number;
+      last_error: string | null;
+    }>;
+  } catch {
+    return 0;
+  }
+  if (rows.length === 0) return 0;
+
+  let eventStmt;
+  let subStmt;
+  try {
+    eventStmt = db.prepare(`SELECT * FROM events WHERE id = ?`);
+    subStmt = db.prepare(`SELECT * FROM webhook_subscriptions WHERE id = ?`);
+  } catch {
+    return 0;
+  }
+
+  let redelivered = 0;
+  for (const row of rows) {
+    let event: EventDbRow | undefined;
+    let sub: { webhook_url: string } | undefined;
+    try {
+      event = eventStmt.get(row.event_id) as EventDbRow | undefined;
+      sub = subStmt.get(row.subscription_id) as
+        | { webhook_url: string }
+        | undefined;
+    } catch {
+      continue;
+    }
+    if (!event || !sub) {
+      try {
+        db.prepare(
+          `UPDATE webhook_deliveries SET status = 'dead', last_error = 'event or subscription gone',
+             updated_at = CURRENT_TIMESTAMP
+           WHERE subscription_id = ? AND event_id = ?`
+        ).run(row.subscription_id, row.event_id);
+      } catch {
+        /* ignore */
+      }
+      continue;
+    }
+    // Expire rows older than the max age instead of retrying forever.
+    const eventAgeMs = Date.now() - new Date(event.created_at).getTime();
+    if (
+      row.attempts >= WEBHOOK_MAX_DELIVERY_ATTEMPTS ||
+      (!Number.isNaN(eventAgeMs) && eventAgeMs > WEBHOOK_RETRY_MAX_AGE_MS)
+    ) {
+      try {
+        db.prepare(
+          `UPDATE webhook_deliveries SET status = 'dead', updated_at = CURRENT_TIMESTAMP
+           WHERE subscription_id = ? AND event_id = ?`
+        ).run(row.subscription_id, row.event_id);
+      } catch {
+        /* ignore */
+      }
+      continue;
+    }
+    const outcome = await deliverToUrl(sub.webhook_url, event);
+    const attempts = row.attempts + 1;
+    if (outcome.ok) {
+      recordDeliveryOutcome(row.subscription_id, row.event_id, true, attempts);
+      redelivered++;
+    } else {
+      recordDeliveryOutcome(
+        row.subscription_id,
+        row.event_id,
+        false,
+        attempts,
+        outcome.errorCode ?? "retry failed"
+      );
+    }
+  }
+  return redelivered;
 }
 
 async function deliverEventToSubscriber(
@@ -161,6 +417,16 @@ async function deliverEventToSubscriber(
   };
 }
 
+function recordResult(result: DeliveryResult): void {
+  recordDeliveryOutcome(
+    result.subscriptionId,
+    result.eventId,
+    result.success,
+    result.attempts,
+    result.error ?? result.errorCode
+  );
+}
+
 function subscriptionsMatchEvent(
   eventTypes: string,
   eventType: string
@@ -179,6 +445,16 @@ export async function deliverWebhooks(
   endLedger: number
 ): Promise<DeliveryResult[]> {
   const db = getDb();
+
+  // Retry previously failed deliveries first, so a subscriber that was down
+  // for one cycle receives the missed events on the next cycle (#611).
+  try {
+    await retryFailedDeliveries();
+  } catch (err) {
+    logger.warn("Webhook retry sweep failed", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 
   // Subscriptions are few; load them once and group by contract so each
   // event only meets the subscriptions for its own contract (#690).
@@ -217,12 +493,27 @@ export async function deliverWebhooks(
           continue;
         }
 
-        const result = await deliverEventToSubscriber(
-          sub.webhook_url,
-          event,
-          sub.id
-        );
+        // One bad row or one throwing subscriber must not skip the rest of
+        // the range for every subscriber (#611).
+        let result: DeliveryResult;
+        try {
+          result = await deliverEventToSubscriber(
+            sub.webhook_url,
+            event,
+            sub.id
+          );
+        } catch (err) {
+          result = {
+            subscriptionId: sub.id,
+            webhookUrl: sub.webhook_url,
+            eventId: event.id,
+            success: false,
+            attempts: 0,
+            error: err instanceof Error ? err.message : String(err),
+          };
+        }
         results.push(result);
+        recordResult(result);
 
         if (result.success) {
           logger.info("Webhook delivered", {
