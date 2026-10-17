@@ -908,6 +908,47 @@ export function setLastIndexedLedger(seq: number) {
   updateTransaction();
 }
 
+export interface SkippedLedgerRange {
+  from: number;
+  to: number;
+  clampedTo: number;
+  recordedAt: string;
+}
+
+/**
+ * Record a ledger window skipped because the RPC no longer retains it (#609).
+ * Stored in indexer_state so an operator can backfill from an archive RPC.
+ */
+export function recordSkippedLedgerRange(from: number, to: number): SkippedLedgerRange {
+  const clampedTo = to + 1;
+  const entry: SkippedLedgerRange = {
+    from,
+    to,
+    clampedTo,
+    recordedAt: new Date().toISOString(),
+  };
+  const db = getDb();
+  db.prepare(
+    `INSERT INTO indexer_state (key, value) VALUES ('skipped_ledger_range', ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value`
+  ).run(JSON.stringify(entry));
+  return entry;
+}
+
+/** Last retention-gap window recorded by the poller, if any (#609). */
+export function getSkippedLedgerRange(): SkippedLedgerRange | null {
+  try {
+    const db = getDb();
+    const row = db
+      .prepare("SELECT value FROM indexer_state WHERE key = 'skipped_ledger_range'")
+      .get() as { value: string } | undefined;
+    if (!row) return null;
+    return JSON.parse(row.value) as SkippedLedgerRange;
+  } catch {
+    return null;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Monitored contracts (#85)
 // ---------------------------------------------------------------------------
@@ -1558,6 +1599,7 @@ export interface IndexerStatusData {
   totalEvents: number;
   lastEventAt: string | null;
   eventsByType: Record<string, number>;
+  skippedLedgerRange?: SkippedLedgerRange | null;
 }
 
 export interface WebhookSubscription {
@@ -1670,6 +1712,7 @@ export function getIndexerStatusData(): IndexerStatusData {
     totalEvents: totalRow.count,
     lastEventAt: lastEventRow.last_at,
     eventsByType,
+    skippedLedgerRange: getSkippedLedgerRange(),
   };
 }
 

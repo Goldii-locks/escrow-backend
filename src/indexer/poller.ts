@@ -8,6 +8,7 @@ import {
   getActiveContractsWithPointers,
   updateContractPointer,
   registerContract,
+  recordSkippedLedgerRange,
   adjustPollerInterval,
   getCurrentPollIntervalMs as getDbPollIntervalMs,
   resetPollerThrottleState,
@@ -426,6 +427,36 @@ export function enqueueEventInsert(
  * event is detected – it cannot cause an event to be missed, double-counted,
  * or processed out of order.
  */
+/**
+ * Pull the oldest retained ledger out of a retention error or response.
+ * Soroban RPC rejects a startLedger older than its window with an
+ * invalid-params error naming the oldest ledger; the number may also ride
+ * along as a property on the error/response object.
+ */
+export function extractOldestLedger(source: unknown): number | undefined {
+  if (typeof source === "number" && Number.isInteger(source) && source > 0) {
+    return source;
+  }
+  if (source && typeof source === "object") {
+    const obj = source as Record<string, unknown>;
+    for (const key of ["oldestLedger", "oldest_ledger", "oldest"]) {
+      const v = obj[key];
+      if (typeof v === "number" && Number.isInteger(v) && v > 0) return v;
+      if (typeof v === "string" && /^\d+$/.test(v)) return parseInt(v, 10);
+    }
+    const nested = (obj as any).data ?? (obj as any).response;
+    if (nested && nested !== source) {
+      const fromNested = extractOldestLedger(nested);
+      if (fromNested !== undefined) return fromNested;
+    }
+  }
+  if (source instanceof Error) {
+    const m = source.message.match(/oldest[^0-9]{0,20}(\d+)/i);
+    if (m) return parseInt(m[1], 10);
+  }
+  return undefined;
+}
+
 export async function pollEvents(): Promise<boolean> {
   const pollStartedAt = performance.now();
 
@@ -542,6 +573,49 @@ export async function pollEvents(): Promise<boolean> {
         contractCount: groupContractIds.length,
       });
 
+      // Fetch one page, transparently clamping past the RPC retention window.
+      // When the requested start is older than the oldest retained ledger the
+      // RPC rejects with invalid-params naming the oldest ledger; we log the
+      // gap, record it for operators, and retry once from the oldest ledger
+      // (#609). Normal polls with no gap take the fast path untouched.
+      const fetchPageRetentionAware = async (
+        pageStart: number,
+        cursorValue: string | undefined,
+      ): Promise<any> => {
+        try {
+          return await fetchEventsWithRetry(rpcClient.rpcServer, {
+            startLedger: pageStart,
+            contractIds: groupContractIds,
+            limit: pageLimit,
+            ...(cursorValue ? { cursor: cursorValue } : {}),
+          });
+        } catch (err) {
+          const oldest = extractOldestLedger(err);
+          if (oldest !== undefined && pageStart < oldest && !cursorValue) {
+            logger.warn(
+              "Poller start ledger is outside RPC retention window – clamping",
+              {
+                from: pageStart,
+                to: oldest,
+                skippedFrom: pageStart,
+                skippedTo: oldest - 1,
+              },
+            );
+            if (oldest - 1 >= pageStart) {
+              recordSkippedLedgerRange(pageStart, oldest - 1);
+            }
+            startLedger = oldest;
+            minStartLedger = Math.min(minStartLedger, startLedger);
+            return await fetchEventsWithRetry(rpcClient.rpcServer, {
+              startLedger: oldest,
+              contractIds: groupContractIds,
+              limit: pageLimit,
+            });
+          }
+          throw err;
+        }
+      };
+
       // Follow the RPC cursor until a short page arrives so ledgers holding
       // more than one page of events are fully collected (#608). Progress is
       // persisted after every page: each page commits its rows and advances
@@ -552,12 +626,7 @@ export async function pollEvents(): Promise<boolean> {
       let cursor: string | undefined;
       let lastStoredLedger = pointer;
       for (let page = 0; page < maxPagesPerPoll; page++) {
-        const events = await fetchEventsWithRetry(rpcClient.rpcServer, {
-          startLedger,
-          contractIds: groupContractIds,
-          limit: pageLimit,
-          ...(cursor ? { cursor } : {}),
-        });
+        const events = await fetchPageRetentionAware(startLedger, cursor);
 
         const pageEvents: any[] = (events as any).events ?? [];
         // Build the batch to be written atomically (#84)
