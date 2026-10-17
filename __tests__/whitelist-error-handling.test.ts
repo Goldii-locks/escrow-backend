@@ -684,7 +684,7 @@ describe("GET /api/jobs/:contractId/whitelist – Robust Error Handling (Issue #
         .get(`/api/jobs/${VALID_CONTRACT}/whitelist`)
         .expect(200);
 
-      expect(mockGetAccount).toHaveBeenCalled();
+      expect(mockGetAccount).not.toHaveBeenCalled();
       expect(mockSimulateTransaction).toHaveBeenCalled();
     });
 

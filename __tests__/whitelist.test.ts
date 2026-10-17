@@ -183,7 +183,8 @@ describe("GET /api/jobs/:contractId/whitelist", () => {
         .expect(200);
 
       expect(res.body).toEqual({ success: true, data: { tokens: [] } });
-      expect(mockGetAccount).toHaveBeenCalled();
+      // Read-only simulation uses a local account: no getAccount RPC (#616).
+      expect(mockGetAccount).not.toHaveBeenCalled();
     });
 
     it("ignores a wrong x-api-key header instead of rejecting it", async () => {
@@ -207,7 +208,8 @@ describe("GET /api/jobs/:contractId/whitelist", () => {
         .expect(200);
 
       expect(res.body).toEqual({ success: true, data: { tokens: [] } });
-      expect(mockGetAccount).toHaveBeenCalled();
+      // Read-only simulation uses a local account: no getAccount RPC (#616).
+      expect(mockGetAccount).not.toHaveBeenCalled();
     });
 
     it("returns 404 when simulation reports the contract/job was not found", async () => {
