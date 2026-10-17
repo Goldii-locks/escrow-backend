@@ -9,6 +9,7 @@ import adminRoutes from "./routes/admin.js";
 import webhookRoutes from "./routes/webhooks.js";
 import { runMigrations } from "./indexer/db.js";
 import { generalLimiter } from "./middleware/rateLimiter.js";
+import { readinessHandler } from "./readiness.js";
 import { legacyApiDeprecation } from "./middleware/api-version.js";
 import { startPoller } from "./indexer/poller.js";
 import { startReconciliationJob } from "./indexer/reconciliation.js";
@@ -75,6 +76,9 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 app.get("/health", (_req, res) => {
   res.json({ status: "ok", contract: process.env.CONTRACT_ID });
 });
+
+// Readiness reflects the database and the poller; /health stays pure liveness.
+app.get("/ready", readinessHandler);
 
 app.use("/api", legacyApiDeprecation);
 app.use("/api", generalLimiter);

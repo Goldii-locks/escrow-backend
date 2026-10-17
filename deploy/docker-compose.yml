@@ -23,6 +23,14 @@ services:
       # probing won't trip it. Note it's liveness only — it returns ok
       # even if SQLite is broken or the poller has died.
       #
+      # GET /ready is the readiness probe: 200 only when SELECT 1 succeeds
+      # and the last successful poll is within READY_MAX_POLL_AGE_MS
+      # (default 3x the max poll interval), 503 naming the failing check
+      # otherwise. Point uptime checks and nginx at /ready
+      # (e.g. `location /ready { proxy_pass http://backend:3001; }`);
+      # keep this Compose healthcheck on /health so a stuck indexer does not
+      # restart-loop the container before it can be inspected.
+      #
       # Probe with node, not wget: node:24-bookworm-slim ships neither wget
       # nor curl, so a wget probe exits 127 (command not found) and Compose
       # reports the container unhealthy however healthy the app is. This
