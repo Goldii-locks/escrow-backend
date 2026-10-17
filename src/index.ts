@@ -3,18 +3,26 @@ import type { Request, Response, NextFunction } from "express";
 import cors from "cors";
 import helmet from "helmet";
 import dotenv from "dotenv";
+import { validateConfigAtStartup } from "./config.js";
 import jobRoutes, { assertRpcNetworkMatches } from "./routes/jobs.js";
 import adminRoutes from "./routes/admin.js";
 import webhookRoutes from "./routes/webhooks.js";
 import { runMigrations } from "./indexer/db.js";
 import { generalLimiter } from "./middleware/rateLimiter.js";
+import { readinessHandler } from "./readiness.js";
 import { legacyApiDeprecation } from "./middleware/api-version.js";
 import { startPoller } from "./indexer/poller.js";
 import { startReconciliationJob } from "./indexer/reconciliation.js";
 import { markIndexerStarted } from "./indexer/status.js";
+import { registerShutdownHandlers } from "./shutdown.js";
 import logger from "./utils/logger.js";
 
 dotenv.config();
+
+// Fail fast on malformed numeric env vars (RATE_LIMIT_MAX=100r, empty values,
+// NaN TTLs). Names the offending variable instead of booting into a hot
+// poll loop or a broken rate limiter.
+validateConfigAtStartup();
 
 // Fail fast in production rather than booting into a silently insecure or
 // misdirected state. Without this the server starts happily and passes
@@ -70,6 +78,9 @@ app.get("/health", (_req, res) => {
   res.json({ status: "ok", contract: process.env.CONTRACT_ID });
 });
 
+// Readiness reflects the database and the poller; /health stays pure liveness.
+app.get("/ready", readinessHandler);
+
 app.use("/api", legacyApiDeprecation);
 app.use("/api", generalLimiter);
 app.use("/api/v1/jobs", jobRoutes);
@@ -105,8 +116,12 @@ assertRpcNetworkMatches()
     process.exit(1);
   });
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   logger.info("Escrow backend started", { port: PORT });
 });
+
+// #623: drain in-flight work (poller, HTTP, SQLite) on SIGTERM/SIGINT
+// instead of exiting mid-transaction.
+registerShutdownHandlers(server);
 
 export default app;
