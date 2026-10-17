@@ -75,6 +75,8 @@ export interface GetEventsParams {
   startLedger: number;
   contractIds: string[];
   limit?: number;
+  /** Paging cursor from a previous response; mutually exclusive with startLedger. */
+  cursor?: string;
 }
 
 /** Shape of `Server.getEvents` that this module depends on (subset). */
@@ -86,6 +88,9 @@ export interface RpcGetEventsResult {
     ledger: number;
     ledgerClosedAt: string | undefined;
   }>;
+  cursor?: string;
+  latestLedger?: number;
+  oldestLedger?: number;
 }
 
 /**
@@ -138,8 +143,7 @@ export async function fetchEventsWithRetry(
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      const result = await server.getEvents({
-        startLedger: params.startLedger,
+      const request: any = {
         filters: [
           {
             type: "contract",
@@ -180,7 +184,16 @@ export async function fetchEventsWithRetry(
           },
         ],
         limit: params.limit ?? 100,
-      });
+      };
+      // Cursor mode supersedes the ledger window once paging has started;
+      // the RPC rejects a request carrying both.
+      if (params.cursor) {
+        delete (request as any).startLedger;
+        (request as any).cursor = params.cursor;
+      } else {
+        (request as any).startLedger = params.startLedger;
+      }
+      const result = await server.getEvents(request);
 
       if (attempt > 1) {
         logger.info("event_type_filter: RPC getEvents succeeded after retry", {

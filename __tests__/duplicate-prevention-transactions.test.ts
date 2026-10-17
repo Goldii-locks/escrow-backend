@@ -176,9 +176,9 @@ describe("DuplicatePrevention — transaction isolation (#189)", () => {
       // Pre-seed some existing data
       testDb
         .prepare(
-          "INSERT INTO events (contract_id, event_type, ledger_sequence, timestamp, data_json) VALUES (?,?,?,?,?)"
+          "INSERT INTO events (contract_id, event_type, ledger_sequence, timestamp, data_json, event_id) VALUES (?,?,?,?,?,?)"
         )
-        .run("EXISTING", "initialized", 700, 7000, '{"pre":"existing"}');
+        .run("EXISTING", "initialized", 700, 7000, '{"pre":"existing"}', "EXISTING:700:initialized");
 
       const eventsBefore = testDb.prepare("SELECT COUNT(*) as cnt FROM events").get() as any;
       const rangesBefore = testDb.prepare("SELECT COUNT(*) as cnt FROM sync_ranges").get() as any;
@@ -313,9 +313,9 @@ describe("DuplicatePrevention — transaction isolation (#189)", () => {
       // Pre-insert one event
       testDb
         .prepare(
-          "INSERT INTO events (contract_id, event_type, ledger_sequence, timestamp, data_json) VALUES (?,?,?,?,?)"
+          "INSERT INTO events (contract_id, event_type, ledger_sequence, timestamp, data_json, event_id) VALUES (?,?,?,?,?,?)"
         )
-        .run("C1", "initialized", 1100, 11000, "{}");
+        .run("C1", "initialized", 1100, 11000, "{}", "C1:1100:initialized");
 
       const events = [
         // Duplicate — already exists

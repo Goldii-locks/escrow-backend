@@ -107,7 +107,7 @@ describe("database_writer_pool – SQLite index structures (#326)", () => {
     it("uses sqlite_autoindex_events_1 for event uniqueness lookups", () => {
       const plan = explainWriterPoolQueryPlan(
         WRITER_POOL_QUERIES.eventDedup,
-        ["contract-0", 10, "initialized"],
+        ["evt-0"],
         testDb,
       );
 
@@ -290,7 +290,7 @@ describe("database_writer_pool – SQLite index structures (#326)", () => {
 
     it("plans every writer-pool lookup without a temporary B-tree", () => {
       const lookupParams: Record<keyof typeof WRITER_POOL_QUERIES, unknown[]> = {
-        eventDedup: ["contract-0", 10, "initialized"],
+        eventDedup: ["evt-0"],
         eventContractLedger: ["contract-0", 10],
         ledgerPointer: ["last_ledger_sequence"],
         updateLedger: ["42", "last_ledger_sequence"],
@@ -321,18 +321,18 @@ describe("database_writer_pool – SQLite index structures (#326)", () => {
         createSqlOperation(
           "insert-event",
           `INSERT OR IGNORE INTO events
-           (contract_id, event_type, ledger_sequence, timestamp, data_json)
-           VALUES (?, ?, ?, ?, ?)`,
-          ["contract-uniq", "funded", 999, 1_700_000_999, "{}"],
+           (contract_id, event_type, ledger_sequence, timestamp, data_json, event_id)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          ["contract-uniq", "funded", 999, 1_700_000_999, "{}", "evt-uniq-1"],
         ),
       );
       const duplicate = await queueWrite(
         createSqlOperation(
           "insert-event-dup",
           `INSERT OR IGNORE INTO events
-           (contract_id, event_type, ledger_sequence, timestamp, data_json)
-           VALUES (?, ?, ?, ?, ?)`,
-          ["contract-uniq", "funded", 999, 1_700_000_999, '{"dup":true}'],
+           (contract_id, event_type, ledger_sequence, timestamp, data_json, event_id)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          ["contract-uniq", "funded", 999, 1_700_000_999, '{"dup":true}', "evt-uniq-1"],
         ),
       );
 

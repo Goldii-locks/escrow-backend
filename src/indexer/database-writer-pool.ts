@@ -4,6 +4,7 @@ import {
   getLastIndexedLedger,
   getShippedMigrationVersions,
   insertEvent,
+  eventDedupeId,
   verifySchemaIntegrity,
   verifySchemaUpToDate,
   type EventRow,
@@ -1148,7 +1149,7 @@ export const WRITER_POOL_UNIQUE_INDEXES = {
 /** Parameterized lookup SQL exercised by writer-pool write paths. */
 export const WRITER_POOL_QUERIES = {
   eventDedup:
-    "SELECT id FROM events WHERE contract_id = ? AND ledger_sequence = ? AND event_type = ?",
+    "SELECT id FROM events WHERE event_id = ?",
   eventContractLedger:
     "SELECT id FROM events WHERE contract_id = ? AND ledger_sequence = ?",
   ledgerPointer:
@@ -1730,8 +1731,8 @@ export async function importHistoricalRange(
       execute: (db) => {
         const insertStmt = db.prepare(`
           INSERT OR IGNORE INTO events
-          (contract_id, event_type, ledger_sequence, timestamp, data_json)
-          VALUES (?, ?, ?, ?, ?)
+          (contract_id, event_type, ledger_sequence, timestamp, data_json, event_id)
+          VALUES (?, ?, ?, ?, ?, ?)
         `);
 
         let insertedCount = 0;
@@ -1743,7 +1744,8 @@ export async function importHistoricalRange(
             ev.eventType,
             ev.ledgerSequence,
             ev.timestamp,
-            ev.dataJson
+            ev.dataJson,
+            eventDedupeId(ev)
           );
           if (result.changes > 0) {
             insertedCount += 1;

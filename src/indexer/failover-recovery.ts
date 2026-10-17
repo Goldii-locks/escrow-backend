@@ -1,5 +1,5 @@
 import Database from "better-sqlite3";
-import { getDb, getLastIndexedLedger, getShippedMigrationVersions } from "./db.js";
+import { getDb, getLastIndexedLedger, getShippedMigrationVersions, eventDedupeId } from "./db.js";
 import {
   validateLedgerRange,
   resolveHistoricalLedgerRange,
@@ -1487,8 +1487,8 @@ export async function importFailoverRecoveryHistoricalRange(
   const write = db.transaction(() => {
     const insertStmt = db.prepare(`
       INSERT OR IGNORE INTO events
-      (contract_id, event_type, ledger_sequence, timestamp, data_json)
-      VALUES (?, ?, ?, ?, ?)
+      (contract_id, event_type, ledger_sequence, timestamp, data_json, event_id)
+      VALUES (?, ?, ?, ?, ?, ?)
     `);
 
     for (const ev of collected) {
@@ -1497,7 +1497,8 @@ export async function importFailoverRecoveryHistoricalRange(
         ev.eventType,
         ev.ledgerSequence,
         ev.timestamp,
-        ev.dataJson
+        ev.dataJson,
+        eventDedupeId(ev)
       );
       if (result.changes > 0) {
         insertedCount += 1;
