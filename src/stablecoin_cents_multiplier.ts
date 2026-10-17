@@ -27,6 +27,15 @@ export function centsMultiplier(decimals: number = DEFAULT_DECIMALS): number {
 
 /**
  * Convert a human-readable stablecoin amount into its integer cents value.
+ *
+ * All scaling is done with bigint arithmetic on the decimal digits, so binary
+ * floating-point error (e.g. `0.29 * 100 === 28.999999999999996`) can never
+ * leak into the result. The rounding mode is applied to the discarded digits,
+ * not to a float. Number inputs are converted via their decimal string form,
+ * so `0.29` is parsed as `"0.29"`.
+ *
+ * Returns a number, throwing a RangeError when the exact result exceeds
+ * Number.MAX_SAFE_INTEGER.
  */
 export function toCents(
   amount: number | string,
@@ -34,41 +43,156 @@ export function toCents(
 ): number {
   const decimals = options.decimals ?? DEFAULT_DECIMALS;
   const rounding = options.rounding ?? 'round';
-  const multiplier = centsMultiplier(decimals);
-
-  const numeric = typeof amount === 'string' ? Number(amount) : amount;
-  if (!Number.isFinite(numeric)) {
-    throw new TypeError(`amount must be a finite number, received ${amount}`);
+  if (!Number.isInteger(decimals) || decimals < 0) {
+    throw new RangeError(`decimals must be a non-negative integer, received ${decimals}`);
   }
 
-  const scaled = numeric * multiplier;
-  switch (rounding) {
-    case 'floor':
-      return Math.floor(scaled);
-    case 'ceil':
-      return Math.ceil(scaled);
-    case 'round':
-    default:
-      return Math.round(scaled);
+  const text = typeof amount === 'string' ? amount : numberToDecimalString(amount);
+  const parsed = parseSignedDecimal(text, 'amount');
+  const scaled = scaleDecimal(parsed, decimals, rounding);
+
+  if (scaled > BigInt(Number.MAX_SAFE_INTEGER) || scaled < BigInt(-Number.MAX_SAFE_INTEGER)) {
+    throw new RangeError(
+      `converted cents value exceeds Number.MAX_SAFE_INTEGER; use a smaller amount or fewer decimals`,
+    );
   }
+  return Number(scaled);
 }
 
 /**
  * Convert an integer cents value back into a human-readable amount.
+ *
+ * Uses exact decimal arithmetic (no float division), so e.g.
+ * `fromCents(7)` is exactly `0.07`.
  */
 export function fromCents(
   cents: number | string,
   options: CentsMultiplierOptions = {},
 ): number {
   const decimals = options.decimals ?? DEFAULT_DECIMALS;
-  const multiplier = centsMultiplier(decimals);
-
-  const numeric = typeof cents === 'string' ? Number(cents) : cents;
-  if (!Number.isFinite(numeric)) {
-    throw new TypeError(`cents must be a finite number, received ${cents}`);
+  if (!Number.isInteger(decimals) || decimals < 0) {
+    throw new RangeError(`decimals must be a non-negative integer, received ${decimals}`);
   }
 
-  return numeric / multiplier;
+  const text = typeof cents === 'string' ? cents : numberToDecimalString(cents);
+  const parsed = parseSignedDecimal(text, 'cents');
+
+  // Represent cents * 10^-decimals exactly as a decimal string, then convert.
+  const negative = parsed.sign < 0;
+  const digits = `${parsed.int}${parsed.frac}`;
+  const pointAt = digits.length - parsed.frac.length - decimals;
+  let decimal: string;
+  if (pointAt >= digits.length) {
+    decimal = `${digits}${'0'.repeat(pointAt - digits.length)}`;
+  } else if (pointAt > 0) {
+    decimal = `${digits.slice(0, pointAt)}.${digits.slice(pointAt)}`;
+  } else {
+    decimal = `0.${'0'.repeat(-pointAt)}${digits}`;
+  }
+  decimal = decimal.replace(/^0+(?=\d)/, '').replace(/(\.\d*?)0+$/, '$1').replace(/\.$/, '');
+  if (decimal === '' || decimal === '0.') decimal = '0';
+  return Number(`${negative ? '-' : ''}${decimal}`);
+}
+
+/** Parsed signed decimal: sign (+1/-1), integer and fraction digit strings. */
+interface SignedDecimal {
+  sign: 1 | -1;
+  int: string;
+  frac: string;
+}
+
+/**
+ * Parse a decimal literal into sign/integer/fraction parts.
+ * Accepts an optional leading sign and at most one decimal point.
+ */
+function parseSignedDecimal(text: string, label: string): SignedDecimal {
+  const trimmed = text.trim();
+  const match = /^([+-]?)(\d*)(?:\.(\d*))?$/.exec(trimmed);
+  if (!match || (match[2] === '' && (match[3] ?? '') === '')) {
+    throw new TypeError(`${label} must be a finite number, received ${text}`);
+  }
+  const numeric = Number(trimmed);
+  if (!Number.isFinite(numeric)) {
+    throw new TypeError(`${label} must be a finite number, received ${text}`);
+  }
+  return {
+    sign: match[1] === '-' ? -1 : 1,
+    int: match[2] === '' ? '0' : match[2].replace(/^0+(?=\d)/, ''),
+    frac: match[3] ?? '',
+  };
+}
+
+/**
+ * Render a finite number in plain decimal notation, expanding exponents
+ * (e.g. `1e-7` -> `"0.0000001"`) so digit parsing stays exact.
+ */
+function numberToDecimalString(value: number): string {
+  if (!Number.isFinite(value)) {
+    throw new TypeError(`amount must be a finite number, received ${value}`);
+  }
+  let text = String(value);
+  if (!/[eE]/.test(text)) {
+    return text;
+  }
+  const negative = text.startsWith('-');
+  if (negative) text = text.slice(1);
+  const [mantissa, expPart] = text.split(/[eE]/);
+  const exponent = parseInt(expPart, 10);
+  const dotIndex = mantissa.indexOf('.');
+  const digits = mantissa.replace('.', '');
+  const pointIndex = (dotIndex === -1 ? mantissa.length : dotIndex) + exponent;
+  let expanded: string;
+  if (pointIndex <= 0) {
+    expanded = `0.${'0'.repeat(-pointIndex)}${digits}`;
+  } else if (pointIndex >= digits.length) {
+    expanded = `${digits}${'0'.repeat(pointIndex - digits.length)}`;
+  } else {
+    expanded = `${digits.slice(0, pointIndex)}.${digits.slice(pointIndex)}`;
+  }
+  return `${negative ? '-' : ''}${expanded}`;
+}
+
+/**
+ * Scale a parsed decimal by 10^decimals with bigint arithmetic, applying the
+ * rounding mode to the discarded fraction digits.
+ */
+function scaleDecimal(
+  parsed: SignedDecimal,
+  decimals: number,
+  rounding: 'floor' | 'ceil' | 'round',
+): bigint {
+  const kept = (parsed.frac + '0'.repeat(decimals)).slice(0, decimals);
+  const discarded = parsed.frac.slice(decimals);
+  const magnitude = BigInt(`${parsed.int}${kept}`);
+  const hasRemainder = /[1-9]/.test(discarded);
+  if (!hasRemainder) {
+    return parsed.sign < 0 ? -magnitude : magnitude;
+  }
+
+  const first = discarded[0];
+  const rest = discarded.slice(1);
+  const aboveHalf = first > '5' || (first === '5' && /[1-9]/.test(rest));
+  const isHalf = first === '5' && !/[1-9]/.test(rest);
+
+  let roundUpMagnitude: boolean;
+  switch (rounding) {
+    case 'floor':
+      // Toward -infinity: only negative values round away from zero.
+      roundUpMagnitude = parsed.sign < 0;
+      break;
+    case 'ceil':
+      // Toward +infinity: only positive values round away from zero.
+      roundUpMagnitude = parsed.sign > 0;
+      break;
+    case 'round':
+    default:
+      // Half-up (matches Math.round: ties go toward +infinity).
+      roundUpMagnitude = aboveHalf || (isHalf && parsed.sign > 0);
+      break;
+  }
+
+  const rounded = roundUpMagnitude ? magnitude + 1n : magnitude;
+  return parsed.sign < 0 ? -rounded : rounded;
 }
 
 /**
@@ -205,9 +329,9 @@ export const CENTS_MULTIPLIER_CASES: CentsMultiplierCase[] = [
   { amount: 0.001, cents: 0 },
   { amount: 0.005, cents: 1 },
   { amount: 0.004, cents: 0 },
-  // Precision-sensitive inputs.
+  // Precision-sensitive inputs (exact decimal behavior, not float error).
   { amount: 0.1 + 0.2, cents: 30 },
-  { amount: 1.005, cents: 100 },
+  { amount: 1.005, cents: 101 },
   { amount: 2.675, cents: 268 },
   // Non-default decimal precision (6-decimal stablecoin).
   { amount: 1, cents: 1000000, decimals: 6 },
@@ -222,21 +346,28 @@ export const CENTS_MULTIPLIER_CASES: CentsMultiplierCase[] = [
 /**
  * Compute the expected integer cents value for a verified case.
  *
- * This mirrors the documented math (`amount * 10^decimals` with the selected
- * rounding mode) so tests can assert the helper output against an independent
- * calculation rather than a hard-coded duplicate.
+ * Uses exact decimal-string arithmetic (independent of `toCents`) so tests
+ * assert the helper output against a separately derived expectation rather
+ * than a hard-coded duplicate of float math.
  */
 export function expectedCents(testCase: CentsMultiplierCase): number {
   const decimals = testCase.decimals ?? DEFAULT_DECIMALS;
   const rounding = testCase.rounding ?? 'round';
-  const scaled = testCase.amount * centsMultiplier(decimals);
-  switch (rounding) {
-    case 'floor':
-      return Math.floor(scaled);
-    case 'ceil':
-      return Math.ceil(scaled);
-    case 'round':
-    default:
-      return Math.round(scaled);
+  const text = String(testCase.amount);
+  const dot = text.indexOf('.');
+  const int = dot === -1 ? text : text.slice(0, dot);
+  const frac = dot === -1 ? '' : text.slice(dot + 1);
+  const kept = (frac + '0'.repeat(decimals)).slice(0, decimals);
+  const discarded = frac.slice(decimals);
+  let base = BigInt(`${int}${kept}`);
+  if (/[1-9]/.test(discarded)) {
+    const first = discarded[0];
+    const rest = discarded.slice(1);
+    const aboveHalf = first > '5' || (first === '5' && /[1-9]/.test(rest));
+    const isHalf = first === '5' && !/[1-9]/.test(rest);
+    if (rounding === 'ceil' || (rounding === 'round' && (aboveHalf || isHalf))) {
+      base += 1n;
+    }
   }
+  return Number(base);
 }
