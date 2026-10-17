@@ -38,8 +38,6 @@ import {
   partialReleaseSecurityHeaders,
   claimAutoReleaseCors,
   claimAutoReleaseSecurityHeaders,
-  updateWhitelistCors,
-  updateWhitelistSecurityHeaders,
   buildTxCors,
   buildTxSecurityHeaders,
 } from "../middleware/job-contract-security.js";
@@ -58,9 +56,6 @@ import {
   claimAutoReleaseBodySchema,
   byWalletParamsSchema,
   byWalletQuerySchema,
-  createJobDraftBodySchema,
-  createJobDraftLegacyBodySchema,
-  whitelistUpdateBodySchema,
   whitelistUpdateRequestSchema,
   feePreviewQuerySchema,
   type ByWalletQuery,
@@ -71,13 +66,11 @@ import {
   type WhitelistUpdateRequestBody,
   type FeePreviewQuery,
 } from "../schemas/jobs.js";
-import { strictLimiter, walletLookupLimiter } from "../middleware/rateLimiter.js";
 import logger from "../utils/logger.js";
 import { isValidStellarContractId } from "../utils/stellar.js";
 import { randomUUID } from "crypto";
 
 const router = Router();
-const CONTRACT_ID = process.env.CONTRACT_ID || "";
 const RPC_URL =
   process.env.SOROBAN_RPC_URL || "https://soroban-testnet.stellar.org";
 const NETWORK_PASSPHRASE =
