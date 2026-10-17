@@ -522,11 +522,18 @@ export async function pollEvents(): Promise<boolean> {
     const diagnosticsBatch: EventRow[] = [];
     let anyGroupPolled = false;
 
+    // Safety valve so one poll cycle can never page forever (#608).
+    const maxPagesPerPoll = parseInt(
+      process.env.POLLER_MAX_PAGES_PER_POLL || "20",
+      10,
+    );
+    const pageLimit = 100;
+
     for (const [pointer, groupContractIds] of groups) {
       if (currentLedger <= pointer) continue;
       anyGroupPolled = true;
 
-      const startLedger = pointer + 1;
+      let startLedger = pointer + 1;
       minStartLedger = Math.min(minStartLedger, startLedger);
 
       logger.info("Polling events for contract group", {
@@ -535,28 +542,59 @@ export async function pollEvents(): Promise<boolean> {
         contractCount: groupContractIds.length,
       });
 
-      const events = await fetchEventsWithRetry(rpcClient.rpcServer, {
-        startLedger,
-        contractIds: groupContractIds,
-        limit: 100,
-      });
+      // Follow the RPC cursor until a short page arrives so ledgers holding
+      // more than one page of events are fully collected (#608). Progress is
+      // persisted after every page: each page commits its rows and advances
+      // the ledger pointer before the next page is requested, so a failure
+      // on page N leaves pages 1..N-1 stored and the pointer at the last
+      // ledger fully stored. INSERT OR IGNORE + UNIQUE(event_id) keeps a
+      // retried cycle idempotent.
+      let cursor: string | undefined;
+      let lastStoredLedger = pointer;
+      for (let page = 0; page < maxPagesPerPoll; page++) {
+        const events = await fetchEventsWithRetry(rpcClient.rpcServer, {
+          startLedger,
+          contractIds: groupContractIds,
+          limit: pageLimit,
+          ...(cursor ? { cursor } : {}),
+        });
 
-      // Build the batch to be written atomically (#84)
-      const batch: EventRow[] = events.events.map((event) =>
-        toEventRow(event, groupContractIds[0])
-      );
+        const pageEvents: any[] = (events as any).events ?? [];
+        // Build the batch to be written atomically (#84)
+        const batch: EventRow[] = pageEvents.map((event) =>
+          toEventRow(event, groupContractIds[0])
+        );
 
-      // Persist the batch and advance the ledger pointer atomically (#84).
-      // Called even with an empty batch so the global pointer always advances.
-      await enqueueEventInsert(batch, currentLedger);
+        const pageMaxLedger =
+          pageEvents.length > 0
+            ? Math.max(...pageEvents.map((e: any) => Number(e.ledger) || startLedger))
+            : lastStoredLedger;
+        const nextCursor = (events as any)?.cursor as string | undefined;
+        const isLastPage =
+          pageEvents.length < pageLimit || !nextCursor;
 
-      // Advance each contract in the group to the current ledger (#720).
-      for (const contractId of groupContractIds) {
-        updateContractPointer(contractId, currentLedger);
+        // Only advance the pointer to the ledger of the last event actually
+        // processed, or to the RPC's latest ledger once the final page ran
+        // short and there is nothing left to collect.
+        const newLedger = isLastPage
+          ? ((events as any)?.latestLedger ?? currentLedger)
+          : pageMaxLedger;
+
+        // Persist the page and advance both pointers atomically per page.
+        // Called even with an empty batch so the global pointer advances.
+        await enqueueEventInsert(batch, newLedger);
+
+        // Advance each contract in the group to the stored ledger (#720).
+        for (const contractId of groupContractIds) {
+          updateContractPointer(contractId, newLedger);
+        }
+
+        totalEvents += pageEvents.length;
+        diagnosticsBatch.push(...batch);
+        lastStoredLedger = newLedger;
+        if (isLastPage) break;
+        cursor = nextCursor;
       }
-
-      totalEvents += events.events.length;
-      diagnosticsBatch.push(...batch);
     }
 
     // Record success for any poll that completes without throwing, even idle cycles.
