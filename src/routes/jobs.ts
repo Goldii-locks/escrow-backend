@@ -1266,23 +1266,18 @@ router.post(
             ...pathVars,
           });
 
-          const scArgs = (args || []).map((a: any) => {
+          const toScVal = (a: any): any => {
             if (a.type === "address") return Address.fromString(a.value).toScVal();
             if (a.type === "i128") return nativeToScVal(BigInt(a.value), { type: "i128" });
             if (a.type === "u32") return nativeToScVal(a.value, { type: "u32" });
             if (a.type === "u64") return nativeToScVal(BigInt(a.value), { type: "u64" });
             if (a.type === "bool") return nativeToScVal(a.value, { type: "bool" });
             if (a.type === "vec") {
-              const vecElements = a.value.map((item: any) => {
-                if (item.type === "i128") return nativeToScVal(BigInt(item.value), { type: "i128" });
-                if (item.type === "u32") return nativeToScVal(item.value, { type: "u32" });
-                if (item.type === "u64") return nativeToScVal(BigInt(item.value), { type: "u64" });
-                return nativeToScVal(item.value);
-              });
-              return nativeToScVal(vecElements);
+              return nativeToScVal(a.value.map((item: any) => toScVal(item)));
             }
             return nativeToScVal(a.value);
-          });
+          };
+          const scArgs = (args || []).map((a: any) => toScVal(a));
 
           const tx = new TransactionBuilder(account, {
             fee: BASE_FEE,

@@ -1,6 +1,7 @@
 import { jest } from "@jest/globals";
 import request from "supertest";
 import express from "express";
+import { xdr as StellarXdr, scValToNative } from "@stellar/stellar-sdk";
 
 const mockGetAccount = jest.fn<() => Promise<unknown>>();
 const mockPrepareTransaction = jest.fn<() => Promise<unknown>>();
@@ -396,6 +397,59 @@ describe("POST /api/jobs/build-tx — contract argument type mapping", () => {
     expect(res.body.error).toBe("ValidationError");
     expect(res.body.fields?.["args.0.value"]).toEqual(expect.any(String));
     expect(mockPrepareTransaction).not.toHaveBeenCalled();
+  });
+
+  it("encodes address elements inside a vec as scvAddress (#619)", async () => {
+    const body = {
+      ...VALID_BODY,
+      args: [{ type: "vec", value: [{ type: "address", value: VALID_ADDRESS }] }],
+    };
+    const res = await request(app).post("/api/jobs/build-tx").send(body).expect(200);
+    expect(res.body).toEqual({ success: true, xdr: "AAAAAQ==" });
+
+    const tx = mockPrepareTransaction.mock.calls[0]?.[0] as { toXDR: () => string };
+    const envelope = StellarXdr.TransactionEnvelope.fromXDR(tx.toXDR(), "base64");
+    const hostFn = envelope
+      .v1()
+      .tx()
+      .operations()[0].body()
+      .invokeHostFunctionOp()
+      .hostFunction();
+    const vecArg = hostFn.invokeContract().args()[0];
+    expect(vecArg.switch().name).toBe("scvVec");
+    const elements = vecArg.vec() ?? [];
+    expect(elements).toHaveLength(1);
+    expect(elements[0].switch().name).toBe("scvAddress");
+  });
+
+  it("encodes a nested vec of i128 correctly (#619)", async () => {
+    const body = {
+      ...VALID_BODY,
+      args: [
+        {
+          type: "vec",
+          value: [{ type: "vec", value: [{ type: "i128", value: "100" }] }],
+        },
+      ],
+    };
+    const res = await request(app).post("/api/jobs/build-tx").send(body).expect(200);
+    expect(res.body).toEqual({ success: true, xdr: "AAAAAQ==" });
+
+    const tx = mockPrepareTransaction.mock.calls[0]?.[0] as { toXDR: () => string };
+    const envelope = StellarXdr.TransactionEnvelope.fromXDR(tx.toXDR(), "base64");
+    const hostFn = envelope
+      .v1()
+      .tx()
+      .operations()[0].body()
+      .invokeHostFunctionOp()
+      .hostFunction();
+    const outer = hostFn.invokeContract().args()[0];
+    expect(outer.switch().name).toBe("scvVec");
+    const inner = (outer.vec() ?? [])[0];
+    expect(inner.switch().name).toBe("scvVec");
+    const leaves = inner.vec() ?? [];
+    expect(leaves).toHaveLength(1);
+    expect(scValToNative(leaves[0])).toBe(100n);
   });
 });
 
