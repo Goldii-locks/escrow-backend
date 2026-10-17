@@ -75,7 +75,7 @@ describe("GET /api/jobs/:contractId – response format and status codes", () =>
 
     await request(buildApp()).get(`/api/jobs/${VALID_CONTRACT}`);
 
-    expect(mockGetAccount).toHaveBeenCalled();
+    expect(mockGetAccount).not.toHaveBeenCalled();
   });
 
   it("ignores a wrong API key rather than rejecting it", async () => {
@@ -93,7 +93,7 @@ describe("GET /api/jobs/:contractId – response format and status codes", () =>
 
     await request(buildApp()).get(`/api/jobs/${VALID_CONTRACT}`);
 
-    expect(mockGetAccount).toHaveBeenCalled();
+    expect(mockGetAccount).not.toHaveBeenCalled();
   });
 
   it("returns 404 when simulation reports the job was not found", async () => {
@@ -131,7 +131,7 @@ describe("GET /api/jobs/:contractId – response format and status codes", () =>
   });
 
   it("returns 500 when the RPC client throws", async () => {
-    mockGetAccount.mockRejectedValue(new Error("upstream failure"));
+    mockSimulateTransaction.mockRejectedValue(new Error("upstream failure"));
 
     const res = await request(buildApp())
       .get(`/api/jobs/${VALID_CONTRACT}`)
@@ -248,7 +248,7 @@ describe("GET /api/jobs/:contractId – logging traces", () => {
   });
 
   it("logs 'Failed to fetch job' when the RPC client throws", async () => {
-    mockGetAccount.mockRejectedValue(new Error("upstream failure"));
+    mockSimulateTransaction.mockRejectedValue(new Error("upstream failure"));
     await request(buildApp()).get(`/api/jobs/${VALID_CONTRACT}`);
     expect(errorSpy).toHaveBeenCalledWith("Failed to fetch job", {
       contractId: VALID_CONTRACT,

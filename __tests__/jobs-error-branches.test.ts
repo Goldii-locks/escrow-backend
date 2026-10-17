@@ -200,7 +200,7 @@ describe("POST /:contractId/whitelist/update (bulk)", () => {
     [RAW_ERROR, 500, "Internal server error"],
   ])("maps a thrown error %j to %i without caching", async (raw, status, error) => {
     whitelistCache.set(VALID_CONTRACT, ["CACHED"]);
-    mockGetAccount.mockRejectedValue(new Error(raw));
+    mockSimulateTransaction.mockRejectedValue(new Error(raw));
 
     const res = await request(buildApp())
       .post(`/api/jobs/${VALID_CONTRACT}/whitelist/update`)
@@ -231,7 +231,7 @@ describe("POST /:contractId/whitelist/update (bulk extras)", () => {
 
   it("returns a clean 500 for a non-Error rejection without caching", async () => {
     whitelistCache.set(VALID_CONTRACT, ["CACHED"]);
-    mockGetAccount.mockRejectedValue(RAW_ERROR);
+    mockSimulateTransaction.mockRejectedValue(RAW_ERROR);
     const res = await request(buildApp())
       .post(`/api/jobs/${VALID_CONTRACT}/whitelist/update`)
       .send({ addresses: [TOKEN_CONTRACT] })
