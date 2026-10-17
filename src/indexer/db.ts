@@ -1421,13 +1421,21 @@ export interface PaginatedJobs {
  * returned from the database engine.
  *
  * The query:
- *   1. Filters rows where json_extract finds the address in client / freelancer
- *      / arbiter fields (exact match – no false-positive LIKE hits).
+ *   1. Finds the contracts a wallet belongs to by matching $.client /
+ *      $.freelancer / $.arbiter on each contract's INIT event (the earliest
+ *      row per contract) – later events such as fund/deliver never carry
+ *      those fields, so matching the latest event drops jobs after any
+ *      activity (#610).
  *   2. Keeps exactly one row per contract_id: the most-recent event by
- *      (ledger_sequence DESC, id DESC) via ROW_NUMBER, so contracts with
- *      several events in their latest ledger never duplicate a job.
- *   3. Determines role with a CASE expression in SQL.
- *   4. Applies LIMIT / OFFSET inside the engine, so memory footprint is O(page).
+ *      (ledger_sequence DESC, id DESC) for latest_event_type/latest_ledger/
+ *      latest_timestamp, so contracts with several events in their latest
+ *      ledger never duplicate a job.
+ *   3. Determines role from the init event with a CASE expression in SQL.
+ *      Precedence when a wallet holds several roles on one job:
+ *      client > freelancer > arbiter.
+ *   4. Reads milestone_count from the init event's $.milestone_count
+ *      (falling back to a $.milestones array length for older fixtures).
+ *   5. Applies LIMIT / OFFSET inside the engine, so memory footprint is O(page).
  */
 export async function getJobsByWallet(
   address: string,
@@ -1457,10 +1465,18 @@ export async function getJobsByWallet(
         `SELECT COUNT(*) AS cnt
          FROM (
            SELECT contract_id
-           FROM events
-           WHERE json_extract(data_json, '$.client')     = ?
-              OR json_extract(data_json, '$.freelancer') = ?
-              OR json_extract(data_json, '$.arbiter')    = ?
+           FROM (
+             SELECT contract_id, data_json,
+               ROW_NUMBER() OVER (
+                 PARTITION BY contract_id
+                 ORDER BY ledger_sequence ASC, id ASC
+               ) AS rn
+             FROM events
+           )
+           WHERE rn = 1
+             AND (json_extract(data_json, '$.client')     = ?
+               OR json_extract(data_json, '$.freelancer') = ?
+               OR json_extract(data_json, '$.arbiter')    = ?)
            GROUP BY contract_id
          )`
       )
@@ -1471,30 +1487,42 @@ export async function getJobsByWallet(
     const rows = db
       .prepare(
         `SELECT
-           e.contract_id,
-           e.event_type                                     AS latest_event_type,
-           e.ledger_sequence                                AS latest_ledger,
-           e.timestamp                                      AS latest_timestamp,
+           l.contract_id,
+           l.event_type                                     AS latest_event_type,
+           l.ledger_sequence                                AS latest_ledger,
+           l.timestamp                                      AS latest_timestamp,
            CASE
-             WHEN json_extract(e.data_json, '$.client')     = ? THEN 'client'
-             WHEN json_extract(e.data_json, '$.freelancer') = ? THEN 'freelancer'
-             WHEN json_extract(e.data_json, '$.arbiter')    = ? THEN 'arbiter'
+             WHEN json_extract(i.data_json, '$.client')     = ? THEN 'client'
+             WHEN json_extract(i.data_json, '$.freelancer') = ? THEN 'freelancer'
+             WHEN json_extract(i.data_json, '$.arbiter')    = ? THEN 'arbiter'
              ELSE 'unknown'
            END                                              AS role,
-           e.data_json
+           i.data_json                                      AS init_data
          FROM (
            SELECT e.*,
              ROW_NUMBER() OVER (
                PARTITION BY e.contract_id
                ORDER BY e.ledger_sequence DESC, e.id DESC
-             ) AS rn
+             ) AS rn_desc,
+             ROW_NUMBER() OVER (
+               PARTITION BY e.contract_id
+               ORDER BY e.ledger_sequence ASC, e.id ASC
+             ) AS rn_asc
            FROM events e
-           WHERE json_extract(e.data_json, '$.client')     = ?
-              OR json_extract(e.data_json, '$.freelancer') = ?
-              OR json_extract(e.data_json, '$.arbiter')    = ?
-         ) e
-         WHERE e.rn = 1
-         ORDER BY e.ledger_sequence DESC, e.contract_id ASC
+         ) l
+         JOIN (
+           SELECT e.*,
+             ROW_NUMBER() OVER (
+               PARTITION BY e.contract_id
+               ORDER BY e.ledger_sequence ASC, e.id ASC
+             ) AS rn_asc
+           FROM events e
+         ) i ON i.contract_id = l.contract_id AND i.rn_asc = 1
+         WHERE l.rn_desc = 1
+           AND (json_extract(i.data_json, '$.client')     = ?
+             OR json_extract(i.data_json, '$.freelancer') = ?
+             OR json_extract(i.data_json, '$.arbiter')    = ?)
+         ORDER BY l.ledger_sequence DESC, l.contract_id ASC
          LIMIT ? OFFSET ?`
       )
       .all(
@@ -1507,16 +1535,23 @@ export async function getJobsByWallet(
         latest_ledger: number;
         latest_timestamp: number;
         role: "client" | "freelancer" | "arbiter" | "unknown";
-        data_json: string;
+        init_data: string;
       }>;
 
     const jobs: JobSummary[] = rows.map((row) => {
       let milestoneCount = 0;
       try {
-        const parsed = JSON.parse(row.data_json) as Record<string, unknown>;
-        milestoneCount = Array.isArray(parsed["milestones"])
-          ? (parsed["milestones"] as unknown[]).length
-          : 0;
+        const parsed = JSON.parse(row.init_data) as Record<string, unknown>;
+        const direct = parsed["milestone_count"];
+        if (typeof direct === "number" && Number.isFinite(direct)) {
+          milestoneCount = Math.max(0, Math.floor(direct));
+        } else if (typeof direct === "string" && /^\d+$/.test(direct.trim())) {
+          milestoneCount = parseInt(direct.trim(), 10);
+        } else {
+          milestoneCount = Array.isArray(parsed["milestones"])
+            ? (parsed["milestones"] as unknown[]).length
+            : 0;
+        }
       } catch {
         // unparseable – leave milestone_count as 0
       }
