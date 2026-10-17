@@ -85,18 +85,29 @@ describe("SQLite Schema Manager – in-memory integration tests", () => {
       expect(row.data_json).toBe('{"key":"value"}');
     });
 
-    it("enforces unique constraint on contract_id + ledger_sequence + event_type", () => {
+    it("dedupes re-inserted RPC event ids and stores same-type events with distinct ids", () => {
       const insert = testDb.prepare(
-        `INSERT OR IGNORE INTO events (contract_id, event_type, ledger_sequence, timestamp, data_json)
-         VALUES (?, ?, ?, ?, ?)`
+        `INSERT OR IGNORE INTO events (contract_id, event_type, ledger_sequence, timestamp, data_json, event_id)
+         VALUES (?, ?, ?, ?, ?, ?)`
       );
 
-      insert.run("C1", "initialized", 100, 1000, "{}");
-      insert.run("C1", "initialized", 100, 1001, '{"updated":true}');
+      // Re-inserting the same RPC event id is a no-op (polling idempotency).
+      insert.run("C1", "initialized", 100, 1000, "{}", "evt-1");
+      insert.run("C1", "initialized", 100, 1001, '{"updated":true}', "evt-1");
 
-      const rows = testDb.prepare("SELECT * FROM events").all();
+      let rows = testDb.prepare("SELECT * FROM events").all();
       expect(rows.length).toBe(1);
       expect((rows[0] as any).data_json).toBe("{}");
+
+      // Two legitimate same-type events in one ledger carry distinct ids and
+      // must both be stored.
+      insert.run("C1", "approved", 200, 1002, '{"milestone":0}', "evt-2");
+      insert.run("C1", "approved", 200, 1003, '{"milestone":1}', "evt-3");
+
+      rows = testDb
+        .prepare("SELECT * FROM events WHERE event_type = 'approved'")
+        .all();
+      expect(rows.length).toBe(2);
     });
 
     it("allows different event types on the same ledger", () => {

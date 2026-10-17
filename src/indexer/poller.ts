@@ -154,6 +154,12 @@ function toEventRow(event: any, fallbackContractId: string): EventRow {
     ledgerSequence: event.ledger,
     timestamp: toEventTimestamp(event.ledgerClosedAt),
     dataJson: JSON.stringify(scValToNative(event.value)),
+    eventId:
+      typeof event.id === "string" && event.id
+        ? event.id
+        : typeof event.pagingToken === "string" && event.pagingToken
+          ? event.pagingToken
+          : undefined,
   };
 }
 

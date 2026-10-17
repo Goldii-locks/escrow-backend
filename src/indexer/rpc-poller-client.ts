@@ -252,6 +252,12 @@ export function mapRpcEventToRow(
       ? Math.floor(new Date(raw.ledgerClosedAt).getTime() / 1000)
       : Math.floor(Date.now() / 1000),
     dataJson: JSON.stringify(raw?.value ?? null),
+    eventId:
+      typeof raw?.id === "string" && raw.id
+        ? raw.id
+        : typeof raw?.pagingToken === "string" && raw.pagingToken
+          ? raw.pagingToken
+          : undefined,
   };
 }
 
@@ -523,7 +529,8 @@ function defaultPersistEvent(event: EventRow): boolean {
     event.eventType,
     event.ledgerSequence,
     event.timestamp,
-    event.dataJson
+    event.dataJson,
+    event.eventId
   );
 }
 

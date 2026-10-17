@@ -284,6 +284,53 @@ const MIGRATIONS: Migration[] = [
       ALTER TABLE monitored_contracts ADD COLUMN start_ledger INTEGER NOT NULL DEFAULT 0;
     `,
   },
+  {
+    version: 12,
+    description: "dedupe events by RPC event id (#607)",
+    up: `
+      CREATE TABLE events_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        contract_id TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        ledger_sequence INTEGER NOT NULL,
+        timestamp INTEGER,
+        data_json TEXT NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        event_id TEXT,
+        UNIQUE(event_id)
+      );
+      INSERT INTO events_new
+        (id, contract_id, event_type, ledger_sequence, timestamp, data_json, created_at, event_id)
+        SELECT id, contract_id, event_type, ledger_sequence, timestamp, data_json, created_at,
+          ('legacy-' || id)
+        FROM events;
+      DROP TABLE events;
+      ALTER TABLE events_new RENAME TO events;
+
+      CREATE INDEX IF NOT EXISTS idx_events_contract_id
+        ON events (contract_id);
+      CREATE INDEX IF NOT EXISTS idx_events_ledger_sequence
+        ON events (ledger_sequence);
+      CREATE INDEX IF NOT EXISTS idx_events_contract_ledger
+        ON events (contract_id, ledger_sequence);
+      CREATE INDEX IF NOT EXISTS idx_events_contract_type
+        ON events (contract_id, event_type);
+      CREATE INDEX IF NOT EXISTS idx_events_ledger_event_type
+        ON events (ledger_sequence, event_type);
+      CREATE INDEX IF NOT EXISTS idx_events_created_at
+        ON events (created_at);
+      CREATE INDEX IF NOT EXISTS idx_events_contract_type_ledger
+        ON events (contract_id, event_type, ledger_sequence);
+      CREATE INDEX IF NOT EXISTS idx_events_created_at_ledger
+        ON events (created_at, ledger_sequence);
+      CREATE INDEX IF NOT EXISTS idx_events_ledger_created_at
+        ON events (ledger_sequence, created_at);
+      CREATE INDEX IF NOT EXISTS idx_events_event_type
+        ON events (event_type);
+      CREATE INDEX IF NOT EXISTS idx_events_contract_event_type
+        ON events (contract_id, event_type);
+    `,
+  },
 ];
 
 /** Index names created by the SQLite schema manager lookup-index migration (#259). */
@@ -628,6 +675,7 @@ const EXPECTED_TABLES: Record<string, string[]> = {
     "timestamp",
     "data_json",
     "created_at",
+    "event_id",
   ],
   indexer_state: ["key", "value"],
   monitored_contracts: [
@@ -992,15 +1040,9 @@ export function updateContractPointer(
 
 /**
  * Checks whether an event with the given (contract_id, ledger_sequence,
- * event_type) already exists - the exact composite key the
- * UNIQUE(contract_id, ledger_sequence, event_type) constraint on `events`
- * enforces (see MIGRATIONS v1). insertEvent()/insertEventBatch() rely on
- * INSERT OR IGNORE for the actual write path (unchanged), so this constraint
- * check normally happens implicitly inside SQLite and isn't independently
- * observable. This lookup is exposed as its own query so the duplicate-check
- * path can be measured and EXPLAIN QUERY PLAN'd directly - it reuses the
- * existing sqlite_autoindex_events_1 index that comes from the UNIQUE
- * constraint; no new index is introduced.
+ * event_type) already exists. Since migration v12 the write path dedupes on
+ * UNIQUE(event_id), so this triple lookup is only a compatibility helper;
+ * prefer isDuplicateEventId() for the actual dedupe check.
  */
 export function isDuplicateEvent(
   contractId: string,
@@ -1019,6 +1061,24 @@ export function isDuplicateEvent(
 }
 
 /**
+ * Stable dedupe key for an event row: the RPC event id when known,
+ * otherwise the legacy (contract, ledger, type) triple (#607).
+ */
+export function eventDedupeId(ev: Pick<EventRow, "contractId" | "ledgerSequence" | "eventType"> & { eventId?: string }): string {
+  if (ev.eventId) return ev.eventId;
+  return `${ev.contractId}:${ev.ledgerSequence}:${ev.eventType}`;
+}
+
+/** True when an event with this RPC event id is already stored (#607). */
+export function isDuplicateEventId(eventId: string): boolean {
+  const db = getDb();
+  const row = db
+    .prepare(`SELECT 1 FROM events WHERE event_id = ? LIMIT 1`)
+    .get(eventId);
+  return row !== undefined;
+}
+
+/**
  * Insert a single event row.  For atomic batch inserts use insertEventBatch().
  * Wrapped in a transaction so concurrent writes never leave partial state.
  */
@@ -1027,21 +1087,23 @@ export function insertEvent(
   eventType: string,
   ledgerSequence: number,
   timestamp: number | null,
-  dataJson: string
+  dataJson: string,
+  eventId?: string
 ): boolean {
   const db = getDb();
   const tx = db.transaction(() => {
     const stmt = db.prepare(`
-      INSERT OR IGNORE INTO events 
-      (contract_id, event_type, ledger_sequence, timestamp, data_json)
-      VALUES (?, ?, ?, ?, ?)
+      INSERT OR IGNORE INTO events
+      (contract_id, event_type, ledger_sequence, timestamp, data_json, event_id)
+      VALUES (?, ?, ?, ?, ?, ?)
     `);
     const result = stmt.run(
       contractId,
       eventType,
       ledgerSequence,
       timestamp,
-      dataJson
+      dataJson,
+      eventId ?? `${contractId}:${ledgerSequence}:${eventType}`
     );
     return result.changes > 0;
   });
@@ -1055,6 +1117,8 @@ export interface EventRow {
   /** Ledger close time (epoch secs), or null when the RPC gave none. */
   timestamp: number | null;
   dataJson: string;
+  /** Stable RPC event id (event.id); dedupe key via UNIQUE(event_id) (#607). */
+  eventId?: string;
 }
 
 /**
@@ -1084,8 +1148,8 @@ export function insertEventBatch(events: EventRow[], newLedger: number): void {
 
   const insertStmt = db.prepare(`
     INSERT OR IGNORE INTO events
-    (contract_id, event_type, ledger_sequence, timestamp, data_json)
-    VALUES (?, ?, ?, ?, ?)
+    (contract_id, event_type, ledger_sequence, timestamp, data_json, event_id)
+    VALUES (?, ?, ?, ?, ?, ?)
   `);
 
   const updateLedger = db.prepare(
@@ -1099,7 +1163,8 @@ export function insertEventBatch(events: EventRow[], newLedger: number): void {
         ev.eventType,
         ev.ledgerSequence,
         ev.timestamp,
-        ev.dataJson
+        ev.dataJson,
+        eventDedupeId(ev)
       );
     }
     updateLedger.run(newLedger.toString());
@@ -1246,7 +1311,9 @@ export async function insertEventBatchLocked(
   const keys = [
     ...new Set(
       events.map((ev) =>
-        eventInsertLockKey(ev.contractId, ev.ledgerSequence, ev.eventType)
+        ev.eventId
+          ? `id:${ev.eventId}`
+          : eventInsertLockKey(ev.contractId, ev.ledgerSequence, ev.eventType)
       )
     ),
   ].sort();
@@ -1445,6 +1512,7 @@ export interface EventDbRow {
   timestamp: number | null;
   data_json: string;
   created_at: string;
+  event_id?: string | null;
 }
 
 export interface PaginatedEvents {
@@ -1698,8 +1766,8 @@ export function insertHistoricalEventBatch(
   const db = getDb();
   const insertStmt = db.prepare(`
     INSERT OR IGNORE INTO events
-    (contract_id, event_type, ledger_sequence, timestamp, data_json)
-    VALUES (?, ?, ?, ?, ?)
+    (contract_id, event_type, ledger_sequence, timestamp, data_json, event_id)
+    VALUES (?, ?, ?, ?, ?, ?)
   `);
 
   const importTransaction = db.transaction(() => {
@@ -1711,6 +1779,7 @@ export function insertHistoricalEventBatch(
         ev.ledgerSequence,
         ev.timestamp,
         ev.dataJson,
+        eventDedupeId(ev),
       );
       if (result.changes > 0) inserted += 1;
     }
