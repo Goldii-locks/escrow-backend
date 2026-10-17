@@ -14,6 +14,7 @@ import { legacyApiDeprecation } from "./middleware/api-version.js";
 import { startPoller } from "./indexer/poller.js";
 import { startReconciliationJob } from "./indexer/reconciliation.js";
 import { markIndexerStarted } from "./indexer/status.js";
+import { registerShutdownHandlers } from "./shutdown.js";
 import logger from "./utils/logger.js";
 
 dotenv.config();
@@ -115,8 +116,12 @@ assertRpcNetworkMatches()
     process.exit(1);
   });
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   logger.info("Escrow backend started", { port: PORT });
 });
+
+// #623: drain in-flight work (poller, HTTP, SQLite) on SIGTERM/SIGINT
+// instead of exiting mid-transaction.
+registerShutdownHandlers(server);
 
 export default app;
