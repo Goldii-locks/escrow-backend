@@ -60,6 +60,7 @@ export const ERROR_CODES = {
   UNKNOWN_ERROR_DEFINITION: "UNKNOWN_ERROR_DEFINITION",
   CALCULATION_EXCEPTION: "CALCULATION_EXCEPTION",
   PARAM_STRUCTURE_MISMATCH: "PARAM_STRUCTURE_MISMATCH",
+  NEGATIVE_AMOUNT: "NEGATIVE_AMOUNT",
 } as const;
 
 export type ScraperErrorCode =
@@ -227,7 +228,7 @@ export function applyConversionRate(
   const amount = parseIntegerInput(
     notional,
     "notional",
-    ERROR_CODES.INVALID_RATE,
+    ERROR_CODES.INVALID_AMOUNT,
     ERROR_CODES.AMOUNT_OUT_OF_RANGE
   );
   if (!amount.ok) {
@@ -237,7 +238,7 @@ export function applyConversionRate(
     return {
       ok: false,
       error: "notional cannot be negative",
-      code: ERROR_CODES.NEGATIVE_RATE,
+      code: ERROR_CODES.NEGATIVE_AMOUNT,
     };
   }
 
