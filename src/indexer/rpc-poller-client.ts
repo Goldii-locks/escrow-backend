@@ -36,7 +36,7 @@ const DEFAULT_CONFIG: RpcRetryConfig = {
   maxBackoffMs: 30_000,
 };
 
-/** Retryable error patterns for RPC connection issues. */
+/** Retryable error patterns for RPC connection issues (#688). */
 const RETRYABLE_PATTERNS = [
   "timeout",
   "ECONNRESET",
@@ -47,14 +47,106 @@ const RETRYABLE_PATTERNS = [
   "status 429",
   "status 503",
   "status 502",
+  "status 500",
+  "status code 429",
+  "status code 503",
+  "too many requests",
+  "service unavailable",
+  "rate limit",
+  "rate-limit",
+  "ratelimit",
   "request timeout",
   "connect timeout",
 ];
 
-function isRetryableError(err: unknown): boolean {
-  if (!(err instanceof Error)) return false;
-  const msg = err.message.toLowerCase();
-  return RETRYABLE_PATTERNS.some((p) => msg.includes(p.toLowerCase()));
+/**
+ * HTTP statuses that are always retryable when observed on an RPC error,
+ * regardless of message wording.
+ */
+const RETRYABLE_STATUS_CODES = new Set([429, 500, 502, 503, 504]);
+
+/** Extract an HTTP status code from common RPC/SDK error shapes. */
+export function getErrorStatusCode(err: unknown): number | null {
+  if (typeof err !== "object" || err === null) return null;
+  const record = err as Record<string, unknown>;
+  const candidates: unknown[] = [
+    record["status"],
+    record["statusCode"],
+    record["code"],
+    (record["response"] as Record<string, unknown> | undefined)?.["status"],
+    (record["response"] as Record<string, unknown> | undefined)?.["statusCode"],
+    (record["response"] as { status?: unknown } | undefined)?.status,
+  ];
+  for (const candidate of candidates) {
+    const n = typeof candidate === "string" ? Number(candidate) : candidate;
+    if (typeof n === "number" && Number.isInteger(n)) return n;
+  }
+  return null;
+}
+
+/**
+ * Parse a `Retry-After` header value into milliseconds.
+ *
+ * Accepts delay-seconds (`"120"`) and HTTP-date forms. Returns `null` when
+ * the value is missing or unparseable so callers fall back to backoff.
+ */
+export function parseRetryAfterMs(value: unknown): number | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
+    return Math.floor(value * 1000);
+  }
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (trimmed === "") return null;
+  if (/^\d+$/.test(trimmed)) {
+    return parseInt(trimmed, 10) * 1000;
+  }
+  const asDate = Date.parse(trimmed);
+  if (!Number.isNaN(asDate)) {
+    return Math.max(0, asDate - Date.now());
+  }
+  return null;
+}
+
+/**
+ * Read `Retry-After` (seconds or HTTP-date) from common error shapes.
+ * Checks `response.headers`, `headers`, and `retryAfter` fields,
+ * case-insensitively for header names.
+ */
+export function getRetryAfterMs(err: unknown): number | null {
+  if (typeof err !== "object" || err === null) return null;
+  const record = err as Record<string, unknown>;
+  const headerSources: unknown[] = [
+    (record["response"] as Record<string, unknown> | undefined)?.["headers"],
+    record["headers"],
+  ];
+  for (const source of headerSources) {
+    if (typeof source !== "object" || source === null) continue;
+    const headers = source as Record<string, unknown>;
+    for (const key of Object.keys(headers)) {
+      if (key.toLowerCase() === "retry-after") {
+        const parsed = parseRetryAfterMs(headers[key]);
+        if (parsed !== null) return parsed;
+      }
+    }
+  }
+  const direct = parseRetryAfterMs(record["retryAfter"]);
+  if (direct !== null) return direct;
+  return parseRetryAfterMs(record["retry_after"]);
+}
+
+export function isRetryableError(err: unknown): boolean {
+  const status = getErrorStatusCode(err);
+  if (status !== null && RETRYABLE_STATUS_CODES.has(status)) return true;
+  const msg =
+    err instanceof Error
+      ? err.message
+      : typeof err === "object" && err !== null && "message" in err
+        ? String((err as { message?: unknown }).message ?? "")
+        : String(err ?? "");
+  if (!msg) return false;
+  const lower = msg.toLowerCase();
+  return RETRYABLE_PATTERNS.some((p) => lower.includes(p.toLowerCase()));
 }
 
 function sleep(ms: number): Promise<void> {
@@ -78,8 +170,12 @@ export function computeBackoffMs(
 }
 
 /**
- * Execute an async operation with exponential backoff retry.
- * Returns the result on success, or throws after exhausting retries.
+ * Execute an async operation with exponential backoff retry (#688).
+ *
+ * This is the indexer's single retry policy: every RPC call (`getEvents`,
+ * `getLatestLedger`) goes through here. 429 responses honour `Retry-After`
+ * when present (seconds or HTTP-date); otherwise the exponential backoff
+ * applies. Returns the result on success, or throws after exhausting retries.
  */
 export async function withRetry<T>(
   fn: () => Promise<T>,
@@ -94,16 +190,31 @@ export async function withRetry<T>(
       return await fn();
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
+      // Preserve transport metadata (status / headers) that `new Error()`
+      // would drop, so Retry-After extraction still works for plain objects.
+      if (!(err instanceof Error) && typeof err === "object" && err !== null) {
+        Object.assign(
+          lastError as unknown as Record<string, unknown>,
+          err as Record<string, unknown>
+        );
+      }
 
-      if (!isRetryableError(lastError) || attempt >= cfg.maxRetries) {
+      if (!isRetryableError(err) || attempt >= cfg.maxRetries) {
         throw lastError;
       }
 
-      const delay = computeBackoffMs(attempt, cfg);
+      const backoff = computeBackoffMs(attempt, cfg);
+      const retryAfter = getRetryAfterMs(err);
+      const delay =
+        retryAfter !== null
+          ? Math.min(Math.max(retryAfter, backoff), cfg.maxBackoffMs)
+          : backoff;
       logger.warn(`${context} failed, retrying`, {
         attempt: attempt + 1,
         maxRetries: cfg.maxRetries,
         backoffMs: delay,
+        retryAfterMs: retryAfter,
+        statusCode: getErrorStatusCode(err),
         error: lastError.message,
       });
       await sleep(delay);
@@ -581,9 +692,8 @@ export class RpcPollerClient {
   }
 
   /**
-   * The underlying RPC server, for helpers that take a bare server and apply
-   * their own retry policy (e.g. `fetchEventsWithRetry`). Going through
-   * `getEvents()` instead would stack this client's retries on top of theirs.
+   * The underlying RPC server. Prefer `getEvents()` / `getLatestLedger()`
+   * so calls share this client's single retry policy (#688).
    */
   get rpcServer(): RpcServerLike {
     return this.server;

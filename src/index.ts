@@ -12,7 +12,23 @@ import { legacyApiDeprecation } from "./middleware/api-version.js";
 import { startPoller } from "./indexer/poller.js";
 import { startReconciliationJob } from "./indexer/reconciliation.js";
 import { markIndexerStarted } from "./indexer/status.js";
+import { formatError } from "./utils/format-error.js";
 import logger from "./utils/logger.js";
+
+// Keep the process alive through unexpected async failures instead of
+// crash-looping under Docker (#689). The poll loop records its own
+// failures, so these handlers only log before the deliberate shutdown.
+process.on("unhandledRejection", (reason) => {
+  logger.error("Unhandled promise rejection", {
+    error: formatError(reason),
+  });
+});
+
+process.on("uncaughtException", (err) => {
+  logger.error("Uncaught exception", {
+    error: formatError(err),
+  });
+});
 
 dotenv.config();
 
