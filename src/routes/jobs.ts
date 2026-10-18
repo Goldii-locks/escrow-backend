@@ -77,6 +77,24 @@ import { isValidStellarContractId } from "../utils/stellar.js";
 import { randomUUID } from "crypto";
 
 const router = Router();
+
+/**
+ * Truncate a Stellar address to `GABC…WXYZ` for info-level logs.
+ *
+ * Full addresses must never appear at `info` (the production log level)
+ * because the HTTP request logger in `src/index.ts` records the caller's IP
+ * on every request, so logging the full address alongside it builds a durable
+ * IP↔wallet map. Four leading + four trailing characters are enough for
+ * same-session correlation without exposing the complete key.
+ *
+ * Pass the raw value to `logger.debug` wherever the full address is needed
+ * for post-incident debugging.
+ */
+export function maskAddress(address: string | undefined | null): string {
+  if (!address || address.length < 10) return address ?? "";
+  return `${address.slice(0, 4)}\u2026${address.slice(-4)}`;
+}
+
 const CONTRACT_ID = process.env.CONTRACT_ID || "";
 const RPC_URL =
   process.env.SOROBAN_RPC_URL || "https://soroban-testnet.stellar.org";
@@ -452,9 +470,11 @@ router.get(
       const { page, limit } = (req as RequestWithValidatedQuery)
         .validatedQuery as ByWalletQuery;
 
-      logger.info("Fetching jobs by wallet", { address, page, limit });
+      logger.info("Fetching jobs by wallet", { address: maskAddress(address), page, limit });
+      logger.debug("Fetching jobs by wallet (full address)", { address, page, limit });
       const result = await getJobsByWallet(address, page, limit);
-      logger.info("Jobs lookup completed", { address, page, limit, total: result.total });
+      logger.info("Jobs lookup completed", { address: maskAddress(address), page, limit, total: result.total });
+      logger.debug("Jobs lookup completed (full address)", { address, page, limit, total: result.total });
       sendSuccess(res, result);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
@@ -538,11 +558,18 @@ router.post(
       logger.info("Job draft created", {
         traceId,
         ...pathVars,
+        client: maskAddress(client),
+        freelancer: maskAddress(freelancer),
+        arbiter: maskAddress(arbiter),
+        token: maskAddress(token),
+        milestoneCount: body.milestones?.length ?? 0,
+      });
+      logger.debug("Job draft created (full addresses)", {
+        traceId,
         client,
         freelancer,
         arbiter,
         token,
-        milestoneCount: body.milestones?.length ?? 0,
       });
 
       sendSuccess(res, draft);
@@ -834,12 +861,19 @@ router.get(
 
       logger.info("Job fetched successfully", {
         contractId,
+        client: maskAddress(job.client),
+        freelancer: maskAddress(job.freelancer),
+        arbiter: maskAddress(job.arbiter),
+        token: maskAddress(job.token),
+        funded: job.funded,
+        milestoneCount: job.milestones.length,
+      });
+      logger.debug("Job fetched successfully (full addresses)", {
+        contractId,
         client: job.client,
         freelancer: job.freelancer,
         arbiter: job.arbiter,
         token: job.token,
-        funded: job.funded,
-        milestoneCount: job.milestones.length,
       });
       sendSuccess(res, job);
     } catch (err: any) {
