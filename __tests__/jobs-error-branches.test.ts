@@ -2,7 +2,7 @@ import { jest } from "@jest/globals";
 import request from "supertest";
 import express from "express";
 import Database from "better-sqlite3";
-import { Keypair, StrKey, xdr } from "@stellar/stellar-sdk";
+import { Keypair, StrKey, nativeToScVal, xdr } from "@stellar/stellar-sdk";
 import { autoAuth } from "./helpers/api-key-helper.js";
 import { tokenVecScVal } from "./helpers/scval-fixtures.js";
 
@@ -354,7 +354,7 @@ describe("GET /:contractId/milestones/:index/time-remaining", () => {
     const first = request(app).get(url).then((r) => r);
     const second = request(app).get(url).then((r) => r);
     await new Promise((r) => setTimeout(r, 50));
-    release({ result: { retval: 99 } });
+    release({ result: { retval: nativeToScVal(99n, { type: "u64" }) } });
 
     const [r1, r2] = await Promise.all([first, second]);
     expect(r1.body).toEqual({ success: true, data: { secondsRemaining: 99 } });
@@ -377,6 +377,22 @@ describe("GET /:contractId/milestones/:index/time-remaining", () => {
 
     await request(app).get(url).expect(status);
     expect(mockSimulateTransaction).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([3600n, 0n])("decodes a u64 retval of %s seconds (#599)", async (secs) => {
+    mockSimulateTransaction.mockResolvedValue({
+      result: { retval: nativeToScVal(secs, { type: "u64" }) },
+    });
+    const res = await request(buildApp()).get(url).expect(200);
+    expect(res.body).toEqual({ success: true, data: { secondsRemaining: Number(secs) } });
+    expect(timeRemainingCache.get(`${VALID_CONTRACT}:0`)).toBe(Number(secs));
+  });
+
+  it("returns 500 for a non-numeric retval and does not cache it", async () => {
+    mockSimulateTransaction.mockResolvedValue({ result: { retval: xdr.ScVal.scvSymbol("x") } });
+    const res = await request(buildApp()).get(url).expect(500);
+    expect(res.body).toEqual({ success: false, error: "Internal server error" });
+    expect(timeRemainingCache.keys()).toHaveLength(0);
   });
 
   it("returns 500 for an empty retval and does not cache it", async () => {

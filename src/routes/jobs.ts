@@ -1631,7 +1631,13 @@ router.get(
             throw new SimError(status, message);
           }
           if ("result" in result && result.result?.retval) {
-            const secondsRemaining = Number(result.result.retval);
+            // retval is an xdr.ScVal (u64 -> bigint); decode it (#599).
+            const decoded = scValToNative(result.result.retval);
+            const secondsRemaining =
+              typeof decoded === "bigint" || typeof decoded === "number" ? Number(decoded) : NaN;
+            if (!Number.isFinite(secondsRemaining)) {
+              throw new SimError(500, "Internal server error");
+            }
             timeRemainingCache.set(cacheKey, secondsRemaining);
             return secondsRemaining;
           }
