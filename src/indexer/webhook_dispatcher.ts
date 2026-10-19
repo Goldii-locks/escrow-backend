@@ -6,10 +6,15 @@
  *  - #517 Activity-history row inserts under active SQLite transactions
  *  - #518 Notification-switch checks that skip opted-out recipients
  *  - #519 Bulk batching buffers that aggregate alerts before delivery
+ *  - #202 HMAC-SHA256 signing of outgoing webhooks
  */
 
 import { getDb } from "./db.js";
 import logger from "../utils/logger.js";
+import {
+  signPayload,
+  WebhookSignatureError,
+} from "../utils/webhook_signature_verifier.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -609,6 +614,7 @@ export const ERROR_CODES = {
   SERIALIZATION_ERROR: "WEBHOOK_DISPATCHER_SERIALIZATION_ERROR",
   RETRY_EXHAUSTED: "WEBHOOK_DISPATCHER_RETRY_EXHAUSTED",
   INVALID_URL: "WEBHOOK_DISPATCHER_INVALID_URL",
+  INVALID_SECRET: "WEBHOOK_DISPATCHER_INVALID_SECRET",
 } as const;
 
 export type WebhookDispatcherErrorCode =
@@ -1038,6 +1044,17 @@ export type FetchLike = (
   init?: RequestInit
 ) => Promise<Response>;
 
+/** Options controlling outbound webhook signing (#202). */
+export interface WebhookSigningOptions {
+  /**
+   * HMAC secret used to sign the body. Falls back to WEBHOOK_SIGNING_SECRET;
+   * when neither is set the webhook is sent unsigned.
+   */
+  secret?: string;
+  /** Override the signature timestamp (unix seconds); used in tests. */
+  signedAt?: number;
+}
+
 /**
  * Deliver a single webhook with timeout enforcement and schema serialization.
  * Does not retry — use `dispatchWebhookWithRetry` for backoff queues.
@@ -1049,7 +1066,7 @@ export async function dispatchWebhook(
     fetchImpl?: FetchLike;
     timeoutMs?: number;
     schema?: PayloadSchemaTemplate;
-  }
+  } & WebhookSigningOptions
 ): Promise<DispatchResult> {
   if (typeof webhookUrl !== "string" || !/^https?:\/\//i.test(webhookUrl)) {
     return {
@@ -1086,6 +1103,26 @@ export async function dispatchWebhook(
     };
   }
 
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  const secret =
+    options?.secret ?? (process.env.WEBHOOK_SIGNING_SECRET || undefined);
+  if (secret !== undefined) {
+    try {
+      Object.assign(
+        headers,
+        signPayload(serialized.body, secret, options?.signedAt).headers
+      );
+    } catch (err) {
+      if (!(err instanceof WebhookSignatureError)) throw err;
+      return {
+        success: false,
+        attempts: 0,
+        error: err.message,
+        code: ERROR_CODES.INVALID_SECRET,
+      };
+    }
+  }
+
   const timeoutMs = options?.timeoutMs ?? timeoutConfig.timeoutMs;
   const fetchImpl = options?.fetchImpl ?? fetch;
   const controller = new AbortController();
@@ -1094,7 +1131,7 @@ export async function dispatchWebhook(
   try {
     const response = await fetchImpl(webhookUrl, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: serialized.body,
       signal: controller.signal,
     });
@@ -1158,7 +1195,7 @@ export async function dispatchWebhookWithRetry(
     schema?: PayloadSchemaTemplate;
     retry?: Partial<WebhookRetryConfig>;
     sleepFn?: (ms: number) => Promise<void>;
-  }
+  } & WebhookSigningOptions
 ): Promise<DispatchResult> {
   const config: WebhookRetryConfig = {
     ...retryConfig,
@@ -1180,6 +1217,8 @@ export async function dispatchWebhookWithRetry(
       fetchImpl: options?.fetchImpl,
       timeoutMs: options?.timeoutMs,
       schema: options?.schema,
+      secret: options?.secret,
+      signedAt: options?.signedAt,
     });
     lastResult.attempts = attempt + 1;
     lastResult.delays = [...delays];
