@@ -88,6 +88,11 @@ const NETWORK_PASSPHRASE =
 const RPC_TIMEOUT_MS = parseInt(process.env.RPC_TIMEOUT_MS || "10000", 10);
 const server = new Server(RPC_URL, { timeout: RPC_TIMEOUT_MS });
 
+/** RPC URL the module-level Server was built with (#602). */
+export function getRpcUrl(): string {
+  return RPC_URL;
+}
+
 /**
  * #692: Validate that the configured SOROBAN_NETWORK_PASSPHRASE matches the
  * passphrase the RPC server actually reports. Called once at startup.

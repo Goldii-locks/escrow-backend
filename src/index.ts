@@ -1,7 +1,9 @@
+// #602: must be the first import. ES imports are evaluated before this
+// module's body, and several modules read process.env at top level.
+import "dotenv/config";
 import express from "express";
 import type { Request, Response, NextFunction } from "express";
 import helmet from "helmet";
-import dotenv from "dotenv";
 import jobRoutes, { assertRpcNetworkMatches } from "./routes/jobs.js";
 import adminRoutes from "./routes/admin.js";
 import webhookRoutes from "./routes/webhooks.js";
@@ -14,8 +16,6 @@ import { startReconciliationJob } from "./indexer/reconciliation.js";
 import { markIndexerStarted } from "./indexer/status.js";
 import logger from "./utils/logger.js";
 import { resolveTrustProxy } from "./utils/trust-proxy.js";
-
-dotenv.config();
 
 // Fail fast in production rather than booting into a silently insecure or
 // misdirected state. Without this the server starts happily and passes
