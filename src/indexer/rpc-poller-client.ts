@@ -47,13 +47,52 @@ const RETRYABLE_PATTERNS = [
   "status 429",
   "status 503",
   "status 502",
+  "status 500",
   "request timeout",
   "connect timeout",
+  "aborterror",
 ];
 
-function isRetryableError(err: unknown): boolean {
-  if (!(err instanceof Error)) return false;
-  const msg = err.message.toLowerCase();
+const NON_RETRYABLE_PATTERNS = [
+  "status 400",
+  "-32602",
+  "invalid params",
+  "invalid parameters",
+];
+
+export function isRetryableError(err: unknown): boolean {
+  if (!err) return false;
+
+  const anyErr = err as any;
+  if (anyErr?.name === "AbortError" || anyErr?.code === "ECONNRESET" || anyErr?.code === "ETIMEDOUT" || anyErr?.code === "ECONNREFUSED") {
+    return true;
+  }
+
+  // Explicit status check if present
+  const status = anyErr?.status ?? anyErr?.statusCode ?? anyErr?.response?.status;
+  if (status !== undefined) {
+    if (status === 429 || status === 500 || status === 502 || status === 503 || status === 504) {
+      return true;
+    }
+    if (status >= 400 && status < 500) {
+      return false;
+    }
+  }
+
+  // JSON-RPC error code check
+  const rpcCode = anyErr?.code ?? anyErr?.error?.code;
+  if (rpcCode === -32602) {
+    return false;
+  }
+
+  const msg = (anyErr instanceof Error ? anyErr.message : String(anyErr)).toLowerCase();
+
+  for (const nonRetryable of NON_RETRYABLE_PATTERNS) {
+    if (msg.includes(nonRetryable.toLowerCase())) {
+      return false;
+    }
+  }
+
   return RETRYABLE_PATTERNS.some((p) => msg.includes(p.toLowerCase()));
 }
 
