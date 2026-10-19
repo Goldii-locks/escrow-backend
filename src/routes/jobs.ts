@@ -11,7 +11,7 @@ import {
 } from "@stellar/stellar-sdk";
 import { Server } from "@stellar/stellar-sdk/rpc";
 import NodeCache from "node-cache";
-import { getJobsByWallet, getEventsByContract } from "../indexer/db.js";
+import { getJobsByWallet, getEventsByContract, saveJobDraft, getJobDraftById } from "../indexer/db.js";
 import {
   jobContractRateLimit,
   jobWhitelistRateLimit,
@@ -545,6 +545,17 @@ router.post(
         milestoneCount: body.milestones?.length ?? 0,
       });
 
+      const creatorAddress = (client || freelancer || "unknown") as string;
+      try {
+        saveJobDraft(draft.id, creatorAddress, draft);
+      } catch (dbErr: unknown) {
+        const dbErrorMessage = dbErr instanceof Error ? dbErr.message : String(dbErr);
+        logger.warn("Failed to persist job draft to database", {
+          draftId: draft.id,
+          error: dbErrorMessage,
+        });
+      }
+
       sendSuccess(res, draft);
 
       logger.debug("Create-job-draft response sent", {
@@ -555,14 +566,40 @@ router.post(
         draftId: draft.id,
         milestoneCount: body.milestones?.length ?? 0,
       });
-    } catch (err: any) {
-      const message = err?.message ?? String(err);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
       logger.error("Failed to create job draft", {
         traceId,
         ...pathVars,
         error: message,
-        stack: err?.stack,
+        stack: err instanceof Error ? err.stack : undefined,
       });
+      sendError(res, 500, "Internal server error");
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
+// GET /api/jobs/drafts/:id – fetch a persisted job draft by ID (#667)
+// ---------------------------------------------------------------------------
+router.options("/drafts/:id", createJobDraftCors);
+
+router.get(
+  "/drafts/:id",
+  createJobDraftCors,
+  createJobDraftSecurityHeaders,
+  (req: Request, res: Response) => {
+    const id = req.params.id as string;
+    try {
+      const draftRecord = getJobDraftById(id);
+      if (!draftRecord) {
+        sendError(res, 404, "Draft not found");
+        return;
+      }
+      sendSuccess(res, draftRecord.payload);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      logger.error("Failed to fetch job draft", { id, error: message });
       sendError(res, 500, "Internal server error");
     }
   },

@@ -23,6 +23,8 @@ const { default: router } = await import("../src/routes/jobs.js");
 const { resetCreateJobDraftRateLimitBuckets } = await import(
   "../src/middleware/job-contract-rate-limit.js"
 );
+const { setDb, runMigrations } = await import("../src/indexer/db.js");
+import Database from "better-sqlite3";
 
 function buildApp() {
   const app = express();
@@ -30,6 +32,18 @@ function buildApp() {
   app.use("/api/jobs", router);
   return app;
 }
+
+let db: Database.Database;
+
+beforeAll(() => {
+  db = new Database(":memory:");
+  setDb(db);
+  runMigrations();
+});
+
+afterAll(() => {
+  db.close();
+});
 
 describe("POST /api/jobs/create-job-draft – schema validation", () => {
   beforeEach(() => {
@@ -301,5 +315,39 @@ describe("POST /api/jobs/create-job-draft – CORS and security headers", () => 
       .expect(403);
 
     expect(res.body.error).toBe("Origin not allowed by CORS policy");
+  });
+
+  describe("Job Draft Persistence (#667)", () => {
+    it("persists a job draft on POST and allows retrieval via GET /drafts/:id", async () => {
+      const app = buildApp();
+      const postRes = await request(app)
+        .post("/api/jobs/create-job-draft")
+        .send(VALID_BODY)
+        .expect(200);
+
+      expect(postRes.body.success).toBe(true);
+      const draftId = postRes.body.data.id;
+      expect(typeof draftId).toBe("string");
+
+      const getRes = await request(app)
+        .get(`/api/jobs/drafts/${draftId}`)
+        .expect(200);
+
+      expect(getRes.body.success).toBe(true);
+      expect(getRes.body.data.id).toBe(draftId);
+      expect(getRes.body.data.client).toBe(VALID_CLIENT);
+      expect(getRes.body.data.freelancer).toBe(VALID_FREELANCER);
+      expect(getRes.body.data.milestones).toEqual(VALID_BODY.milestones);
+    });
+
+    it("returns 404 for an unknown draft ID", async () => {
+      const app = buildApp();
+      const res = await request(app)
+        .get("/api/jobs/drafts/00000000-0000-0000-0000-000000000000")
+        .expect(404);
+
+      expect(res.body.success).toBe(false);
+      expect(res.body.error).toBe("Draft not found");
+    });
   });
 });

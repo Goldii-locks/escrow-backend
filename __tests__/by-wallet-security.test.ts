@@ -10,6 +10,8 @@ jest.unstable_mockModule("../src/indexer/db.js", () => ({
     pagination: { page: 1, limit: 10, totalPages: 0, totalItems: 0 },
   }),
   getEventsByContract: jest.fn(),
+  saveJobDraft: jest.fn(),
+  getJobDraftById: jest.fn(),
 }));
 
 const { default: router } = await import("../src/routes/jobs.js");
