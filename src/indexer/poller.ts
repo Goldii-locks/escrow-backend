@@ -15,7 +15,12 @@ import {
   assertSchemaValid,
   type EventRow,
 } from "./db.js";
-import { RpcPollerClient } from "./rpc-poller-client.js";
+import { RpcPollerClient, type RpcPollerClientOptions } from "./rpc-poller-client.js";
+import {
+  createFailoverServer,
+  recordNodeFailure,
+  recordNodeSuccess,
+} from "./failover-recovery.js";
 import {
   IndexerRunnerFailureMonitor,
   adjustIndexerRunnerPollInterval,
@@ -39,7 +44,7 @@ const RPC_URL =
 // reports failure, blowing past Jest's default timeout.
 const IS_TEST_ENV = process.env.NODE_ENV === "test";
 
-const rpcClient = new RpcPollerClient(RPC_URL, {
+const rpcClientOptions: RpcPollerClientOptions = {
   maxRetries: parseInt(process.env.INDEXER_RPC_MAX_RETRIES || "5", 10),
   initialBackoffMs: parseInt(
     process.env.INDEXER_RPC_INITIAL_BACKOFF_MS || (IS_TEST_ENV ? "1" : "1000"),
@@ -53,7 +58,63 @@ const rpcClient = new RpcPollerClient(RPC_URL, {
     process.env.INDEXER_RPC_MAX_BACKOFF_MS || (IS_TEST_ENV ? "5" : "30000"),
     10,
   ),
-});
+};
+
+// ---------------------------------------------------------------------------
+// RPC node failover (#531)
+// ---------------------------------------------------------------------------
+// SOROBAN_RPC_URLS lists the candidate nodes (comma-separated) and defaults to
+// [SOROBAN_RPC_URL]. With a single node the poller behaves exactly as before
+// and never touches the failover tables. With several, poll outcomes feed the
+// node health record and an unhealthy active node triggers re-selection.
+// Retrying a single node stays with RpcPollerClient (#249).
+const RPC_URLS = (process.env.SOROBAN_RPC_URLS || "")
+  .split(",")
+  .map((url) => url.trim())
+  .filter(Boolean);
+if (RPC_URLS.length === 0) RPC_URLS.push(RPC_URL);
+const FAILOVER_ENABLED = RPC_URLS.length > 1;
+
+let activeNodeUrl = RPC_URLS[0];
+let rpcClient = new RpcPollerClient(activeNodeUrl, rpcClientOptions);
+let failoverNodeSelected = false;
+
+/** Pick the healthiest configured node and rebuild the client against it. */
+async function selectRpcNode(): Promise<void> {
+  const selected = await createFailoverServer(RPC_URLS, (url) => new Server(url));
+  failoverNodeSelected = true;
+  if (!selected) return;
+  if (selected.nodeUrl !== activeNodeUrl) {
+    logger.warn("Switching indexer RPC node", {
+      from: activeNodeUrl,
+      to: selected.nodeUrl,
+    });
+  }
+  activeNodeUrl = selected.nodeUrl;
+  rpcClient = new RpcPollerClient(activeNodeUrl, {
+    ...rpcClientOptions,
+    server: selected.server,
+  });
+}
+
+async function recordActiveNodeSuccess(): Promise<void> {
+  if (FAILOVER_ENABLED) await recordNodeSuccess(activeNodeUrl);
+}
+
+async function recordActiveNodeFailure(err: unknown): Promise<void> {
+  if (!FAILOVER_ENABLED) return;
+  try {
+    const health = await recordNodeFailure(activeNodeUrl, formatError(err));
+    if (health && !health.isHealthy) await selectRpcNode();
+  } catch (failoverErr) {
+    logger.error("RPC node failover failed", { error: formatError(failoverErr) });
+  }
+}
+
+/** Active RPC node URL the indexer is polling. */
+export function getActiveRpcNodeUrl(): string {
+  return activeNodeUrl;
+}
 
 // ---------------------------------------------------------------------------
 // Failure and stall tracking for the poll loop (#253, #271)
@@ -468,6 +529,8 @@ export async function pollEvents(): Promise<boolean> {
     // schema must not silently pass through the topic filter (#282).
     verifySchemaUpToDate();
 
+    if (FAILOVER_ENABLED && !failoverNodeSelected) await selectRpcNode();
+
     // --- Dynamic historical sync ranges (#254) ---
     // With LEDGER_RANGE_START/END set the poller imports that inclusive window
     // instead of following the chain head, and leaves the live ledger pointer
@@ -480,6 +543,7 @@ export async function pollEvents(): Promise<boolean> {
 
       const imported = await fetchHistoricalEvents(rangeStart, rangeEnd);
       failureMonitor.recordSuccess();
+      await recordActiveNodeSuccess();
 
       logger.info("Historical range import cycle complete", {
         startLedger: rangeStart,
@@ -556,6 +620,7 @@ export async function pollEvents(): Promise<boolean> {
     // Record success for any poll that completes without throwing, even idle cycles.
     const totalElapsed = performance.now() - pollStart;
     failureMonitor.recordSuccess();
+    await recordActiveNodeSuccess();
 
     // --- Dynamic poller throttling (#265) ---
     const throttleState = adjustPollerInterval(totalEvents);
@@ -611,6 +676,8 @@ export async function pollEvents(): Promise<boolean> {
         lastSuccessAt: failureMonitor.getLastSuccessfulAt(),
       });
     }
+
+    await recordActiveNodeFailure(err);
 
     // A failed poll advanced nothing, so report no progress to the throttler.
     return false;

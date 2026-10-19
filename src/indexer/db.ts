@@ -284,6 +284,43 @@ const MIGRATIONS: Migration[] = [
       ALTER TABLE monitored_contracts ADD COLUMN start_ledger INTEGER NOT NULL DEFAULT 0;
     `,
   },
+  {
+    version: 12,
+    description: "RPC node failover tables (#531)",
+    // Mirrors initializeNodeHealthTables() in failover-recovery.ts.
+    up: `
+      CREATE TABLE IF NOT EXISTS rpc_node_health (
+        node_url TEXT PRIMARY KEY,
+        is_healthy INTEGER NOT NULL DEFAULT 1,
+        failure_count INTEGER NOT NULL DEFAULT 0,
+        last_failure_at INTEGER,
+        last_success_at INTEGER,
+        next_retry_at INTEGER,
+        backoff_duration_ms INTEGER NOT NULL DEFAULT 1000,
+        consecutive_successes INTEGER NOT NULL DEFAULT 0
+      );
+
+      CREATE TABLE IF NOT EXISTS failover_state (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        active_node_url TEXT,
+        total_failovers INTEGER NOT NULL DEFAULT 0,
+        last_failover_at INTEGER
+      );
+
+      CREATE TABLE IF NOT EXISTS node_failure_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        node_url TEXT NOT NULL,
+        error_message TEXT,
+        retry_count INTEGER NOT NULL DEFAULT 0,
+        recovery_attempt_at INTEGER,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (node_url) REFERENCES rpc_node_health(node_url)
+      );
+
+      INSERT OR IGNORE INTO failover_state (id, active_node_url, total_failovers, last_failover_at)
+        VALUES (1, NULL, 0, NULL);
+    `,
+  },
 ];
 
 /** Index names created by the SQLite schema manager lookup-index migration (#259). */
