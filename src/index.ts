@@ -1,6 +1,5 @@
 import express from "express";
 import type { Request, Response, NextFunction } from "express";
-import cors from "cors";
 import helmet from "helmet";
 import dotenv from "dotenv";
 import jobRoutes, { assertRpcNetworkMatches } from "./routes/jobs.js";
@@ -8,6 +7,7 @@ import adminRoutes from "./routes/admin.js";
 import webhookRoutes from "./routes/webhooks.js";
 import { runMigrations } from "./indexer/db.js";
 import { generalLimiter } from "./middleware/rateLimiter.js";
+import { globalCors } from "./middleware/global-cors.js";
 import { legacyApiDeprecation } from "./middleware/api-version.js";
 import { startPoller } from "./indexer/poller.js";
 import { startReconciliationJob } from "./indexer/reconciliation.js";
@@ -51,7 +51,7 @@ const PORT = process.env.PORT || 3001;
 // #600: key req.ip (and so every rate limiter) on the real client behind nginx.
 app.set("trust proxy", resolveTrustProxy());
 
-app.use(cors());
+app.use(globalCors());
 app.use(helmet());
 app.use(express.json());
 
