@@ -4,6 +4,25 @@ The indexer POSTs a JSON payload to each registered `webhook_url` whenever a
 matching on-chain event is ingested. Deliveries are retried up to 3 times
 with backoff (`500ms`, `1500ms`, `4500ms`).
 
+## URL requirements
+
+`webhook_url` is validated when the subscription is created and again before
+every delivery attempt, so the backend is never turned into a probe into its
+own network:
+
+- `https` is required in production. Plain `http` is accepted outside
+  production so a local receiver can be used during development.
+- URLs carrying credentials (`https://user:pass@host/...`) are rejected.
+- `localhost` (and `*.localhost`) is rejected.
+- IP literals in private (RFC 1918), carrier-grade NAT (`100.64.0.0/10`),
+  loopback, link-local (including the cloud metadata address
+  `169.254.169.254`), unique-local IPv6 and reserved ranges are rejected.
+- At delivery time the hostname is resolved again and the attempt is refused
+  when any resolved address falls into those ranges, because a public name
+  can be re-pointed at an internal address after the subscription exists.
+- Redirects are never followed. A `3xx` response is treated as a failed
+  attempt and retried like any other delivery failure.
+
 ## Envelope
 
 Every delivery uses the same envelope. `version` is an integer that is
