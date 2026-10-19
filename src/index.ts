@@ -13,6 +13,7 @@ import { startPoller } from "./indexer/poller.js";
 import { startReconciliationJob } from "./indexer/reconciliation.js";
 import { markIndexerStarted } from "./indexer/status.js";
 import logger from "./utils/logger.js";
+import { resolveTrustProxy } from "./utils/trust-proxy.js";
 
 dotenv.config();
 
@@ -46,6 +47,9 @@ if (process.env.NODE_ENV === "production") {
 // Initialize Express backend for Milesto Escrow Platform
 const app = express();
 const PORT = process.env.PORT || 3001;
+
+// #600: key req.ip (and so every rate limiter) on the real client behind nginx.
+app.set("trust proxy", resolveTrustProxy());
 
 app.use(cors());
 app.use(helmet());

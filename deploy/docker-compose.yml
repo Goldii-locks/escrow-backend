@@ -9,6 +9,9 @@ services:
     restart: unless-stopped
     env_file:
       - ./backend.env           # chmod 600 — see DECISIONS.md for required keys
+    # Requests reach the backend through exactly one proxy (the frontend
+    # nginx), which is what TRUST_PROXY_HOPS defaults to in production. Set
+    # TRUST_PROXY_HOPS in backend.env if another proxy/LB is put in front.
     expose:
       - "3001"                  # internal only, never published to the host
     volumes:
