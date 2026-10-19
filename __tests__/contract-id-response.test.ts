@@ -3,6 +3,7 @@ import request from "supertest";
 import express from "express";
 import { autoAuth, TEST_API_KEY } from "./helpers/api-key-helper.js";
 import logger from "../src/utils/logger.js";
+import { jobScVal, CLIENT, FREELANCER, ARBITER, TOKEN } from "./helpers/scval-fixtures.js";
 
 const VALID_CONTRACT =
   "CDD5WKK3WT3QVKXMXTJNDIXE4T73FK6GGXDSD6UTJAH6YYZU52SQ4MUH";
@@ -141,20 +142,7 @@ describe("GET /api/jobs/:contractId – response format and status codes", () =>
   });
 
   it("returns 200 with a standardized success envelope for a valid job", async () => {
-    const milestones = {
-      map: (fn: (m: unknown, i: number) => unknown) =>
-        [{ amount: () => ({ toString: () => "100" }), status: () => ({ funded: true }) }].map(
-          fn
-        ),
-    };
-    const retval = {
-      client: () => ({ toString: () => "GCLIENT" }),
-      freelancer: () => ({ toString: () => "GFREELANCER" }),
-      arbiter: () => ({ toString: () => "GARBITER" }),
-      token: () => ({ toString: () => "GTOKEN" }),
-      funded: () => true,
-      milestones: () => milestones,
-    };
+    const retval = jobScVal();
 
     mockSimulateTransaction.mockResolvedValue({
       result: { retval },
@@ -167,10 +155,10 @@ describe("GET /api/jobs/:contractId – response format and status codes", () =>
     expect(res.body.success).toBe(true);
     expect(res.body.data).toMatchObject({
       id: VALID_CONTRACT,
-      client: "GCLIENT",
-      freelancer: "GFREELANCER",
-      arbiter: "GARBITER",
-      token: "GTOKEN",
+      client: CLIENT,
+      freelancer: FREELANCER,
+      arbiter: ARBITER,
+      token: TOKEN,
       funded: true,
     });
     expect(Array.isArray(res.body.data.milestones)).toBe(true);
@@ -257,20 +245,9 @@ describe("GET /api/jobs/:contractId – logging traces", () => {
   });
 
   it("logs 'Job fetched successfully' on success with job data", async () => {
-    const milestones = {
-      map: (fn: (m: unknown, i: number) => unknown) =>
-        [{ amount: () => ({ toString: () => "100" }), status: () => ({ funded: true }) }].map(fn),
-    };
     mockSimulateTransaction.mockResolvedValue({
       result: {
-        retval: {
-          client: () => ({ toString: () => "GCLIENT" }),
-          freelancer: () => ({ toString: () => "GFREELANCER" }),
-          arbiter: () => ({ toString: () => "GARBITER" }),
-          token: () => ({ toString: () => "GTOKEN" }),
-          funded: () => true,
-          milestones: () => milestones,
-        },
+        retval: jobScVal(),
       },
     });
 
@@ -278,10 +255,10 @@ describe("GET /api/jobs/:contractId – logging traces", () => {
 
     expect(infoSpy).toHaveBeenCalledWith("Job fetched successfully", {
       contractId: VALID_CONTRACT,
-      client: "GCLIENT",
-      freelancer: "GFREELANCER",
-      arbiter: "GARBITER",
-      token: "GTOKEN",
+      client: CLIENT,
+      freelancer: FREELANCER,
+      arbiter: ARBITER,
+      token: TOKEN,
       funded: true,
       milestoneCount: 1,
     });
