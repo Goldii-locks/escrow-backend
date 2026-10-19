@@ -13,7 +13,7 @@
 import { writeFile } from "node:fs/promises";
 import { escapeCSVField } from "./csv-serializer.js";
 import { digitCount, MAX_SAFE_DIGITS, parseIntegerInput,
-  isAmountWithinRange,
+  isAmountWithinRange, MAX_AMOUNT, MIN_AMOUNT,
 } from "./digit-limit-validator.js";
 import { divideHalfEven } from "./financial_report_math.js";
 
@@ -798,6 +798,7 @@ export const ERROR_CODES = {
   EMPTY_DATA: "FINANCIAL_REPORT_EMPTY_DATA",
   SERIALIZATION_ERROR: "FINANCIAL_REPORT_SERIALIZATION_ERROR",
   SUM_MISMATCH: "FINANCIAL_REPORT_SUM_MISMATCH",
+  AMOUNT_OVERFLOW: "FINANCIAL_REPORT_AMOUNT_OVERFLOW",
 } as const;
 
 export type FinancialReportWarningCode =
@@ -871,6 +872,16 @@ export const FINANCIAL_REPORT_ERROR_DEFINITIONS: ErrorDefinition[] = [
       { name: "field", type: "string", required: true },
       { name: "value", type: "string", required: true },
     ],
+  },
+  {
+    code: ERROR_CODES.AMOUNT_OVERFLOW,
+    message: "Transaction amount exceeds the i128 numeric limits",
+    parameters: [
+      { name: "field", type: "string", required: true },
+      { name: "value", type: "string", required: true },
+      { name: "limit", type: "string", required: true },
+    ],
+    ordered: true,
   },
   {
     code: ERROR_CODES.INVALID_ROW,
@@ -1261,13 +1272,66 @@ export function reportCalculationException(
   };
 }
 
+/** Decimal digits in the largest i128 magnitude (2^127 ≈ 1.7e38). */
+export const MAX_TRANSACTION_LOG_AMOUNT_DIGITS = 39;
+
+/**
+ * Build an overflow failure for an amount (or running total) that falls
+ * outside the i128 range the escrow contract can represent.
+ */
+export function reportAmountOverflow(
+  field: string,
+  value: string,
+  reason: string
+): ParameterValidationFailure {
+  const limit = `${MIN_AMOUNT}..${MAX_AMOUNT}`;
+  const parameters = { field, value, limit };
+  return {
+    ok: false,
+    error: `${field} ${reason}`,
+    code: ERROR_CODES.AMOUNT_OVERFLOW,
+    details: {
+      expectedDefinition: FINANCIAL_REPORT_ERROR_DEFINITIONS.find(
+        (d) => d.code === ERROR_CODES.AMOUNT_OVERFLOW
+      ),
+      providedParams: parameters,
+      reason,
+    },
+  };
+}
+
+function checkAmountLimits(
+  value: bigint,
+  label: string
+): ParameterValidationFailure | null {
+  if (!isAmountWithinRange(value)) {
+    return reportAmountOverflow(
+      label,
+      value.toString(),
+      "exceeds the i128 amount range"
+    );
+  }
+  return null;
+}
+
 function parseAmount(value: unknown, label: string): ParameterValidationResult & { value?: bigint } {
   if (typeof value === "bigint") {
+    const overflow = checkAmountLimits(value, label);
+    if (overflow) return overflow;
     return { ok: true, validatedParams: { [label]: value }, value };
   }
   if (typeof value === "number") {
     if (!Number.isFinite(value) || !Number.isInteger(value)) {
       return reportCalculationException("parseAmount", `${label} must be a finite integer`);
+    }
+    // Beyond 2^53 the number has already lost precision; large amounts
+    // must arrive as strings or bigints.
+    if (!Number.isSafeInteger(value)) {
+      return reportAmountOverflow(
+        label,
+        String(value),
+        "exceeds Number.MAX_SAFE_INTEGER; pass large amounts as a string or bigint"
+      );
     }
     return { ok: true, validatedParams: { [label]: value }, value: BigInt(value) };
   }
@@ -1279,7 +1343,18 @@ function parseAmount(value: unknown, label: string): ParameterValidationResult &
         `${label} must be an integer numeric value`
       );
     }
-    return { ok: true, validatedParams: { [label]: trimmed }, value: BigInt(trimmed) };
+    // Reject oversized digit strings before converting them to bigint.
+    if (digitCount(trimmed) > MAX_TRANSACTION_LOG_AMOUNT_DIGITS) {
+      return reportAmountOverflow(
+        label,
+        trimmed,
+        `exceeds maximum of ${MAX_TRANSACTION_LOG_AMOUNT_DIGITS} digits`
+      );
+    }
+    const parsed = BigInt(trimmed);
+    const overflow = checkAmountLimits(parsed, label);
+    if (overflow) return overflow;
+    return { ok: true, validatedParams: { [label]: trimmed }, value: parsed };
   }
   return reportCalculationException(
     "parseAmount",
@@ -1414,6 +1489,17 @@ export function exportTransactionLogs(
     }
 
     total += parsed.value;
+    if (!isAmountWithinRange(total)) {
+      const overflow = reportAmountOverflow(
+        "total",
+        total.toString(),
+        `overflowed the i128 amount range at row ${i}`
+      );
+      return {
+        ...overflow,
+        details: { ...overflow.details, context: { rowIndex: i } },
+      };
+    }
     lines.push(
       [
         escapeCsvCell(row.transactionId),
