@@ -914,6 +914,26 @@ export function deregisterContract(contractId: string): void {
   tx();
 }
 
+export interface MonitoredContractRecord {
+  id: number;
+  contract_id: string;
+  label: string | null;
+  active: number;
+  registered_at: string;
+  last_ledger_sequence: number;
+  start_ledger: number;
+}
+
+/**
+ * Returns all monitored contracts with active status and registration time.
+ */
+export function getAllContracts(): MonitoredContractRecord[] {
+  const db = getDb();
+  return db
+    .prepare("SELECT * FROM monitored_contracts ORDER BY id ASC")
+    .all() as MonitoredContractRecord[];
+}
+
 /**
  * Returns the contract_ids currently marked active for polling.
  */
