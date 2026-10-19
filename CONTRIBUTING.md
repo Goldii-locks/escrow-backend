@@ -23,6 +23,24 @@ Before changing runtime behavior, review:
 - [Architecture overview](./docs/ARCHITECTURE.md)
 - [CSV serialization guide](./docs/CSV_SERIALIZATION_GUIDE.md)
 
+## Testing & Coverage
+
+Run tests locally:
+```bash
+npm test
+```
+
+To run with coverage checking:
+```bash
+npm test -- --coverage
+```
+
+The CI suite enforces global test coverage thresholds in `jest.config.js`:
+- **Lines**: 85%
+- **Branches**: 75%
+
+Pull requests that cause global coverage to drop below these thresholds will fail the CI build.
+
 ## Code Style
 
 Follow the project's existing code style and use ESLint to check:
