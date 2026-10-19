@@ -10,6 +10,7 @@ import webhookRoutes from "./routes/webhooks.js";
 import { runMigrations } from "./indexer/db.js";
 import { generalLimiter } from "./middleware/rateLimiter.js";
 import { globalCors } from "./middleware/global-cors.js";
+import { globalErrorHandler } from "./middleware/error-handler.js";
 import { legacyApiDeprecation } from "./middleware/api-version.js";
 import { startPoller } from "./indexer/poller.js";
 import { startReconciliationJob } from "./indexer/reconciliation.js";
@@ -84,11 +85,7 @@ app.use("/api/admin", adminRoutes);
 app.use("/api/webhooks", webhookRoutes);
 
 // Global error handler – prevents stack trace leakage
-app.use((err: unknown, req: Request, res: Response, _next: NextFunction) => {
-  const message = err instanceof Error ? err.message : String(err);
-  logger.error("Unhandled error", { error: message, path: req.path });
-  res.status(500).json({ success: false, error: "Internal server error" });
-});
+app.use(globalErrorHandler);
 
 // Run DB migrations then start the indexer poller
 runMigrations();
