@@ -21,6 +21,7 @@ import {
   adjustIndexerRunnerPollInterval,
 } from "./indexer_runner.js";
 import { deliverWebhooks } from "./webhook-delivery.js";
+import { invalidateJobStateForEvents } from "./job-state-cache.js";
 import { fetchEventsWithRetry } from "./event_type_filter.js";
 import { formatError } from "../utils/format-error.js";
 import logger from "../utils/logger.js";
@@ -349,6 +350,7 @@ export async function fetchHistoricalEvents(
     if (batch.length > 0) {
       const result = insertHistoricalEventBatch(batch, { startLedger, endLedger });
       eventsImported += result.inserted;
+      if (result.inserted > 0) invalidateJobStateForEvents(batch);
     }
 
     cursor = page?.cursor;
@@ -394,12 +396,54 @@ export function enqueueEventInsert(
 ): Promise<void> {
   const run = eventInsertTail.then(() => {
     insertEventBatch(events, newLedger);
+    // New events can change on-chain job state: drop cached state for every
+    // contract in the batch as soon as it is stored (#679).
+    invalidateJobStateForEvents(events);
   });
   // Keep the queue alive even if an insert rejects so later enqueues proceed.
   eventInsertTail = run.then(
     () => undefined,
     () => undefined,
   );
+  return run;
+}
+
+// ---------------------------------------------------------------------------
+// Ordered webhook delivery queue (#682)
+// ---------------------------------------------------------------------------
+// Deliveries used to be fired and forgotten per poll. A slow delivery for
+// ledgers N..M could still be running when the next poll delivered M+1..K, so
+// subscribers saw later events first. All delivery runs now chain onto one
+// promise tail, so a range is fully delivered before the next one starts.
+let webhookDeliveryTail: Promise<void> = Promise.resolve();
+
+/** Reset the webhook delivery queue (used by tests). */
+export function resetWebhookDeliveryQueueForTests(): void {
+  webhookDeliveryTail = Promise.resolve();
+}
+
+/**
+ * Queue delivery of `[startLedger, endLedger]` behind every earlier range.
+ * A failed run is logged and does not stall later ranges. The returned
+ * promise settles when this range's delivery has finished; it never rejects.
+ */
+export function enqueueWebhookDelivery(
+  startLedger: number,
+  endLedger: number,
+): Promise<void> {
+  const run = webhookDeliveryTail
+    .then(() => deliverWebhooks(startLedger, endLedger))
+    .then(
+      () => undefined,
+      (err) => {
+        logger.error("Error delivering webhooks", {
+          error: formatError(err),
+          startLedger,
+          endLedger,
+        });
+      },
+    );
+  webhookDeliveryTail = run;
   return run;
 }
 
@@ -575,11 +619,9 @@ export async function pollEvents(): Promise<boolean> {
         stallWindow,
       );
 
-      deliverWebhooks(minStartLedger, currentLedger).catch((err) =>
-        logger.error("Error delivering webhooks", {
-          error: formatError(err),
-        })
-      );
+      // Not awaited: polling keeps its cadence, but deliveries stay in ledger
+      // order behind any slower earlier range (#682).
+      void enqueueWebhookDelivery(minStartLedger, currentLedger);
     }
 
     if (!anyGroupPolled) {

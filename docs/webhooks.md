@@ -4,6 +4,10 @@ The indexer POSTs a JSON payload to each registered `webhook_url` whenever a
 matching on-chain event is ingested. Deliveries are retried up to 3 times
 with backoff (`500ms`, `1500ms`, `4500ms`).
 
+Deliveries are ordered by ledger: each poll's ledger range is queued behind
+the previous one, so every event from an earlier range (including its
+retries) is sent before any event from a later range (#682).
+
 ## Envelope
 
 Every delivery uses the same envelope. `version` is an integer that is

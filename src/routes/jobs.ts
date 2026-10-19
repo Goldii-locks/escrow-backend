@@ -4,7 +4,6 @@ import {
   Contract,
   Networks,
   TransactionBuilder,
-  BASE_FEE,
   nativeToScVal,
   scValToNative,
   Address,
@@ -75,6 +74,9 @@ import { strictLimiter, walletLookupLimiter } from "../middleware/rateLimiter.js
 import logger from "../utils/logger.js";
 import { isValidStellarContractId } from "../utils/stellar.js";
 import { randomUUID } from "crypto";
+import { rejectedRequestLogMeta, xdrLogMeta } from "../utils/log-redaction.js";
+import { getInclusionFee } from "../utils/fee-helper.js";
+import { getCachedJobState } from "../indexer/job-state-cache.js";
 
 const router = Router();
 const CONTRACT_ID = process.env.CONTRACT_ID || "";
@@ -598,7 +600,7 @@ async function handleReadOnlyQuery(req: Request, res: Response): Promise<void> {
     const contract = new Contract(contractId);
     const account = await server.getAccount(process.env.DEPLOYER_ADDRESS || "");
     const tx = new TransactionBuilder(account, {
-      fee: BASE_FEE,
+      fee: await getInclusionFee(server),
       networkPassphrase: NETWORK_PASSPHRASE,
     })
       .addOperation(contract.call(method))
@@ -721,7 +723,7 @@ router.get(
           process.env.DEPLOYER_ADDRESS || "",
         );
         const tx = new TransactionBuilder(account, {
-          fee: BASE_FEE,
+          fee: await getInclusionFee(server),
           networkPassphrase: NETWORK_PASSPHRASE,
         })
           .addOperation(
@@ -801,31 +803,36 @@ router.get(
     // zone=api_public_read rather than by a key the browser would have to ship.
 
     try {
-      const contract = new Contract(contractId);
-      const account = await server.getAccount(process.env.DEPLOYER_ADDRESS || "");
-      const tx = new TransactionBuilder(account, {
-        fee: BASE_FEE,
-        networkPassphrase: NETWORK_PASSPHRASE,
-      })
-        .addOperation(contract.call("get_job"))
-        .setTimeout(30)
-        .build();
+      // Cached for JOB_STATE_CACHE_TTL_S with concurrent misses sharing one
+      // simulation; the poller invalidates the entry when it indexes a new
+      // event for this contract (#679).
+      const { value: job, source } = await getCachedJobState(contractId, async () => {
+        const contract = new Contract(contractId);
+        const account = await server.getAccount(process.env.DEPLOYER_ADDRESS || "");
+        const tx = new TransactionBuilder(account, {
+          fee: await getInclusionFee(server),
+          networkPassphrase: NETWORK_PASSPHRASE,
+        })
+          .addOperation(contract.call("get_job"))
+          .setTimeout(30)
+          .build();
 
-      const result = await server.simulateTransaction(tx);
+        const result = await server.simulateTransaction(tx);
 
-      if ("error" in result) {
-        const { status } = classifySimError(String(result.error));
-        if (status === 404) {
-          logger.warn("Job not found", { contractId });
-          sendError(res, 404, "Job not found");
-          return;
+        if ("error" in result) {
+          const { status } = classifySimError(String(result.error));
+          if (status === 404) return null;
+          logger.error("Failed to fetch job", { contractId, error: String(result.error) });
+          throw new SimError(500, "Internal server error");
         }
-        logger.error("Failed to fetch job", { contractId, error: String(result.error) });
-        sendError(res, 500, "Internal server error");
-        return;
+
+        return parseJobFromResult(result, contractId);
+      });
+
+      if (source !== "rpc") {
+        logger.info("Job state served from cache", { contractId, source });
       }
 
-      const job = parseJobFromResult(result, contractId);
       if (!job) {
         logger.warn("Job not found", { contractId });
         sendError(res, 404, "Job not found");
@@ -843,7 +850,9 @@ router.get(
       });
       sendSuccess(res, job);
     } catch (err: any) {
-      logger.error("Failed to fetch job", { contractId, error: err?.message });
+      if (!(err instanceof SimError)) {
+        logger.error("Failed to fetch job", { contractId, error: err?.message });
+      }
       sendError(res, 500, "Internal server error");
     }
   },
@@ -896,7 +905,7 @@ router.get(
         const contract = new Contract(contractId as string);
         const account = await server.getAccount(process.env.DEPLOYER_ADDRESS || "");
         const tx = new TransactionBuilder(account, {
-          fee: BASE_FEE,
+          fee: await getInclusionFee(server),
           networkPassphrase: NETWORK_PASSPHRASE,
         })
           .addOperation(contract.call("get_whitelisted_tokens"))
@@ -996,8 +1005,8 @@ router.post(
   validate(contractIdParamsSchema, "params", (req) =>
     logger.warn("Invalid contractId provided for whitelist update", { contractId: req.params.contractId }),
   ),
-  validate(whitelistUpdateRequestSchema, "body", (req) =>
-    logger.warn("Invalid body provided for whitelist update", { body: req.body }),
+  validate(whitelistUpdateRequestSchema, "body", (req, error) =>
+    logger.warn("Invalid body provided for whitelist update", rejectedRequestLogMeta(req, error)),
   ),
   async (req: Request, res: Response) => {
     const contractId = req.params.contractId as string;
@@ -1033,7 +1042,7 @@ router.post(
             : "add_whitelisted_token";
 
         const tx = new TransactionBuilder(account, {
-          fee: BASE_FEE,
+          fee: await getInclusionFee(server),
           networkPassphrase: NETWORK_PASSPHRASE,
         })
           .addOperation(
@@ -1075,7 +1084,7 @@ router.post(
       const contract = new Contract(contractId);
       const account = await server.getAccount(process.env.DEPLOYER_ADDRESS || "");
       const tx = new TransactionBuilder(account, {
-        fee: BASE_FEE,
+        fee: await getInclusionFee(server),
         networkPassphrase: NETWORK_PASSPHRASE,
       })
         .addOperation(contract.call("get_whitelisted_tokens"))
@@ -1135,8 +1144,8 @@ router.post(
   // buildTxRateLimit supersedes the generic strictLimiter for this route.
   buildTxRateLimit,
   // Schema validation for POST /api/jobs/build-tx payload
-  validateWithFields(buildTxBodySchema, "body", (req) =>
-    logger.warn("Invalid build-tx request body", { body: req.body }),
+  validateWithFields(buildTxBodySchema, "body", (req, error) =>
+    logger.warn("Invalid build-tx request body", rejectedRequestLogMeta(req, error)),
   ),
   async (req: Request, res: Response) => {
     const { contractId, method, args, sourceAddress } = req.body;
@@ -1235,11 +1244,12 @@ router.post(
             ...pathVars,
           });
 
+          const fee = await getInclusionFee(server);
           logger.debug("Building Stellar transaction for build-tx", {
             traceId,
             ...pathVars,
             method,
-            fee: BASE_FEE,
+            fee,
             timeout: 30,
           });
           const contract = new Contract(contractId as string);
@@ -1272,7 +1282,7 @@ router.post(
           });
 
           const tx = new TransactionBuilder(account, {
-            fee: BASE_FEE,
+            fee,
             networkPassphrase: NETWORK_PASSPHRASE,
           })
             .addOperation(contract.call(method, ...scArgs))
@@ -1404,8 +1414,8 @@ router.post(
   validateWithFields(contractMilestoneParamsSchema, "params", (req) =>
     logger.warn("Invalid params for partial-release", { params: req.params }),
   ),
-  validateWithFields(partialReleaseBodySchema, "body", (req) =>
-    logger.warn("Invalid body for partial-release", { body: req.body }),
+  validateWithFields(partialReleaseBodySchema, "body", (req, error) =>
+    logger.warn("Invalid body for partial-release", rejectedRequestLogMeta(req, error)),
   ),
   async (req: Request, res: Response) => {
     const traceId = randomUUID();
@@ -1482,7 +1492,7 @@ router.post(
           const amountNum = BigInt(amount);
 
           const tx = new TransactionBuilder(account, {
-            fee: BASE_FEE,
+            fee: await getInclusionFee(server),
             networkPassphrase: NETWORK_PASSPHRASE,
           })
             .addOperation(contract.call(
@@ -1600,7 +1610,7 @@ router.get(
           const contract = new Contract(contractId);
           const account = await server.getAccount(process.env.DEPLOYER_ADDRESS || "");
           const tx = new TransactionBuilder(account, {
-            fee: BASE_FEE,
+            fee: await getInclusionFee(server),
             networkPassphrase: NETWORK_PASSPHRASE,
           })
             .addOperation(
@@ -1678,8 +1688,8 @@ router.post(
   validate(contractMilestoneParamsSchema, "params", (req) =>
     logger.warn("Invalid params for claim-auto-release", { params: req.params }),
   ),
-  validate(claimAutoReleaseBodySchema, "body", (req) =>
-    logger.warn("Invalid body for claim-auto-release", { body: req.body }),
+  validate(claimAutoReleaseBodySchema, "body", (req, error) =>
+    logger.warn("Invalid body for claim-auto-release", rejectedRequestLogMeta(req, error)),
   ),
   async (req: Request, res: Response) => {
     const contractId = req.params.contractId as string;
@@ -1766,10 +1776,11 @@ router.post(
       });
 
       const requestPromise = (async (): Promise<string> => {
+        const fee = await getInclusionFee(server);
         logger.debug("Building Stellar transaction for claim auto-release", {
           traceId,
           ...pathVars,
-          fee: BASE_FEE,
+          fee,
           timeout: 30,
         });
         const contract = new Contract(contractId);
@@ -1778,7 +1789,7 @@ router.post(
         logger.debug("Stellar account fetched", { traceId, ...pathVars });
 
         const tx = new TransactionBuilder(account, {
-          fee: BASE_FEE,
+          fee,
           networkPassphrase: NETWORK_PASSPHRASE,
         })
           .addOperation(
@@ -1891,10 +1902,12 @@ router.post(
   submitCors,
   submitSecurityHeaders,
   submitRateLimit,
-  validate(submitBodySchema, "body", (req) =>
+  // A signed XDR is a replayable transaction: log its length and a hash
+  // prefix only, never the envelope or the rest of the body (#680).
+  validate(submitBodySchema, "body", (req, error) =>
     logger.warn("Invalid submit request body", {
-      body: req.body,
-      xdrLength: typeof req.body?.signedXdr === "string" ? req.body.signedXdr.length : undefined,
+      ...rejectedRequestLogMeta(req, error),
+      ...xdrLogMeta(req.body?.signedXdr),
     }),
   ),
   async (req: Request, res: Response) => {
@@ -1904,7 +1917,7 @@ router.post(
 
     logger.info("Submit transaction request received", {
       traceId,
-      xdrLength: signedXdr.length,
+      ...xdrLogMeta(signedXdr),
       ...(sourceAddress && { sourceAddress }),
     });
 
