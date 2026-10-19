@@ -2,7 +2,9 @@
 
 The indexer POSTs a JSON payload to each registered `webhook_url` whenever a
 matching on-chain event is ingested. Deliveries are retried up to 3 times
-with backoff (`500ms`, `1500ms`, `4500ms`).
+with backoff (`500ms`, `1500ms`, `4500ms`). Each attempt has a hard timeout
+(`WEBHOOK_TIMEOUT_MS`, default `5000`): a receiver that never answers fails
+the attempt, and delivery continues with the next subscriber.
 
 ## URL requirements
 
