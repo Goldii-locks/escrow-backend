@@ -2,8 +2,16 @@ import { jest } from "@jest/globals";
 import request from "supertest";
 import express from "express";
 import { autoAuth, TEST_API_KEY } from "./helpers/api-key-helper.js";
+import { testAddress, tokenVecScVal } from "./helpers/scval-fixtures.js";
 import { resetJobWhitelistRateLimitBuckets } from "../src/middleware/job-contract-rate-limit.js";
 
+const TOKEN1 = testAddress(11);
+const TOKEN2 = testAddress(12);
+const TOKENA = testAddress(13);
+const TOKEN_A = testAddress(17);
+const TOKEN_B = testAddress(18);
+const TOKEN_C = testAddress(19);
+const TOKEN_X = testAddress(20);
 const VALID_CONTRACT =
   "CDD5WKK3WT3QVKXMXTJNDIXE4T73FK6GGXDSD6UTJAH6YYZU52SQ4MUH";
 
@@ -176,7 +184,7 @@ describe("GET /api/jobs/:contractId/whitelist", () => {
     // is required whether or not one is configured (#693).
     it("returns 200 when API_KEY is configured and the header is missing", async () => {
       process.env.API_KEY = "secret-key";
-      mockSimulateTransaction.mockResolvedValue({ result: { retval: [] } });
+      mockSimulateTransaction.mockResolvedValue({ result: { retval: tokenVecScVal() } });
 
       const res = await request(buildApp())
         .get(`/api/jobs/${VALID_CONTRACT}/whitelist`)
@@ -188,7 +196,7 @@ describe("GET /api/jobs/:contractId/whitelist", () => {
 
     it("ignores a wrong x-api-key header instead of rejecting it", async () => {
       process.env.API_KEY = "secret-key";
-      mockSimulateTransaction.mockResolvedValue({ result: { retval: [] } });
+      mockSimulateTransaction.mockResolvedValue({ result: { retval: tokenVecScVal() } });
 
       const res = await request(buildApp())
         .get(`/api/jobs/${VALID_CONTRACT}/whitelist`)
@@ -200,7 +208,7 @@ describe("GET /api/jobs/:contractId/whitelist", () => {
 
     it("returns 200 when API_KEY is not set", async () => {
       delete process.env.API_KEY;
-      mockSimulateTransaction.mockResolvedValue({ result: { retval: [] } });
+      mockSimulateTransaction.mockResolvedValue({ result: { retval: tokenVecScVal() } });
 
       const res = await request(buildApp())
         .get(`/api/jobs/${VALID_CONTRACT}/whitelist`)
@@ -235,11 +243,7 @@ describe("GET /api/jobs/:contractId/whitelist", () => {
     });
 
     it("returns 200 with tokens list on success", async () => {
-      const vec = {
-        forEach: (fn: (item: unknown) => void) => {
-          ["TOKEN1", "TOKEN2"].forEach(fn);
-        },
-      };
+      const vec = tokenVecScVal(TOKEN1, TOKEN2);
       mockSimulateTransaction.mockResolvedValue({
         result: { retval: vec },
       });
@@ -250,7 +254,7 @@ describe("GET /api/jobs/:contractId/whitelist", () => {
 
       expect(res.body).toEqual({
         success: true,
-        data: { tokens: ["TOKEN1", "TOKEN2"] },
+        data: { tokens: [TOKEN1, TOKEN2] },
       });
     });
 
@@ -286,7 +290,7 @@ describe("GET /api/jobs/:contractId/whitelist", () => {
     it("allows trusted origins and sets CORS response headers", async () => {
       process.env.ALLOWED_ORIGINS = "https://trusted.example.com";
 
-      const vec = { forEach: () => {} };
+      const vec = tokenVecScVal();
       mockSimulateTransaction.mockResolvedValue({ result: { retval: vec } });
 
       const res = await request(buildApp())
@@ -301,7 +305,7 @@ describe("GET /api/jobs/:contractId/whitelist", () => {
     });
 
     it("applies security headers on whitelist response", async () => {
-      const vec = { forEach: () => {} };
+      const vec = tokenVecScVal();
       mockSimulateTransaction.mockResolvedValue({ result: { retval: vec } });
 
       const res = await request(buildApp())
@@ -319,7 +323,7 @@ describe("GET /api/jobs/:contractId/whitelist", () => {
   describe("Custom Rate Limiting (Issue #90)", () => {
     it("allows requests up to the configured threshold", async () => {
       process.env.JOB_WHITELIST_RATE_MAX = "2";
-      const vec = { forEach: () => {} };
+      const vec = tokenVecScVal();
       mockSimulateTransaction.mockResolvedValue({ result: { retval: vec } });
 
       const app = buildApp();
@@ -331,7 +335,7 @@ describe("GET /api/jobs/:contractId/whitelist", () => {
 
     it("returns 429 once the threshold is exceeded", async () => {
       process.env.JOB_WHITELIST_RATE_MAX = "2";
-      const vec = { forEach: () => {} };
+      const vec = tokenVecScVal();
       mockSimulateTransaction.mockResolvedValue({ result: { retval: vec } });
 
       const app = buildApp();
@@ -352,7 +356,7 @@ describe("GET /api/jobs/:contractId/whitelist", () => {
 
     it("decrements X-RateLimit-Remaining with each request", async () => {
       process.env.JOB_WHITELIST_RATE_MAX = "3";
-      const vec = { forEach: () => {} };
+      const vec = tokenVecScVal();
       mockSimulateTransaction.mockResolvedValue({ result: { retval: vec } });
 
       const app = buildApp();
@@ -366,7 +370,7 @@ describe("GET /api/jobs/:contractId/whitelist", () => {
     });
 
     it("sets X-RateLimit-Reset as a Unix timestamp in the future", async () => {
-      const vec = { forEach: () => {} };
+      const vec = tokenVecScVal();
       mockSimulateTransaction.mockResolvedValue({ result: { retval: vec } });
 
       const before = Math.floor(Date.now() / 1000);
@@ -586,7 +590,7 @@ describe("GET /api/jobs/:contractId/whitelist", () => {
     // ── Valid contractId passes Zod and reaches the route handler ─────────
 
     it("does NOT return 400 for a syntactically valid contractId", async () => {
-      const vec = { forEach: () => {} };
+      const vec = tokenVecScVal();
       mockSimulateTransaction.mockResolvedValue({ result: { retval: vec } });
 
       const res = await request(buildApp()).get(
@@ -609,23 +613,19 @@ describe("GET /api/jobs/:contractId/whitelist", () => {
   // --- ISSUE #50: Node-Cache in-memory caching ---
   describe("Node-Cache in-memory caching (Issue #50)", () => {
     it("returns tokens from RPC on first request", async () => {
-      const vec = {
-        forEach: (fn: (item: unknown) => void) => ["TOKENA"].forEach(fn),
-      };
+      const vec = tokenVecScVal(TOKENA);
       mockSimulateTransaction.mockResolvedValue({ result: { retval: vec } });
 
       const res = await request(buildApp())
         .get(`/api/jobs/${VALID_CONTRACT}/whitelist`)
         .expect(200);
 
-      expect(res.body.data.tokens).toEqual(["TOKENA"]);
+      expect(res.body.data.tokens).toEqual([TOKENA]);
       expect(mockSimulateTransaction).toHaveBeenCalledTimes(1);
     });
 
     it("serves subsequent requests from cache without calling RPC again", async () => {
-      const vec = {
-        forEach: (fn: (item: unknown) => void) => ["TOKENA"].forEach(fn),
-      };
+      const vec = tokenVecScVal(TOKENA);
       mockSimulateTransaction.mockResolvedValue({ result: { retval: vec } });
 
       const app = buildApp();
@@ -637,10 +637,7 @@ describe("GET /api/jobs/:contractId/whitelist", () => {
     });
 
     it("returns cached tokens correctly on cache hit", async () => {
-      const vec = {
-        forEach: (fn: (item: unknown) => void) =>
-          ["TOKEN1", "TOKEN2"].forEach(fn),
-      };
+      const vec = tokenVecScVal(TOKEN1, TOKEN2);
       mockSimulateTransaction.mockResolvedValue({ result: { retval: vec } });
 
       const app = buildApp();
@@ -649,13 +646,11 @@ describe("GET /api/jobs/:contractId/whitelist", () => {
         .get(`/api/jobs/${VALID_CONTRACT}/whitelist`)
         .expect(200);
 
-      expect(cached.body).toEqual({ success: true, data: { tokens: ["TOKEN1", "TOKEN2"] } });
+      expect(cached.body).toEqual({ success: true, data: { tokens: [TOKEN1, TOKEN2] } });
     });
 
     it("deduplicates concurrent whitelist requests with one RPC call", async () => {
-      const vec = {
-        forEach: (fn: (item: unknown) => void) => ["TOKEN1", "TOKEN2"].forEach(fn),
-      };
+      const vec = tokenVecScVal(TOKEN1, TOKEN2);
       mockSimulateTransaction.mockResolvedValue({ result: { retval: vec } });
 
       const app = buildApp();
@@ -666,8 +661,8 @@ describe("GET /api/jobs/:contractId/whitelist", () => {
 
       expect(requests[0].status).toBe(200);
       expect(requests[1].status).toBe(200);
-      expect(requests[0].body).toEqual({ success: true, data: { tokens: ["TOKEN1", "TOKEN2"] } });
-      expect(requests[1].body).toEqual({ success: true, data: { tokens: ["TOKEN1", "TOKEN2"] } });
+      expect(requests[0].body).toEqual({ success: true, data: { tokens: [TOKEN1, TOKEN2] } });
+      expect(requests[1].body).toEqual({ success: true, data: { tokens: [TOKEN1, TOKEN2] } });
       expect(mockSimulateTransaction).toHaveBeenCalledTimes(1);
     });
 
@@ -675,8 +670,8 @@ describe("GET /api/jobs/:contractId/whitelist", () => {
       const SECOND_CONTRACT =
         "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC";
 
-      const vec1 = { forEach: (fn: (item: unknown) => void) => ["A"].forEach(fn) };
-      const vec2 = { forEach: (fn: (item: unknown) => void) => ["B"].forEach(fn) };
+      const vec1 = tokenVecScVal(TOKEN_A);
+      const vec2 = tokenVecScVal(TOKEN_B);
       mockSimulateTransaction
         .mockResolvedValueOnce({ result: { retval: vec1 } })
         .mockResolvedValueOnce({ result: { retval: vec2 } });
@@ -685,8 +680,8 @@ describe("GET /api/jobs/:contractId/whitelist", () => {
       const r1 = await request(app).get(`/api/jobs/${VALID_CONTRACT}/whitelist`).expect(200);
       const r2 = await request(app).get(`/api/jobs/${SECOND_CONTRACT}/whitelist`).expect(200);
 
-      expect(r1.body.data.tokens).toEqual(["A"]);
-      expect(r2.body.data.tokens).toEqual(["B"]);
+      expect(r1.body.data.tokens).toEqual([TOKEN_A]);
+      expect(r2.body.data.tokens).toEqual([TOKEN_B]);
       expect(mockSimulateTransaction).toHaveBeenCalledTimes(2);
     });
 
@@ -707,7 +702,7 @@ describe("GET /api/jobs/:contractId/whitelist", () => {
   // --- ISSUE #48: Winston Logger Traces ---
   describe("Winston Logger Traces (Issue #48)", () => {
     it("logs info with contractId at the start of every request", async () => {
-      const vec = { forEach: () => {} };
+      const vec = tokenVecScVal();
       mockSimulateTransaction.mockResolvedValue({ result: { retval: vec } });
 
       await request(buildApp()).get(`/api/jobs/${VALID_CONTRACT}/whitelist`);
@@ -732,7 +727,7 @@ describe("GET /api/jobs/:contractId/whitelist", () => {
 
     it("does not log an unauthorized warning for key-less requests (#693)", async () => {
       process.env.API_KEY = "secret-key";
-      mockSimulateTransaction.mockResolvedValue({ result: { retval: [] } });
+      mockSimulateTransaction.mockResolvedValue({ result: { retval: tokenVecScVal() } });
 
       await request(buildApp())
         .get(`/api/jobs/${VALID_CONTRACT}/whitelist`)
@@ -782,11 +777,7 @@ describe("GET /api/jobs/:contractId/whitelist", () => {
     });
 
     it("logs info with contractId and correct tokenCount on successful fetch", async () => {
-      const vec = {
-        forEach: (fn: (item: unknown) => void) => {
-          ["TOKEN_A", "TOKEN_B", "TOKEN_C"].forEach(fn);
-        },
-      };
+      const vec = tokenVecScVal(TOKEN_A, TOKEN_B, TOKEN_C);
       mockSimulateTransaction.mockResolvedValue({ result: { retval: vec } });
 
       await request(buildApp())
@@ -826,9 +817,7 @@ describe("GET /api/jobs/:contractId/whitelist", () => {
     });
 
     it("log metadata is JSON-serializable and contains the required tracking fields", async () => {
-      const vec = {
-        forEach: (fn: (item: unknown) => void) => ["TOKEN_X"].forEach(fn),
-      };
+      const vec = tokenVecScVal(TOKEN_X);
       mockSimulateTransaction.mockResolvedValue({ result: { retval: vec } });
 
       await request(buildApp())

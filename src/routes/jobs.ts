@@ -939,11 +939,13 @@ router.get(
 
         // Parse successful result
         if ("result" in result && result.result?.retval) {
-          const tokens: string[] = [];
-          const vec = result.result.retval as any;
-          if (typeof vec.forEach === "function") {
-            vec.forEach((token: any) => tokens.push(token.toString()));
+          // retval is an xdr.ScVal (scvVec of Address); decode it (#598).
+          const decoded = scValToNative(result.result.retval);
+          if (!Array.isArray(decoded) || !decoded.every((t) => typeof t === "string")) {
+            logger.error("Failed to fetch whitelisted tokens: unexpected retval structure", { contractId });
+            throw new Error("unexpected retval shape");
           }
+          const tokens: string[] = decoded;
           whitelistCache.set(contractId, tokens);
           logger.info("Whitelisted tokens fetched successfully", { contractId, tokenCount: tokens.length });
           return tokens;

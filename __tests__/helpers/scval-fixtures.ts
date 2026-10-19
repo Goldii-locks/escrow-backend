@@ -30,3 +30,7 @@ export function jobScVal(
     ),
   });
 }
+
+/** Build a real get_whitelisted_tokens retval: an scvVec of Address ScVals. */
+export const tokenVecScVal = (...addresses: string[]): xdr.ScVal =>
+  xdr.ScVal.scvVec(addresses.map((a) => new Address(a).toScVal()));

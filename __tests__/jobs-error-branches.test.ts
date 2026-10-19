@@ -2,8 +2,9 @@ import { jest } from "@jest/globals";
 import request from "supertest";
 import express from "express";
 import Database from "better-sqlite3";
-import { Keypair, StrKey } from "@stellar/stellar-sdk";
+import { Keypair, StrKey, xdr } from "@stellar/stellar-sdk";
 import { autoAuth } from "./helpers/api-key-helper.js";
+import { tokenVecScVal } from "./helpers/scval-fixtures.js";
 
 /**
  * Error and cache branches of the whitelist, partial-release, time-remaining
@@ -94,7 +95,7 @@ describe("GET /:contractId/whitelist", () => {
     const second = request(app).get(`/api/jobs/${VALID_CONTRACT}/whitelist`).then((r) => r);
     // Let both requests reach the handler before the simulation settles.
     await new Promise((r) => setTimeout(r, 50));
-    release({ result: { retval: [TOKEN_CONTRACT] } });
+    release({ result: { retval: tokenVecScVal(TOKEN_CONTRACT) } });
 
     const [r1, r2] = await Promise.all([first, second]);
     expect(r1.body).toEqual({ success: true, data: { tokens: [TOKEN_CONTRACT] } });
@@ -102,12 +103,22 @@ describe("GET /:contractId/whitelist", () => {
     expect(mockSimulateTransaction).toHaveBeenCalledTimes(1);
   });
 
-  it("returns an empty list when the retval is not iterable", async () => {
-    mockSimulateTransaction.mockResolvedValue({ result: { retval: 5 } });
+  it("returns 500 for a malformed retval and does not cache it", async () => {
+    mockSimulateTransaction.mockResolvedValue({ result: { retval: xdr.ScVal.scvU32(5) } });
+    const res = await request(buildApp())
+      .get(`/api/jobs/${VALID_CONTRACT}/whitelist`)
+      .expect(500);
+    expect(res.body).toEqual({ success: false, error: "Internal server error" });
+    expect(whitelistCache.get(VALID_CONTRACT)).toBeUndefined();
+  });
+
+  it("still returns and caches [] for an uninitialized contract (contract error #2)", async () => {
+    mockSimulateTransaction.mockResolvedValue({ error: "HostError: contract error #2" });
     const res = await request(buildApp())
       .get(`/api/jobs/${VALID_CONTRACT}/whitelist`)
       .expect(200);
     expect(res.body).toEqual({ success: true, data: { tokens: [] } });
+    expect(whitelistCache.get(VALID_CONTRACT)).toEqual([]);
   });
 
   it("returns a clean 500 for a non-Error rejection and caches nothing", async () => {
