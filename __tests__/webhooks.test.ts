@@ -69,12 +69,31 @@ describe("Subscription management – unit", () => {
 
 describe("POST /api/webhooks/subscribe – HTTP", () => {
   let app: express.Express;
+  const ADMIN_KEY = "webhooks-test-admin-key";
+  const originalAdminKey = process.env.ADMIN_API_KEY;
 
   beforeAll(async () => {
     const { default: router } = await import("../src/routes/webhooks.js");
     app = express();
     app.use(express.json());
+    // #604: both mutation routes now require the admin credential. This
+    // suite's subject is validation, so attach the key centrally and let
+    // requests through the gate (the dedicated auth suite in
+    // webhook-subscribe-auth.test.ts asserts the 401 paths per request).
+    app.use((req, _res, next) => {
+      req.headers["x-api-key"] = ADMIN_KEY;
+      next();
+    });
     app.use("/api/webhooks", router);
+  });
+
+  beforeEach(() => {
+    process.env.ADMIN_API_KEY = ADMIN_KEY;
+  });
+
+  afterEach(() => {
+    if (originalAdminKey === undefined) delete process.env.ADMIN_API_KEY;
+    else process.env.ADMIN_API_KEY = originalAdminKey;
   });
 
   const VALID_BODY = {
@@ -133,16 +152,30 @@ describe("POST /api/webhooks/subscribe – HTTP", () => {
 
 describe("POST /api/webhooks/unsubscribe – HTTP", () => {
   let app: express.Express;
+  const ADMIN_KEY = "webhooks-test-admin-key";
+  const originalAdminKey = process.env.ADMIN_API_KEY;
 
   beforeAll(async () => {
     const { default: router } = await import("../src/routes/webhooks.js");
     app = express();
     app.use(express.json());
+    // #604: credential attached centrally; the 401 paths live in
+    // webhook-subscribe-auth.test.ts.
+    app.use((req, _res, next) => {
+      req.headers["x-api-key"] = ADMIN_KEY;
+      next();
+    });
     app.use("/api/webhooks", router);
   });
 
   beforeEach(() => {
+    process.env.ADMIN_API_KEY = ADMIN_KEY;
     testDb.exec("DELETE FROM webhook_subscriptions");
+  });
+
+  afterEach(() => {
+    if (originalAdminKey === undefined) delete process.env.ADMIN_API_KEY;
+    else process.env.ADMIN_API_KEY = originalAdminKey;
   });
 
   it("returns 200 on successful unsubscribe", async () => {
