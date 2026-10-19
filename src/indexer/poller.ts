@@ -424,6 +424,14 @@ export async function pollEvents(): Promise<boolean> {
   const pollStartedAt = performance.now();
 
   // --- Resolve active contract IDs from the DB (#85) ---
+  const factoryContractId = process.env.FACTORY_CONTRACT_ID;
+  if (factoryContractId) {
+    const active = getActiveContractIds();
+    if (!active.includes(factoryContractId)) {
+      registerContract(factoryContractId, "factory");
+    }
+  }
+
   let contractIds: string[] = getActiveContractIds();
 
   // Fall back to the legacy single CONTRACT_ID env var so existing deployments
@@ -540,6 +548,49 @@ export async function pollEvents(): Promise<boolean> {
         toEventRow(event, groupContractIds[0])
       );
 
+      // Check for factory 'created' events to register child contracts
+      for (const ev of batch) {
+        if (ev.eventType.toLowerCase() === "created") {
+          try {
+            const data = JSON.parse(ev.dataJson) as Record<string, unknown>;
+            const childContractId =
+              (typeof data.contract_id === "string" ? data.contract_id : null) ||
+              (typeof data.contractId === "string" ? data.contractId : null) ||
+              (typeof data.address === "string" ? data.address : null) ||
+              (typeof data.child === "string" ? data.child : null);
+
+            if (childContractId) {
+              logger.info("Factory created new escrow child contract", {
+                childContractId,
+                ledgerSequence: ev.ledgerSequence,
+              });
+              registerContract(childContractId, "escrow_child", ev.ledgerSequence);
+
+              // Poll child contract from creation ledger immediately if in same cycle
+              try {
+                const childEvents = await fetchEventsWithRetry(rpcClient.rpcServer, {
+                  startLedger: ev.ledgerSequence,
+                  contractIds: [childContractId],
+                  limit: 100,
+                });
+                const childBatch: EventRow[] = childEvents.events.map((childEv) =>
+                  toEventRow(childEv, childContractId)
+                );
+                batch.push(...childBatch);
+                updateContractPointer(childContractId, currentLedger);
+              } catch (childErr) {
+                logger.warn("Failed immediate poll for new child contract, will catch up next cycle", {
+                  childContractId,
+                  error: formatError(childErr),
+                });
+              }
+            }
+          } catch {
+            // Ignore parse errors on dataJson
+          }
+        }
+      }
+
       // Persist the batch and advance the ledger pointer atomically (#84).
       // Called even with an empty batch so the global pointer always advances.
       await enqueueEventInsert(batch, currentLedger);
@@ -549,7 +600,7 @@ export async function pollEvents(): Promise<boolean> {
         updateContractPointer(contractId, currentLedger);
       }
 
-      totalEvents += events.events.length;
+      totalEvents += batch.length;
       diagnosticsBatch.push(...batch);
     }
 
