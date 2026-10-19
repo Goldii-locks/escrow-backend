@@ -33,7 +33,18 @@ npm run dev
 
 - [Architecture overview](./docs/ARCHITECTURE.md) — live request/indexer paths and reachability table
 - [CSV serialization guide](./docs/CSV_SERIALIZATION_GUIDE.md)
-- [Webhook delivery](./docs/webhooks.md) — event types, payload shapes, retry policy
+- [Webhook delivery](./docs/webhooks.md) — event types, payload shapes, retry policy, idempotency
+
+### Webhook idempotency
+
+Webhooks are delivered at least once, so receivers must tolerate duplicates.
+Each POST body includes an `event_id`, and each request carries:
+
+- `X-Milesto-Event-Id`: stable per on-chain event (`<contract_id>:<ledger_sequence>:<event_type>`). **Dedupe on this.**
+- `X-Milesto-Delivery-Id`: UUID per logical delivery (event to subscriber), constant across its retries.
+- `X-Milesto-Delivery-Attempt`: `1`, `2` or `3`.
+
+See [docs/webhooks.md](./docs/webhooks.md#idempotency) for the full contract.
 
 ## API Endpoints
 

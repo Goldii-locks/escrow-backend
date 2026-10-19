@@ -860,6 +860,24 @@ export function setLastIndexedLedger(seq: number) {
   updateTransaction();
 }
 
+/** Read an arbitrary `indexer_state` value, or `undefined` if the key is unset. */
+export function getIndexerStateValue(key: string): string | undefined {
+  const row = getDb()
+    .prepare("SELECT value FROM indexer_state WHERE key = ?")
+    .get(key) as { value: string } | undefined;
+  return row?.value;
+}
+
+/** Insert or overwrite an arbitrary `indexer_state` value. */
+export function setIndexerStateValue(key: string, value: string): void {
+  getDb()
+    .prepare(
+      `INSERT INTO indexer_state (key, value) VALUES (?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`
+    )
+    .run(key, value);
+}
+
 // ---------------------------------------------------------------------------
 // Monitored contracts (#85)
 // ---------------------------------------------------------------------------

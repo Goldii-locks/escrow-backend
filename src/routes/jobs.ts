@@ -244,6 +244,76 @@ function partialReleaseCacheKey(
 }
 
 // ---------------------------------------------------------------------------
+// Unsigned XDR validity window + cache freshness (#677)
+// ---------------------------------------------------------------------------
+
+/**
+ * Time bound (seconds) on unsigned transactions handed to the frontend. The
+ * user still has to review and sign in their wallet, so 30s routinely
+ * produced txTOO_LATE. Clamped to 120–300s.
+ */
+export const UNSIGNED_TX_TIMEOUT_S = Math.min(
+  300,
+  Math.max(120, parseInt(process.env.UNSIGNED_TX_TIMEOUT_S || "180", 10) || 180),
+);
+
+/**
+ * A cached unsigned XDR is only served while at least this many seconds of
+ * its time bound remain; otherwise a fresh one is built.
+ */
+const parsedMinRemaining = parseInt(process.env.UNSIGNED_TX_MIN_REMAINING_S || "20", 10);
+export const UNSIGNED_TX_MIN_REMAINING_S = Number.isNaN(parsedMinRemaining)
+  ? 20
+  : Math.max(0, parsedMinRemaining);
+
+interface CachedUnsignedXdr {
+  xdr: string;
+  /** Unix seconds: the transaction's timeBounds.maxTime. */
+  validUntil: number;
+}
+
+/** Reads `maxTime` off a built transaction, falling back to now + timeout. */
+function unsignedTxValidUntil(tx: { timeBounds?: { maxTime: string } }): number {
+  const maxTime = Number(tx.timeBounds?.maxTime);
+  if (Number.isFinite(maxTime) && maxTime > 0) return maxTime;
+  return Math.floor(Date.now() / 1000) + UNSIGNED_TX_TIMEOUT_S;
+}
+
+/**
+ * Returns the cached XDR only if it still has the minimum signing window
+ * left. Stale entries are evicted so the caller rebuilds.
+ */
+function getFreshCachedXdr(cache: NodeCache, key: string): string | undefined {
+  const entry = cache.get<CachedUnsignedXdr>(key);
+  if (entry === undefined) return undefined;
+  const remaining = entry.validUntil - Date.now() / 1000;
+  if (remaining < UNSIGNED_TX_MIN_REMAINING_S) {
+    cache.del(key);
+    return undefined;
+  }
+  return entry.xdr;
+}
+
+/**
+ * Stores an unsigned XDR with a TTL that never outlives the point at which
+ * it would stop being servable, regardless of the configured cache TTL.
+ */
+function setCachedXdr(
+  cache: NodeCache,
+  key: string,
+  xdr: string,
+  validUntil: number,
+  ttlSeconds: number,
+): void {
+  const servableFor = Math.floor(
+    validUntil - Date.now() / 1000 - UNSIGNED_TX_MIN_REMAINING_S,
+  );
+  const ttl = Math.min(ttlSeconds, servableFor);
+  if (ttl <= 0) return;
+  cache.set<CachedUnsignedXdr>(key, { xdr, validUntil }, ttl);
+}
+
+// ---------------------------------------------------------------------------
 // Simulation error helpers  (#83)
 // ---------------------------------------------------------------------------
 
@@ -1043,7 +1113,7 @@ router.post(
               new Address(token).toScVal(),
             ),
           )
-          .setTimeout(30)
+          .setTimeout(UNSIGNED_TX_TIMEOUT_S)
           .build();
 
         const prepared = await server.prepareTransaction(tx);
@@ -1193,7 +1263,7 @@ router.post(
       const cacheKey = buildTxCacheKey(contractId, method, sourceAddress, args || []);
 
       logger.debug("Checking build-tx cache", { traceId, ...pathVars, cacheKey });
-      const cached = buildTxCache.get<string>(cacheKey);
+      const cached = getFreshCachedXdr(buildTxCache, cacheKey);
       if (cached !== undefined) {
         logger.info("Build-tx XDR served from cache", {
           traceId,
@@ -1240,7 +1310,7 @@ router.post(
             ...pathVars,
             method,
             fee: BASE_FEE,
-            timeout: 30,
+            timeout: UNSIGNED_TX_TIMEOUT_S,
           });
           const contract = new Contract(contractId as string);
           logger.debug("Fetching Stellar account for build-tx", {
@@ -1276,7 +1346,7 @@ router.post(
             networkPassphrase: NETWORK_PASSPHRASE,
           })
             .addOperation(contract.call(method, ...scArgs))
-            .setTimeout(30)
+            .setTimeout(UNSIGNED_TX_TIMEOUT_S)
             .build();
 
           logger.debug("Calling prepareTransaction on Stellar RPC for build-tx", {
@@ -1292,7 +1362,7 @@ router.post(
             xdrLength: xdr.length,
             ttlSeconds: BUILD_TX_CACHE_TTL,
           });
-          buildTxCache.set(cacheKey, xdr);
+          setCachedXdr(buildTxCache, cacheKey, xdr, unsignedTxValidUntil(tx), BUILD_TX_CACHE_TTL);
           return xdr;
         })();
 
@@ -1460,7 +1530,7 @@ router.post(
       );
 
       logger.debug("Checking partial-release cache", { traceId, contractId, index, cacheKey });
-      const cachedXdr = partialReleaseCache.get<string>(cacheKey);
+      const cachedXdr = getFreshCachedXdr(partialReleaseCache, cacheKey);
       if (cachedXdr !== undefined) {
         logger.info("Partial-release XDR served from cache", {
           traceId,
@@ -1491,7 +1561,7 @@ router.post(
               nativeToScVal(Number(index), { type: "u32" }),
               nativeToScVal(amountNum, { type: "i128" })
             ))
-            .setTimeout(30)
+            .setTimeout(UNSIGNED_TX_TIMEOUT_S)
             .build();
 
           let prepared;
@@ -1510,7 +1580,13 @@ router.post(
           }
 
           const xdr = prepared.toXDR();
-          partialReleaseCache.set(cacheKey, xdr);
+          setCachedXdr(
+            partialReleaseCache,
+            cacheKey,
+            xdr,
+            unsignedTxValidUntil(tx),
+            PARTIAL_RELEASE_CACHE_TTL,
+          );
           return xdr;
         })();
 
@@ -1703,7 +1779,7 @@ router.post(
 
     try {
       logger.debug("Checking claim auto-release cache", { traceId, ...pathVars, cacheKey });
-      const cached = claimAutoReleaseCache.get<string>(cacheKey);
+      const cached = getFreshCachedXdr(claimAutoReleaseCache, cacheKey);
       if (cached !== undefined) {
         logger.info("Claim auto-release XDR served from cache", {
           traceId,
@@ -1770,7 +1846,7 @@ router.post(
           traceId,
           ...pathVars,
           fee: BASE_FEE,
-          timeout: 30,
+          timeout: UNSIGNED_TX_TIMEOUT_S,
         });
         const contract = new Contract(contractId);
         logger.debug("Fetching Stellar account", { traceId, ...pathVars });
@@ -1788,7 +1864,7 @@ router.post(
               nativeToScVal(Number(index), { type: "u32" }),
             ),
           )
-          .setTimeout(30)
+          .setTimeout(UNSIGNED_TX_TIMEOUT_S)
           .build();
 
         logger.debug("Calling prepareTransaction on Stellar RPC", { traceId, ...pathVars });
@@ -1801,7 +1877,13 @@ router.post(
           xdrLength: xdr.length,
           ttlSeconds: CLAIM_AUTO_RELEASE_TTL,
         });
-        claimAutoReleaseCache.set(cacheKey, xdr);
+        setCachedXdr(
+          claimAutoReleaseCache,
+          cacheKey,
+          xdr,
+          unsignedTxValidUntil(tx),
+          CLAIM_AUTO_RELEASE_TTL,
+        );
         return xdr;
       })();
 

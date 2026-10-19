@@ -1,3 +1,4 @@
+import { randomUUID } from "crypto";
 import { getDb, getSubscriptions, EventDbRow } from "./db.js";
 import logger from "../utils/logger.js";
 
@@ -19,13 +20,39 @@ const WEBHOOK_DELIVERY_LEDGER_PAGE_SIZE =
  *
  * v1: initial versioned envelope
  * (`{ version, event_type, contract_id, ledger_sequence, timestamp, data }`).
+ * `event_id` was added later as an additive, non-breaking field (#676).
  */
 export const WEBHOOK_PAYLOAD_VERSION = 1;
+
+/** Idempotency headers attached to every webhook POST (#676). */
+export const WEBHOOK_EVENT_ID_HEADER = "X-Milesto-Event-Id";
+export const WEBHOOK_DELIVERY_ID_HEADER = "X-Milesto-Delivery-Id";
+export const WEBHOOK_DELIVERY_ATTEMPT_HEADER = "X-Milesto-Delivery-Attempt";
+
+/**
+ * Stable identifier for an on-chain event, derived from the events table's
+ * natural key `(contract_id, ledger_sequence, event_type)`. Unlike the
+ * autoincrement row id it survives a re-index, so subscribers can dedupe on
+ * it across redeliveries.
+ */
+export function webhookEventId(event: EventDbRow): string {
+  return `${event.contract_id}:${event.ledger_sequence}:${event.event_type}`;
+}
+
+/** Identifies one attempt within a logical delivery (event → subscriber). */
+export interface DeliveryAttempt {
+  /** Constant across every retry of the same logical delivery. */
+  deliveryId: string;
+  /** 1-based attempt number. */
+  attempt: number;
+}
 
 interface DeliveryResult {
   subscriptionId: number;
   webhookUrl: string;
   eventId: number;
+  /** Delivery id sent in `X-Milesto-Delivery-Id` on every attempt. */
+  deliveryId: string;
   success: boolean;
   attempts: number;
   error?: string;
@@ -80,13 +107,21 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * POSTs one event to one URL. Callers retrying a delivery must pass the same
+ * `deliveryId` with an incremented `attempt`; a standalone call is treated
+ * as attempt 1 of a new delivery.
+ */
 export async function deliverToUrl(
   webhookUrl: string,
-  event: EventDbRow
+  event: EventDbRow,
+  delivery: DeliveryAttempt = { deliveryId: randomUUID(), attempt: 1 }
 ): Promise<DeliveryOutcome> {
   const startedAt = Date.now();
+  const eventId = webhookEventId(event);
   const payload = {
     version: WEBHOOK_PAYLOAD_VERSION,
+    event_id: eventId,
     event_type: event.event_type,
     contract_id: event.contract_id,
     ledger_sequence: event.ledger_sequence,
@@ -97,7 +132,12 @@ export async function deliverToUrl(
   try {
     const response = await fetch(webhookUrl, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        [WEBHOOK_EVENT_ID_HEADER]: eventId,
+        [WEBHOOK_DELIVERY_ID_HEADER]: delivery.deliveryId,
+        [WEBHOOK_DELIVERY_ATTEMPT_HEADER]: String(delivery.attempt),
+      },
       body: JSON.stringify(payload),
     });
     return {
@@ -125,10 +165,12 @@ async function deliverEventToSubscriber(
   let attemptsMade = 0;
 
   let lastOutcome: DeliveryOutcome | undefined;
+  // One logical delivery: every retry carries the same delivery id.
+  const deliveryId = randomUUID();
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     attemptsMade = attempt;
-    const outcome = await deliverToUrl(webhookUrl, event);
+    const outcome = await deliverToUrl(webhookUrl, event, { deliveryId, attempt });
     lastOutcome = outcome;
     success = outcome.ok;
     if (success) break;
@@ -137,6 +179,7 @@ async function deliverEventToSubscriber(
     logger.warn("Webhook delivery failed", {
       webhookUrl,
       eventId: event.id,
+      deliveryId,
       attempt,
       status: outcome.status,
       errorCode: outcome.errorCode,
@@ -152,6 +195,7 @@ async function deliverEventToSubscriber(
     subscriptionId,
     webhookUrl,
     eventId: event.id,
+    deliveryId,
     success,
     attempts: attemptsMade,
     error: success ? undefined : lastError,
@@ -228,6 +272,7 @@ export async function deliverWebhooks(
           logger.info("Webhook delivered", {
             subscriptionId: sub.id,
             eventId: event.id,
+            deliveryId: result.deliveryId,
             webhookUrl: sub.webhook_url,
             status: result.status,
             durationMs: result.durationMs,
@@ -236,6 +281,7 @@ export async function deliverWebhooks(
           logger.error("Webhook delivery failed after all attempts", {
             subscriptionId: sub.id,
             eventId: event.id,
+            deliveryId: result.deliveryId,
             webhookUrl: sub.webhook_url,
             status: result.status,
             errorCode: result.errorCode,

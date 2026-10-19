@@ -13,6 +13,8 @@ import {
   resetPollerThrottleState,
   verifySchemaUpToDate,
   assertSchemaValid,
+  getIndexerStateValue,
+  setIndexerStateValue,
   type EventRow,
 } from "./db.js";
 import { RpcPollerClient } from "./rpc-poller-client.js";
@@ -366,6 +368,103 @@ export async function fetchHistoricalEvents(
 }
 
 // ---------------------------------------------------------------------------
+// One-shot configured backfill (#675)
+// ---------------------------------------------------------------------------
+// LEDGER_RANGE_START/END used to be checked inside pollEvents(), so every poll
+// cycle re-imported the same window and live indexing never ran while they
+// were set. The window is now imported once at startup, completion is
+// recorded in indexer_state, and the live loop starts afterwards.
+
+export type HistoricalBackfillStatus =
+  | "not_configured"
+  | "already_complete"
+  | "completed"
+  | "failed";
+
+export interface HistoricalBackfillOutcome {
+  status: HistoricalBackfillStatus;
+  startLedger?: number;
+  endLedger?: number;
+  result?: HistoricalImportResult;
+  error?: string;
+}
+
+/** Read LEDGER_RANGE_START/END; a single bound means a one-ledger window. */
+export function resolveConfiguredBackfillRange():
+  | { startLedger: number; endLedger: number }
+  | null {
+  const startRaw = process.env.LEDGER_RANGE_START;
+  const endRaw = process.env.LEDGER_RANGE_END;
+  if (!startRaw && !endRaw) return null;
+  return {
+    startLedger: parseInt(startRaw || endRaw || "0", 10),
+    endLedger: parseInt(endRaw || startRaw || "0", 10),
+  };
+}
+
+/** indexer_state key recording that a given window has been imported. */
+export function historicalBackfillStateKey(startLedger: number, endLedger: number): string {
+  return `historical_backfill:${startLedger}-${endLedger}`;
+}
+
+let backfillInFlight: Promise<HistoricalBackfillOutcome> | null = null;
+
+/**
+ * Import the LEDGER_RANGE_START/END window unless indexer_state shows it was
+ * already imported. Never throws: a failed import is logged, left unrecorded
+ * so the next startup retries it, and does not block live polling.
+ * Concurrent callers share one run.
+ */
+export function runConfiguredHistoricalBackfill(): Promise<HistoricalBackfillOutcome> {
+  if (!backfillInFlight) {
+    backfillInFlight = doConfiguredHistoricalBackfill().finally(() => {
+      backfillInFlight = null;
+    });
+  }
+  return backfillInFlight;
+}
+
+async function doConfiguredHistoricalBackfill(): Promise<HistoricalBackfillOutcome> {
+  const range = resolveConfiguredBackfillRange();
+  if (!range) return { status: "not_configured" };
+
+  const { startLedger, endLedger } = range;
+  const stateKey = historicalBackfillStateKey(startLedger, endLedger);
+
+  const recorded = getIndexerStateValue(stateKey);
+  if (recorded !== undefined) {
+    logger.info("Historical backfill already complete – skipping", {
+      startLedger,
+      endLedger,
+      recorded,
+    });
+    return { status: "already_complete", startLedger, endLedger };
+  }
+
+  try {
+    const result = await fetchHistoricalEvents(startLedger, endLedger);
+    setIndexerStateValue(
+      stateKey,
+      JSON.stringify({ completedAt: new Date().toISOString(), ...result }),
+    );
+    logger.info("Historical backfill recorded as complete", {
+      startLedger,
+      endLedger,
+      ...result,
+    });
+    return { status: "completed", startLedger, endLedger, result };
+  } catch (err) {
+    const error = formatError(err);
+    logger.error("Historical backfill failed – continuing with live polling", {
+      startLedger,
+      endLedger,
+      error,
+    });
+    return { status: "failed", startLedger, endLedger, error };
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Memory queue lock for concurrent event inserts (#251)
 // ---------------------------------------------------------------------------
 // A single promise chain acts as an in-memory queue so overlapping
@@ -468,27 +567,8 @@ export async function pollEvents(): Promise<boolean> {
     // schema must not silently pass through the topic filter (#282).
     verifySchemaUpToDate();
 
-    // --- Dynamic historical sync ranges (#254) ---
-    // With LEDGER_RANGE_START/END set the poller imports that inclusive window
-    // instead of following the chain head, and leaves the live ledger pointer
-    // untouched so a backfill cannot disturb live indexing.
-    const rangeStartRaw = process.env.LEDGER_RANGE_START;
-    const rangeEndRaw = process.env.LEDGER_RANGE_END;
-    if (rangeStartRaw || rangeEndRaw) {
-      const rangeStart = parseInt(rangeStartRaw ?? rangeEndRaw ?? "0", 10);
-      const rangeEnd = parseInt(rangeEndRaw ?? rangeStartRaw ?? "0", 10);
-
-      const imported = await fetchHistoricalEvents(rangeStart, rangeEnd);
-      failureMonitor.recordSuccess();
-
-      logger.info("Historical range import cycle complete", {
-        startLedger: rangeStart,
-        endLedger: rangeEnd,
-        ...imported,
-      });
-      return true;
-    }
-
+    // LEDGER_RANGE_START/END are handled once at startup by
+    // runConfiguredHistoricalBackfill(), not here (#675).
     const currentLedger = (await rpcClient.getLatestLedger()).sequence;
 
     // --- Group contracts by their per-contract ledger pointer (#720) ---
@@ -646,9 +726,15 @@ export function startPoller() {
     intervalMs: currentPollIntervalMs,
   });
 
-  // The first cycle runs immediately; the loop is scheduled off its outcome so
+  // Any configured historical window is imported once first (#675); the live
+  // cycle then runs immediately and the loop is scheduled off its outcome so
   // the very first idle poll already widens the wait.
-  void runPollCycle().then(() => {
+  const firstCycle = resolveConfiguredBackfillRange()
+    ? runConfiguredHistoricalBackfill().then(() =>
+        pollerRunning ? runPollCycle() : undefined,
+      )
+    : runPollCycle();
+  void firstCycle.then(() => {
     if (pollerRunning) {
       pollerTimeout = setTimeout(pollLoop, currentPollIntervalMs);
     }
