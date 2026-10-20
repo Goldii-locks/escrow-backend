@@ -74,6 +74,11 @@ import {
 import { strictLimiter, walletLookupLimiter } from "../middleware/rateLimiter.js";
 import logger from "../utils/logger.js";
 import { isValidStellarContractId } from "../utils/stellar.js";
+import {
+  errorMessage,
+  errorStack,
+  hasNumericStatus,
+} from "../utils/error-message.js";
 import { randomUUID } from "crypto";
 
 const router = Router();
@@ -305,6 +310,47 @@ class SimError extends Error {
 }
 
 // ---------------------------------------------------------------------------
+// Narrow shapes for the Soroban values this module reads
+//
+// The Stellar SDK hands back XDR wrappers whose members are typed `any`, so
+// reading them without a local type is what produced the `no-explicit-any`
+// warnings. The interfaces below describe only the members actually read
+// here, which keeps the access type-safe without casting the whole value.
+// ---------------------------------------------------------------------------
+
+/** A contract argument as decoded from a build-tx request body. */
+interface ScValArg {
+  type?: string;
+  value: string | number | bigint | boolean | ScValArg[];
+}
+
+/** A milestone as returned by the job contract's `milestones()` accessor. */
+interface ContractMilestone {
+  amount(): { toString(): string };
+  status(): object;
+}
+
+/** The job struct returned by the job contract, as read by `parseJobFromResult`. */
+interface ContractJob {
+  client(): { toString(): string };
+  freelancer(): { toString(): string };
+  arbiter(): { toString(): string };
+  token(): { toString(): string };
+  funded(): unknown;
+  milestones(): ContractMilestone[];
+}
+
+/** The `retval` of a successful simulation, as read by this module. */
+interface SimulationRetval {
+  forEach?: (cb: (item: { toString(): string }) => void) => void;
+}
+
+/** The successful part of a simulation response. */
+interface SimulationResult {
+  result?: { retval?: unknown };
+}
+
+// ---------------------------------------------------------------------------
 // Submit error helper  – maps sendTransaction / XDR errors to HTTP statuses
 // ---------------------------------------------------------------------------
 
@@ -368,15 +414,15 @@ function classifySubmitError(rawError: string): Classified {
 // ---------------------------------------------------------------------------
 // Helper: parse job fields out of a successful simulation result
 // ---------------------------------------------------------------------------
-const parseJobFromResult = (result: any, contractId: string) => {
+const parseJobFromResult = (result: SimulationResult, contractId: string) => {
   if ("result" in result && result.result?.retval) {
-    const val = result.result.retval;
+    const val = result.result.retval as ContractJob;
     const client = val.client().toString();
     const freelancer = val.freelancer().toString();
     const arbiter = val.arbiter().toString();
     const token = val.token().toString();
     const funded = val.funded();
-    const milestones = val.milestones().map((m: any, i: number) => ({
+    const milestones = val.milestones().map((m: ContractMilestone, i: number) => ({
       index: i,
       amount: m.amount().toString(),
       status: Object.keys(m.status())[0],
@@ -555,13 +601,13 @@ router.post(
         draftId: draft.id,
         milestoneCount: body.milestones?.length ?? 0,
       });
-    } catch (err: any) {
-      const message = err?.message ?? String(err);
+    } catch (err: unknown) {
+      const message = errorMessage(err);
       logger.error("Failed to create job draft", {
         traceId,
         ...pathVars,
         error: message,
-        stack: err?.stack,
+        stack: errorStack(err),
       });
       sendError(res, 500, "Internal server error");
     }
@@ -670,11 +716,11 @@ router.get("/:contractId/history", (req: Request, res: Response) => {
 
     const result = getEventsByContract(contractId, page, limit);
     res.json({ success: true, ...result });
-  } catch (err: any) {
+  } catch (err: unknown) {
     // Log the detail server-side only; never forward raw DB errors (#672).
     logger.error("Failed to fetch job history", {
       contractId: req.params.contractId,
-      error: err?.message,
+      error: errorMessage(err),
     });
     sendError(res, 500, "Internal server error");
   }
@@ -762,7 +808,7 @@ router.get(
         logger.info("Fee preview served from in-flight cache", { contractId, amount });
       }
       sendSuccess(res, split);
-    } catch (err: any) {
+    } catch (err: unknown) {
       // Failures are never cached; the client only sees a classified status
       // and a fixed message, never the raw RPC error.
       if (err instanceof SimError) {
@@ -772,7 +818,7 @@ router.get(
       logger.error("Failed to compute fee preview", {
         contractId,
         amount,
-        error: err?.message ?? String(err),
+        error: errorMessage(err),
       });
       sendError(res, 500, "Internal server error");
     } finally {
@@ -842,8 +888,8 @@ router.get(
         milestoneCount: job.milestones.length,
       });
       sendSuccess(res, job);
-    } catch (err: any) {
-      logger.error("Failed to fetch job", { contractId, error: err?.message });
+    } catch (err: unknown) {
+      logger.error("Failed to fetch job", { contractId, error: errorMessage(err) });
       sendError(res, 500, "Internal server error");
     }
   },
@@ -930,9 +976,9 @@ router.get(
         // Parse successful result
         if ("result" in result && result.result?.retval) {
           const tokens: string[] = [];
-          const vec = result.result.retval as any;
+          const vec = result.result.retval as unknown as SimulationRetval;
           if (typeof vec.forEach === "function") {
-            vec.forEach((token: any) => tokens.push(token.toString()));
+            vec.forEach((token: { toString(): string }) => tokens.push(token.toString()));
           }
           whitelistCache.set(contractId, tokens);
           logger.info("Whitelisted tokens fetched successfully", { contractId, tokenCount: tokens.length });
@@ -953,11 +999,11 @@ router.get(
       }
 
       sendSuccess(res, { tokens });
-    } catch (err: any) {
+    } catch (err: unknown) {
       // Robust error handling with no stack trace leakage. Errors keep their
       // original message so they can be classified here rather than collapsed
       // into a single generic failure.
-      const message = err?.message ?? "Internal server error";
+      const message = errorMessage(err) || "Internal server error";
 
       // 401: authentication rejected by the RPC layer
       if (/unauthorized|invalid authentication/i.test(message)) {
@@ -1053,8 +1099,8 @@ router.post(
         logger.info("Whitelist update transaction built", { contractId, token, action });
         sendSuccess(res, { xdr });
         return;
-      } catch (err: any) {
-        const message = err?.message ?? String(err);
+      } catch (err: unknown) {
+        const message = errorMessage(err);
         if (/unauthorized|invalid authentication/i.test(message)) {
           logger.warn("Unauthorized request for whitelist update", { contractId });
           sendError(res, 401, "Unauthorized");
@@ -1107,8 +1153,8 @@ router.post(
       whitelistCache.del(contractId);
       logger.info("Whitelist updated successfully", { contractId, count: targetAddresses.length });
       sendSuccess(res, { contractId, addresses: targetAddresses, updated: true });
-    } catch (err: any) {
-      const message = err?.message ?? String(err);
+    } catch (err: unknown) {
+      const message = errorMessage(err);
       if (/unauthorized|invalid authentication/i.test(message)) {
         logger.warn("Unauthorized request for whitelist update", { contractId });
         sendError(res, 401, "Unauthorized");
@@ -1159,8 +1205,10 @@ router.post(
     try {
       // Validate for whitelist management methods
       if (method === "add_whitelisted_token" || method === "remove_whitelisted_token") {
-        const adminArg = args.find((a: any) => a.type === "address" && a.value);
-        const tokenArg = args.find((a: any) => a.type === "address" && a.value && a !== adminArg);
+        const adminArg = args.find((a: ScValArg) => a.type === "address" && a.value);
+        const tokenArg = args.find(
+          (a: ScValArg) => a.type === "address" && a.value && a !== adminArg,
+        );
 
         if (!adminArg || !tokenArg) {
           logger.warn("Missing admin/token args for whitelist management", {
@@ -1253,18 +1301,22 @@ router.post(
             ...pathVars,
           });
 
-          const scArgs = (args || []).map((a: any) => {
-            if (a.type === "address") return Address.fromString(a.value).toScVal();
-            if (a.type === "i128") return nativeToScVal(BigInt(a.value), { type: "i128" });
-            if (a.type === "u32") return nativeToScVal(a.value, { type: "u32" });
-            if (a.type === "u64") return nativeToScVal(BigInt(a.value), { type: "u64" });
-            if (a.type === "bool") return nativeToScVal(a.value, { type: "bool" });
+          const scArgs = (args || []).map((a: ScValArg) => {
+            if (a.type === "address") return Address.fromString(String(a.value)).toScVal();
+            if (a.type === "i128") return nativeToScVal(BigInt(a.value as string), { type: "i128" });
+            if (a.type === "u32") return nativeToScVal(a.value as number, { type: "u32" });
+            if (a.type === "u64") return nativeToScVal(BigInt(a.value as string), { type: "u64" });
+            if (a.type === "bool") return nativeToScVal(a.value as boolean, { type: "bool" });
             if (a.type === "vec") {
-              const vecElements = a.value.map((item: any) => {
-                if (item.type === "i128") return nativeToScVal(BigInt(item.value), { type: "i128" });
-                if (item.type === "u32") return nativeToScVal(item.value, { type: "u32" });
-                if (item.type === "u64") return nativeToScVal(BigInt(item.value), { type: "u64" });
-                return nativeToScVal(item.value);
+              const vecElements = (a.value as ScValArg[]).map((item: ScValArg) => {
+                if (item.type === "i128") {
+                  return nativeToScVal(BigInt(item.value as string), { type: "i128" });
+                }
+                if (item.type === "u32") return nativeToScVal(item.value as number, { type: "u32" });
+                if (item.type === "u64") {
+                  return nativeToScVal(BigInt(item.value as string), { type: "u64" });
+                }
+                return nativeToScVal(item.value as string | number | bigint | boolean);
               });
               return nativeToScVal(vecElements);
             }
@@ -1307,12 +1359,12 @@ router.post(
       let xdr: string;
       try {
         xdr = await requestPromise;
-      } catch (err: any) {
+      } catch (err: unknown) {
         logger.debug("RPC promise rejected for build-tx, clearing cache entry", {
           traceId,
           ...pathVars,
           cacheKey,
-          error: err?.message ?? String(err),
+          error: errorMessage(err),
         });
         buildTxCache.del(cacheKey);
         throw err;
@@ -1355,9 +1407,9 @@ router.post(
       });
 
       res.json({ success: true, xdr });
-    } catch (err: any) {
-      const message = err?.message ?? String(err);
-      const stack = err?.stack;
+    } catch (err: unknown) {
+      const message = errorMessage(err);
+      const stack = errorStack(err);
       logger.debug("Build-tx error caught", {
         traceId,
         ...pathVars,
@@ -1437,8 +1489,8 @@ router.post(
       let account;
       try {
         account = await server.getAccount(sourceAddress as string);
-      } catch (err: any) {
-        const errMsg = String(err?.message || err);
+      } catch (err: unknown) {
+        const errMsg = errorMessage(err);
         const { status, message } = classifySimError(errMsg);
         logger.error("Failed to get account for partial release", {
           traceId,
@@ -1446,7 +1498,7 @@ router.post(
           index,
           sourceAddress,
           error: errMsg,
-          stack: err?.stack,
+          stack: errorStack(err),
         });
         sendError(res, status, message);
         return;
@@ -1497,8 +1549,8 @@ router.post(
           let prepared;
           try {
             prepared = await server.prepareTransaction(tx);
-          } catch (err: any) {
-            const errMsg = String(err?.message || err);
+          } catch (err: unknown) {
+            const errMsg = errorMessage(err);
             const { status, message } = classifySimError(errMsg);
             logger.error("Failed to prepare transaction for partial release", {
               traceId,
@@ -1520,10 +1572,10 @@ router.post(
       let xdr: string;
       try {
         xdr = await requestPromise;
-      } catch (err: any) {
+      } catch (err: unknown) {
         partialReleaseCache.del(cacheKey);
-        if (err && err.status) {
-          sendError(res, err.status, err.message);
+        if (hasNumericStatus(err)) {
+          sendError(res, err.status, err.message ?? "Internal server error");
           return;
         }
         throw err;
@@ -1536,8 +1588,8 @@ router.post(
       }
 
       res.json({ success: true, xdr });
-    } catch (err: any) {
-      const errMsg = String(err?.message || err);
+    } catch (err: unknown) {
+      const errMsg = errorMessage(err);
       // Structured, server-side-only error detail – the client receives a clean
       // 500 body with no internal stack trace leakage (#117).
       logger.error("Unexpected error in partial release", {
@@ -1545,7 +1597,7 @@ router.post(
         contractId: req.params.contractId,
         index: req.params.index,
         error: errMsg,
-        stack: err?.stack,
+        stack: errorStack(err),
       });
       sendError(res, 500, "Internal server error");
     }
@@ -1582,7 +1634,6 @@ router.get(
         contractId,
         index,
         ip: req.ip ?? req.socket?.remoteAddress,
-        requestId: (req as any).requestId,
       });
 
       const cached = timeRemainingCache.get<number>(cacheKey);
@@ -1640,13 +1691,12 @@ router.get(
         logger.info("Time remaining served from in-flight cache", { contractId, index });
       }
       sendSuccess(res, { secondsRemaining });
-    } catch (err: any) {
+    } catch (err: unknown) {
       if (err instanceof SimError) {
         logger.warn("Simulation error for time-remaining", {
           contractId,
           index,
           status: err.status,
-          requestId: (req as any).requestId,
         });
         if (err.status === 404) {
           sendError(res, 404, "Job not found");
@@ -1656,11 +1706,10 @@ router.get(
         return;
       }
       logger.error("Failed to get time remaining", {
-        error: err?.message,
+        error: errorMessage(err),
         contractId: req.params.contractId,
         index: req.params.index,
-        stack: err?.stack,
-        requestId: (req as any).requestId,
+        stack: errorStack(err),
       });
       sendError(res, 500, "Internal server error");
     }
@@ -1810,12 +1859,12 @@ router.post(
       let xdr: string;
       try {
         xdr = await requestPromise;
-      } catch (err: any) {
+      } catch (err: unknown) {
         logger.debug("RPC promise rejected, clearing cache entry", {
           traceId,
           ...pathVars,
           cacheKey,
-          error: err?.message ?? String(err),
+          error: errorMessage(err),
         });
         claimAutoReleaseCache.del(cacheKey);
         throw err;
@@ -1846,9 +1895,9 @@ router.post(
       });
 
       res.json(responseBody);
-    } catch (err: any) {
-      const message = err?.message ?? String(err);
-      const stack = err?.stack;
+    } catch (err: unknown) {
+      const message = errorMessage(err);
+      const stack = errorStack(err);
       logger.debug("Claim auto-release error caught", {
         traceId,
         ...pathVars,
