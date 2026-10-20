@@ -124,6 +124,58 @@ export function getCurrentPollIntervalMs(): number {
   return currentPollIntervalMs;
 }
 
+// ---------------------------------------------------------------------------
+// Chain head (#644)
+// ---------------------------------------------------------------------------
+
+/**
+ * How long a chain-head lookup is reused before the RPC is called again.
+ *
+ * The admin status endpoint is polled by operators, and every lookup would
+ * otherwise add an RPC round trip. A few seconds is short enough that the
+ * reported lag stays accurate and long enough that a refresh burst hits the
+ * cache.
+ */
+const CHAIN_HEAD_CACHE_TTL_MS = parseInt(
+  process.env.INDEXER_CHAIN_HEAD_CACHE_TTL_MS || "5000",
+  10,
+);
+
+let cachedChainHead: { sequence: number; fetchedAt: number } | null = null;
+
+/**
+ * The latest ledger sequence on the configured RPC, or `null` when it cannot
+ * be read.
+ *
+ * The result is cached for a few seconds so the admin status endpoint does not
+ * hit the RPC on every request. A failed lookup is not cached — the next
+ * caller retries immediately rather than serving a stale "no chain head".
+ */
+export async function getChainHeadSequence(): Promise<number | null> {
+  const now = Date.now();
+  if (cachedChainHead && now - cachedChainHead.fetchedAt < CHAIN_HEAD_CACHE_TTL_MS) {
+    return cachedChainHead.sequence;
+  }
+
+  try {
+    const ledger = await rpcClient.getLatestLedger();
+    const sequence = Number(ledger.sequence);
+    if (!Number.isFinite(sequence)) return null;
+    cachedChainHead = { sequence, fetchedAt: now };
+    return sequence;
+  } catch (err) {
+    logger.warn("Failed to read chain head for indexer status", {
+      error: formatError(err),
+    });
+    return null;
+  }
+}
+
+/** Drop the cached chain head. Exposed for tests. */
+export function resetChainHeadCache(): void {
+  cachedChainHead = null;
+}
+
 /**
  * Resolve an RPC event's close time to epoch seconds.
  *
