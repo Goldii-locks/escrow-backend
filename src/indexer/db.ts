@@ -284,6 +284,42 @@ const MIGRATIONS: Migration[] = [
       ALTER TABLE monitored_contracts ADD COLUMN start_ledger INTEGER NOT NULL DEFAULT 0;
     `,
   },
+  {
+    version: 12,
+    description: "store the transaction hash and event id with each indexed event (#700)",
+    // The UI needs the transaction hash to link an event to a block explorer,
+    // and the event id to tell two events of the same ledger apart. Both are
+    // optional: rows written before this migration keep NULL values.
+    up: `
+      ALTER TABLE events ADD COLUMN tx_hash TEXT;
+
+      ALTER TABLE events ADD COLUMN event_id TEXT;
+
+      CREATE INDEX IF NOT EXISTS idx_events_tx_hash
+        ON events (tx_hash);
+
+      CREATE INDEX IF NOT EXISTS idx_events_event_id
+        ON events (event_id);
+    `,
+  },
+  {
+    version: 13,
+    description: "webhook subscription failure tracking and auto-disable (#701)",
+    // A subscription whose endpoint is permanently dead used to be retried
+    // for every matching event, forever. The consecutive failure counter
+    // lets the delivery loop disable such a subscription after
+    // WEBHOOK_DISABLE_AFTER failures.
+    up: `
+      ALTER TABLE webhook_subscriptions ADD COLUMN consecutive_failures INTEGER NOT NULL DEFAULT 0;
+
+      ALTER TABLE webhook_subscriptions ADD COLUMN disabled_at DATETIME;
+
+      ALTER TABLE webhook_subscriptions ADD COLUMN last_error TEXT;
+
+      CREATE INDEX IF NOT EXISTS idx_webhook_subscriptions_disabled_at
+        ON webhook_subscriptions (disabled_at);
+    `,
+  },
 ];
 
 /** Index names created by the SQLite schema manager lookup-index migration (#259). */
@@ -1027,21 +1063,25 @@ export function insertEvent(
   eventType: string,
   ledgerSequence: number,
   timestamp: number | null,
-  dataJson: string
+  dataJson: string,
+  txHash: string | null = null,
+  eventId: string | null = null
 ): boolean {
   const db = getDb();
   const tx = db.transaction(() => {
     const stmt = db.prepare(`
       INSERT OR IGNORE INTO events 
-      (contract_id, event_type, ledger_sequence, timestamp, data_json)
-      VALUES (?, ?, ?, ?, ?)
+      (contract_id, event_type, ledger_sequence, timestamp, data_json, tx_hash, event_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
     `);
     const result = stmt.run(
       contractId,
       eventType,
       ledgerSequence,
       timestamp,
-      dataJson
+      dataJson,
+      txHash,
+      eventId
     );
     return result.changes > 0;
   });
@@ -1055,6 +1095,16 @@ export interface EventRow {
   /** Ledger close time (epoch secs), or null when the RPC gave none. */
   timestamp: number | null;
   dataJson: string;
+  /**
+   * Hash of the transaction that emitted the event (#700). `null` for rows
+   * indexed before the column existed.
+   */
+  txHash?: string | null;
+  /**
+   * RPC event id (ledger/transaction/event index) (#700). `null` for rows
+   * indexed before the column existed.
+   */
+  eventId?: string | null;
 }
 
 /**
@@ -1084,8 +1134,8 @@ export function insertEventBatch(events: EventRow[], newLedger: number): void {
 
   const insertStmt = db.prepare(`
     INSERT OR IGNORE INTO events
-    (contract_id, event_type, ledger_sequence, timestamp, data_json)
-    VALUES (?, ?, ?, ?, ?)
+    (contract_id, event_type, ledger_sequence, timestamp, data_json, tx_hash, event_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
   `);
 
   const updateLedger = db.prepare(
@@ -1099,7 +1149,9 @@ export function insertEventBatch(events: EventRow[], newLedger: number): void {
         ev.eventType,
         ev.ledgerSequence,
         ev.timestamp,
-        ev.dataJson
+        ev.dataJson,
+        ev.txHash ?? null,
+        ev.eventId ?? null
       );
     }
     updateLedger.run(newLedger.toString());
@@ -1444,7 +1496,16 @@ export interface EventDbRow {
   ledger_sequence: number;
   timestamp: number | null;
   data_json: string;
+  /** Transaction hash of the event (#700); null for older rows. */
+  tx_hash: string | null;
+  /** RPC event id of the event (#700); null for older rows. */
+  event_id: string | null;
   created_at: string;
+  /**
+   * Camel-case alias of `tx_hash`, so API consumers can read `txHash`
+   * directly (#700).
+   */
+  txHash?: string | null;
 }
 
 export interface PaginatedEvents {
@@ -1477,8 +1538,15 @@ export function getEventsByContract(
     )
     .all(contractId, safeLimit, offset) as EventDbRow[];
 
+  // Expose the transaction hash under its camel-case name as well, so the
+  // history endpoint can hand it straight to a block explorer (#700).
+  const events = rows.map((row) => ({
+    ...row,
+    txHash: row.tx_hash ?? null,
+  }));
+
   return {
-    events: rows,
+    events,
     total: totalRow.count,
     page: safePage,
     limit: safeLimit,
@@ -1498,12 +1566,24 @@ export interface WebhookSubscription {
   webhook_url: string;
   event_types: string;
   created_at: string;
+  /**
+   * Number of consecutive failed deliveries (#701). Reset to 0 after a
+   * successful delivery and when the subscription is (re-)created.
+   */
+  consecutive_failures: number;
+  /** Timestamp of the auto-disable, or null while the subscription is live. */
+  disabled_at: string | null;
+  /** Message of the last failed delivery attempt. */
+  last_error: string | null;
 }
 
 /**
  * Add a per-contract webhook subscription. Runs INSERT + SELECT inside a
  * single transaction so the returned row always reflects what was just
  * committed, even under concurrent writes.
+ *
+ * Re-subscribing to a pair that was auto-disabled re-enables it: the failure
+ * counter is reset and the disable marker is cleared (#701).
  */
 export function addSubscription(
   contractId: string,
@@ -1519,6 +1599,17 @@ export function addSubscription(
       VALUES (?, ?, ?)
     `);
     stmt.run(contractId, webhookUrl, JSON.stringify(eventTypes));
+
+    // A fresh subscribe re-enables the subscription and clears the failure
+    // history (#701).
+    db.prepare(
+      `UPDATE webhook_subscriptions
+       SET consecutive_failures = 0,
+           disabled_at = NULL,
+           last_error = NULL
+       WHERE contract_id = ? AND webhook_url = ?`
+    ).run(contractId, webhookUrl);
+
     return db
       .prepare("SELECT * FROM webhook_subscriptions WHERE contract_id = ? AND webhook_url = ?")
       .get(contractId, webhookUrl) as WebhookSubscription;
@@ -1565,6 +1656,99 @@ export function removeSubscription(contractId: string, webhookUrl: string): bool
 export function getSubscriptions(): WebhookSubscription[] {
   const db = getDb();
   return db.prepare("SELECT * FROM webhook_subscriptions").all() as WebhookSubscription[];
+}
+
+/**
+ * Subscriptions that are still enabled. Auto-disabled subscriptions (#701)
+ * are skipped by the delivery loop, but they stay visible to admins through
+ * `getSubscriptions()` / `getDisabledSubscriptions()`.
+ */
+export function getActiveSubscriptions(): WebhookSubscription[] {
+  const db = getDb();
+  return db
+    .prepare(
+      "SELECT * FROM webhook_subscriptions WHERE disabled_at IS NULL ORDER BY id ASC"
+    )
+    .all() as WebhookSubscription[];
+}
+
+/** Subscriptions that were auto-disabled after repeated delivery failures. */
+export function getDisabledSubscriptions(): WebhookSubscription[] {
+  const db = getDb();
+  return db
+    .prepare(
+      "SELECT * FROM webhook_subscriptions WHERE disabled_at IS NOT NULL ORDER BY id ASC"
+    )
+    .all() as WebhookSubscription[];
+}
+
+/** Outcome of recording a failed delivery attempt for a subscription. */
+export interface SubscriptionFailureState {
+  subscriptionId: number;
+  /** Consecutive failed deliveries after this attempt. */
+  consecutiveFailures: number;
+  /** Whether the subscription is now disabled and must be skipped. */
+  disabled: boolean;
+}
+
+/**
+ * Record a failed delivery attempt for a subscription: the consecutive
+ * failure counter is incremented and the last error is stored. When the
+ * counter reaches `disableAfter`, the subscription is disabled (#701).
+ */
+export function recordSubscriptionFailure(
+  subscriptionId: number,
+  error: string | null,
+  disableAfter: number
+): SubscriptionFailureState {
+  const db = getDb();
+
+  const recordTx = db.transaction(() => {
+    const row = db
+      .prepare(
+        "SELECT consecutive_failures FROM webhook_subscriptions WHERE id = ?"
+      )
+      .get(subscriptionId) as { consecutive_failures: number } | undefined;
+    if (!row) {
+      return {
+        subscriptionId,
+        consecutiveFailures: 0,
+        disabled: false,
+      };
+    }
+
+    const consecutiveFailures = (row.consecutive_failures ?? 0) + 1;
+    const disabled = consecutiveFailures >= disableAfter;
+
+    db.prepare(
+      `UPDATE webhook_subscriptions
+       SET consecutive_failures = ?,
+           last_error = ?,
+           disabled_at = CASE
+             WHEN ? = 1 THEN COALESCE(disabled_at, CURRENT_TIMESTAMP)
+             ELSE disabled_at
+           END
+       WHERE id = ?`
+    ).run(consecutiveFailures, error, disabled ? 1 : 0, subscriptionId);
+
+    return { subscriptionId, consecutiveFailures, disabled };
+  });
+
+  return recordTx();
+}
+
+/**
+ * Record a successful delivery for a subscription: the consecutive failure
+ * counter is reset and the last error is cleared (#701).
+ */
+export function recordSubscriptionSuccess(subscriptionId: number): void {
+  const db = getDb();
+  db.prepare(
+    `UPDATE webhook_subscriptions
+     SET consecutive_failures = 0,
+         last_error = NULL
+     WHERE id = ?`
+  ).run(subscriptionId);
 }
 
 export function getSubscriptionsForContract(contractId: string): WebhookSubscription[] {
@@ -1698,8 +1882,8 @@ export function insertHistoricalEventBatch(
   const db = getDb();
   const insertStmt = db.prepare(`
     INSERT OR IGNORE INTO events
-    (contract_id, event_type, ledger_sequence, timestamp, data_json)
-    VALUES (?, ?, ?, ?, ?)
+    (contract_id, event_type, ledger_sequence, timestamp, data_json, tx_hash, event_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
   `);
 
   const importTransaction = db.transaction(() => {
@@ -1711,6 +1895,8 @@ export function insertHistoricalEventBatch(
         ev.ledgerSequence,
         ev.timestamp,
         ev.dataJson,
+        ev.txHash ?? null,
+        ev.eventId ?? null,
       );
       if (result.changes > 0) inserted += 1;
     }

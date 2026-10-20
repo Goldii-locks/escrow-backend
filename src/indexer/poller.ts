@@ -154,6 +154,10 @@ function toEventRow(event: any, fallbackContractId: string): EventRow {
     ledgerSequence: event.ledger,
     timestamp: toEventTimestamp(event.ledgerClosedAt),
     dataJson: JSON.stringify(scValToNative(event.value)),
+    // The transaction hash lets the UI link the event to a block explorer,
+    // and the event id tells two events of the same ledger apart (#700).
+    txHash: typeof event.txHash === "string" ? event.txHash : null,
+    eventId: typeof event.id === "string" ? event.id : null,
   };
 }
 

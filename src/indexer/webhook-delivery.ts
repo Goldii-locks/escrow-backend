@@ -1,8 +1,25 @@
-import { getDb, getSubscriptions, EventDbRow } from "./db.js";
+import {
+  getDb,
+  getActiveSubscriptions,
+  recordSubscriptionFailure,
+  recordSubscriptionSuccess,
+  EventDbRow,
+} from "./db.js";
 import logger from "../utils/logger.js";
 
 const MAX_RETRIES = 3;
 const BACKOFF_MS = [500, 1500, 4500];
+
+/**
+ * Number of consecutive failed deliveries after which a subscription is
+ * auto-disabled (#701). A permanently dead endpoint (expired domain, removed
+ * route) used to be retried for every matching event, forever, delaying every
+ * healthy subscriber behind it in the sequential delivery loop.
+ */
+export const WEBHOOK_DISABLE_AFTER = Math.max(
+  1,
+  parseInt(process.env.WEBHOOK_DISABLE_AFTER || "50", 10) || 50,
+);
 
 /**
  * Number of ledgers scanned per query inside deliverWebhooks (#690). Paging
@@ -19,6 +36,10 @@ const WEBHOOK_DELIVERY_LEDGER_PAGE_SIZE =
  *
  * v1: initial versioned envelope
  * (`{ version, event_type, contract_id, ledger_sequence, timestamp, data }`).
+ *
+ * The transaction hash (`tx_hash` / `txHash`) and the event id (`event_id`)
+ * were added later as optional, additive fields, so the envelope version is
+ * unchanged (#700).
  */
 export const WEBHOOK_PAYLOAD_VERSION = 1;
 
@@ -91,6 +112,11 @@ export async function deliverToUrl(
     contract_id: event.contract_id,
     ledger_sequence: event.ledger_sequence,
     timestamp: event.timestamp,
+    // The transaction hash lets the subscriber link the event to a block
+    // explorer; `txHash` is the camel-case alias of `tx_hash` (#700).
+    tx_hash: event.tx_hash ?? null,
+    txHash: event.tx_hash ?? null,
+    event_id: event.event_id ?? null,
     data: JSON.parse(event.data_json),
   };
 
@@ -182,8 +208,13 @@ export async function deliverWebhooks(
 
   // Subscriptions are few; load them once and group by contract so each
   // event only meets the subscriptions for its own contract (#690).
-  const subscriptionsByContract = new Map<string, ReturnType<typeof getSubscriptions>>();
-  for (const sub of getSubscriptions()) {
+  // Auto-disabled subscriptions are skipped: their endpoint is permanently
+  // dead and retrying it would delay every healthy subscriber (#701).
+  const subscriptionsByContract = new Map<
+    string,
+    ReturnType<typeof getActiveSubscriptions>
+  >();
+  for (const sub of getActiveSubscriptions()) {
     const list = subscriptionsByContract.get(sub.contract_id) ?? [];
     list.push(sub);
     subscriptionsByContract.set(sub.contract_id, list);
@@ -225,6 +256,8 @@ export async function deliverWebhooks(
         results.push(result);
 
         if (result.success) {
+          // A successful delivery clears the failure history (#701).
+          recordSubscriptionSuccess(sub.id);
           logger.info("Webhook delivered", {
             subscriptionId: sub.id,
             eventId: event.id,
@@ -233,6 +266,11 @@ export async function deliverWebhooks(
             durationMs: result.durationMs,
           });
         } else {
+          const failure = recordSubscriptionFailure(
+            sub.id,
+            result.error ?? result.errorCode ?? "delivery failed",
+            WEBHOOK_DISABLE_AFTER,
+          );
           logger.error("Webhook delivery failed after all attempts", {
             subscriptionId: sub.id,
             eventId: event.id,
@@ -240,7 +278,20 @@ export async function deliverWebhooks(
             status: result.status,
             errorCode: result.errorCode,
             durationMs: result.durationMs,
+            consecutiveFailures: failure.consecutiveFailures,
+            disabled: failure.disabled,
           });
+          if (failure.disabled) {
+            logger.warn(
+              "Webhook subscription auto-disabled after repeated delivery failures",
+              {
+                subscriptionId: sub.id,
+                webhookUrl: sub.webhook_url,
+                consecutiveFailures: failure.consecutiveFailures,
+                disableAfter: WEBHOOK_DISABLE_AFTER,
+              },
+            );
+          }
         }
       }
     }
