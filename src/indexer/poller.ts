@@ -39,7 +39,9 @@ const RPC_URL =
 // reports failure, blowing past Jest's default timeout.
 const IS_TEST_ENV = process.env.NODE_ENV === "test";
 
-const rpcClient = new RpcPollerClient(RPC_URL, {
+// Exported so consumers (e.g. the admin /indexer-status route) can read the
+// chain head without constructing a second RPC client.
+export const rpcClient = new RpcPollerClient(RPC_URL, {
   maxRetries: parseInt(process.env.INDEXER_RPC_MAX_RETRIES || "5", 10),
   initialBackoffMs: parseInt(
     process.env.INDEXER_RPC_INITIAL_BACKOFF_MS || (IS_TEST_ENV ? "1" : "1000"),

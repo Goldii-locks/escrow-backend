@@ -1278,16 +1278,6 @@ export async function insertEventBatchLocked(
 // Event queries
 // ---------------------------------------------------------------------------
 
-export function getEventsByAddress(address: string) {
-  const db = getDb();
-  const stmt = db.prepare(`
-    SELECT * FROM events 
-    WHERE data_json LIKE ?
-    ORDER BY ledger_sequence DESC
-  `);
-  return stmt.all(`%${address}%`);
-}
-
 export interface JobSummary {
   contract_id: string;
   role: "client" | "freelancer" | "arbiter" | "unknown";

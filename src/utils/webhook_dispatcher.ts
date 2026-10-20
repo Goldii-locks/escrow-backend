@@ -10,9 +10,11 @@ import {
   addSubscription,
   removeSubscription,
   getSubscriptions,
+  getActiveContractIds,
   type WebhookSubscription,
 } from "../indexer/db.js";
 import { deliverWebhooks } from "../indexer/webhook-delivery.js";
+import { isValidStellarContractId } from "./stellar.js";
 import logger from "./logger.js";
 
 export const WEBHOOK_DISPATCHER_ROUTE_PREFIX = "/api/webhooks";
@@ -96,6 +98,19 @@ export function dispatchSubscribe(input: SubscribeInput): SubscribeResult {
     return { ok: false, status: 400, error, traceId };
   }
 
+  if (!isValidStellarContractId(input.contract_id)) {
+    const error = "Invalid contract_id";
+    logger.debug("webhook_dispatcher subscribe response sent", {
+      traceId,
+      route,
+      status: 400,
+      success: false,
+      error,
+      contractId: input.contract_id,
+    });
+    return { ok: false, status: 400, error, traceId };
+  }
+
   const normalized = normalizeEventTypes(input.event_types);
   if (!normalized.ok) {
     logger.debug("webhook_dispatcher subscribe response sent", {
@@ -109,6 +124,22 @@ export function dispatchSubscribe(input: SubscribeInput): SubscribeResult {
   }
 
   try {
+    // A contract that isn't monitored can never receive deliveries, so
+    // subscribing to it is rejected with 404 rather than silently storing a
+    // dead subscription.
+    if (!getActiveContractIds().includes(input.contract_id)) {
+      const error = "Contract is not indexed";
+      logger.debug("webhook_dispatcher subscribe response sent", {
+        traceId,
+        route,
+        status: 404,
+        success: false,
+        error,
+        contractId: input.contract_id,
+      });
+      return { ok: false, status: 404, error, traceId };
+    }
+
     const subscription = addSubscription(
       input.contract_id,
       input.webhook_url,

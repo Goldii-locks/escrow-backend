@@ -7,6 +7,7 @@ import {
   setDb,
   addSubscription,
   removeSubscription,
+  registerContract,
   getSubscriptions,
   insertEvent,
 } from "../src/indexer/db.js";
@@ -77,11 +78,22 @@ describe("POST /api/webhooks/subscribe – HTTP", () => {
     app.use("/api/webhooks", router);
   });
 
+  const VALID_CONTRACT =
+    "CDD5WKK3WT3QVKXMXTJNDIXE4T73FK6GGXDSD6UTJAH6YYZU52SQ4MUH";
+  // Valid contract ID that is NOT registered in monitored_contracts.
+  const UNMONITORED_CONTRACT =
+    "CBQWCYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQWCV5G";
+  const WEBHOOK_URL = "https://example.com/hook";
+
   const VALID_BODY = {
-    contract_id: "CA3D5K7UXYZ123456789012345678901234567890123456789012345678901",
-    webhook_url: "https://example.com/hook",
+    contract_id: VALID_CONTRACT,
+    webhook_url: WEBHOOK_URL,
     event_types: ["funded", "approved"],
   };
+
+  beforeEach(() => {
+    registerContract(VALID_CONTRACT, "test contract");
+  });
 
   it("returns 200 with subscription on valid request", async () => {
     const res = await request(app)
@@ -97,7 +109,16 @@ describe("POST /api/webhooks/subscribe – HTTP", () => {
   it("returns 400 when contract_id is missing", async () => {
     const res = await request(app)
       .post("/api/webhooks/subscribe")
-      .send({ webhook_url: "https://example.com/hook" })
+      .send({ webhook_url: WEBHOOK_URL })
+      .expect(400);
+
+    expect(res.body.success).toBe(false);
+  });
+
+  it("returns 400 when contract_id is not a valid Stellar contract ID", async () => {
+    const res = await request(app)
+      .post("/api/webhooks/subscribe")
+      .send({ contract_id: "hello", webhook_url: WEBHOOK_URL })
       .expect(400);
 
     expect(res.body.success).toBe(false);
@@ -106,10 +127,20 @@ describe("POST /api/webhooks/subscribe – HTTP", () => {
   it("returns 400 when webhook_url is missing", async () => {
     const res = await request(app)
       .post("/api/webhooks/subscribe")
-      .send({ contract_id: "CONTRACT_A" })
+      .send({ contract_id: VALID_CONTRACT })
       .expect(400);
 
     expect(res.body.success).toBe(false);
+  });
+
+  it("returns 404 when contract is valid but not indexed", async () => {
+    const res = await request(app)
+      .post("/api/webhooks/subscribe")
+      .send({ contract_id: UNMONITORED_CONTRACT, webhook_url: WEBHOOK_URL })
+      .expect(404);
+
+    expect(res.body.success).toBe(false);
+    expect(res.body.error).toBe("Contract is not indexed");
   });
 
   it("accepts '*' event_types", async () => {
@@ -124,7 +155,7 @@ describe("POST /api/webhooks/subscribe – HTTP", () => {
   it("accepts missing event_types (defaults to all)", async () => {
     const res = await request(app)
       .post("/api/webhooks/subscribe")
-      .send({ contract_id: VALID_BODY.contract_id, webhook_url: "https://example.com/hook2" })
+      .send({ contract_id: VALID_BODY.contract_id, webhook_url: WEBHOOK_URL })
       .expect(200);
 
     expect(res.body.success).toBe(true);

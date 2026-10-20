@@ -11,6 +11,7 @@ import {
   initSchema,
   setDb,
   addSubscription,
+  registerContract,
   closeDb,
 } from "../src/indexer/db.js";
 
@@ -28,7 +29,7 @@ jest.unstable_mockModule("../src/utils/logger.js", () => ({
 const { default: router } = await import("../src/routes/webhooks.js");
 
 const CONTRACT_A =
-  "CA3D5K7UXYZ123456789012345678901234567890123456789012345678901";
+  "CDD5WKK3WT3QVKXMXTJNDIXE4T73FK6GGXDSD6UTJAH6YYZU52SQ4MUH";
 
 let testDb: Database.Database;
 let app: express.Express;
@@ -55,6 +56,8 @@ afterAll(() => {
 beforeEach(() => {
   testDb.exec("DELETE FROM webhook_subscriptions");
   jest.clearAllMocks();
+  // Subscribe requires the contract to be indexed (monitored + active).
+  registerContract(CONTRACT_A, "test contract");
 });
 
 describe("webhook_dispatcher supertest validations (#521)", () => {

@@ -73,6 +73,7 @@ import {
 } from "../schemas/jobs.js";
 import { strictLimiter, walletLookupLimiter } from "../middleware/rateLimiter.js";
 import logger from "../utils/logger.js";
+import { formatError } from "../utils/format-error.js";
 import { isValidStellarContractId } from "../utils/stellar.js";
 import { randomUUID } from "crypto";
 
@@ -368,23 +369,52 @@ function classifySubmitError(rawError: string): Classified {
 // ---------------------------------------------------------------------------
 // Helper: parse job fields out of a successful simulation result
 // ---------------------------------------------------------------------------
-const parseJobFromResult = (result: any, contractId: string) => {
-  if ("result" in result && result.result?.retval) {
-    const val = result.result.retval;
-    const client = val.client().toString();
-    const freelancer = val.freelancer().toString();
-    const arbiter = val.arbiter().toString();
-    const token = val.token().toString();
-    const funded = val.funded();
-    const milestones = val.milestones().map((m: any, i: number) => ({
-      index: i,
-      amount: m.amount().toString(),
-      status: Object.keys(m.status())[0],
-    }));
+// Native shape of the contract return value parsed by parseJobFromResult.
+interface NativeJobValue {
+  client: () => { toString(): string };
+  freelancer: () => { toString(): string };
+  arbiter: () => { toString(): string };
+  token: () => { toString(): string };
+  funded: () => unknown;
+  milestones: () => Array<{
+    amount: () => { toString(): string };
+    status: () => Record<string, unknown>;
+  }>;
+}
 
-    return { id: contractId, client, freelancer, arbiter, token, funded, milestones };
-  }
-  return null;
+// Shape of a single build-tx script argument as sent by the frontend.
+interface BuildTxArg {
+  type: string;
+  value: unknown;
+}
+
+const parseJobFromResult = (
+  result: { result?: { retval: unknown } } | null,
+  contractId: string,
+): {
+  id: string;
+  client: string;
+  freelancer: string;
+  arbiter: string;
+  token: string;
+  funded: unknown;
+  milestones: Array<{ index: number; amount: string; status: string }>;
+} | null => {
+  const retval = result?.result?.retval;
+  if (!retval) return null;
+  const val = retval as unknown as NativeJobValue;
+  const client = val.client().toString();
+  const freelancer = val.freelancer().toString();
+  const arbiter = val.arbiter().toString();
+  const token = val.token().toString();
+  const funded = val.funded();
+  const milestones = val.milestones().map((m, i) => ({
+    index: i,
+    amount: m.amount().toString(),
+    status: Object.keys(m.status())[0],
+  }));
+
+  return { id: contractId, client, freelancer, arbiter, token, funded, milestones };
 };
 
 /**
@@ -555,13 +585,13 @@ router.post(
         draftId: draft.id,
         milestoneCount: body.milestones?.length ?? 0,
       });
-    } catch (err: any) {
-      const message = err?.message ?? String(err);
+    } catch (err: unknown) {
+      const message = formatError(err);
       logger.error("Failed to create job draft", {
         traceId,
         ...pathVars,
         error: message,
-        stack: err?.stack,
+        stack: err instanceof Error ? err.stack : undefined,
       });
       sendError(res, 500, "Internal server error");
     }
@@ -670,11 +700,11 @@ router.get("/:contractId/history", (req: Request, res: Response) => {
 
     const result = getEventsByContract(contractId, page, limit);
     res.json({ success: true, ...result });
-  } catch (err: any) {
+  } catch (err: unknown) {
     // Log the detail server-side only; never forward raw DB errors (#672).
     logger.error("Failed to fetch job history", {
       contractId: req.params.contractId,
-      error: err?.message,
+      error: formatError(err),
     });
     sendError(res, 500, "Internal server error");
   }
@@ -762,7 +792,7 @@ router.get(
         logger.info("Fee preview served from in-flight cache", { contractId, amount });
       }
       sendSuccess(res, split);
-    } catch (err: any) {
+    } catch (err: unknown) {
       // Failures are never cached; the client only sees a classified status
       // and a fixed message, never the raw RPC error.
       if (err instanceof SimError) {
@@ -772,7 +802,7 @@ router.get(
       logger.error("Failed to compute fee preview", {
         contractId,
         amount,
-        error: err?.message ?? String(err),
+        error: formatError(err),
       });
       sendError(res, 500, "Internal server error");
     } finally {
@@ -842,8 +872,8 @@ router.get(
         milestoneCount: job.milestones.length,
       });
       sendSuccess(res, job);
-    } catch (err: any) {
-      logger.error("Failed to fetch job", { contractId, error: err?.message });
+    } catch (err: unknown) {
+      logger.error("Failed to fetch job", { contractId, error: formatError(err) });
       sendError(res, 500, "Internal server error");
     }
   },
@@ -930,9 +960,11 @@ router.get(
         // Parse successful result
         if ("result" in result && result.result?.retval) {
           const tokens: string[] = [];
-          const vec = result.result.retval as any;
+          const vec = result.result.retval as unknown as {
+            forEach: (cb: (item: unknown) => void) => void;
+          };
           if (typeof vec.forEach === "function") {
-            vec.forEach((token: any) => tokens.push(token.toString()));
+            vec.forEach((token) => tokens.push(String(token)));
           }
           whitelistCache.set(contractId, tokens);
           logger.info("Whitelisted tokens fetched successfully", { contractId, tokenCount: tokens.length });
@@ -953,11 +985,11 @@ router.get(
       }
 
       sendSuccess(res, { tokens });
-    } catch (err: any) {
+    } catch (err: unknown) {
       // Robust error handling with no stack trace leakage. Errors keep their
       // original message so they can be classified here rather than collapsed
       // into a single generic failure.
-      const message = err?.message ?? "Internal server error";
+      const message = formatError(err);
 
       // 401: authentication rejected by the RPC layer
       if (/unauthorized|invalid authentication/i.test(message)) {
@@ -1053,8 +1085,8 @@ router.post(
         logger.info("Whitelist update transaction built", { contractId, token, action });
         sendSuccess(res, { xdr });
         return;
-      } catch (err: any) {
-        const message = err?.message ?? String(err);
+      } catch (err: unknown) {
+        const message = formatError(err);
         if (/unauthorized|invalid authentication/i.test(message)) {
           logger.warn("Unauthorized request for whitelist update", { contractId });
           sendError(res, 401, "Unauthorized");
@@ -1107,8 +1139,8 @@ router.post(
       whitelistCache.del(contractId);
       logger.info("Whitelist updated successfully", { contractId, count: targetAddresses.length });
       sendSuccess(res, { contractId, addresses: targetAddresses, updated: true });
-    } catch (err: any) {
-      const message = err?.message ?? String(err);
+    } catch (err: unknown) {
+      const message = formatError(err);
       if (/unauthorized|invalid authentication/i.test(message)) {
         logger.warn("Unauthorized request for whitelist update", { contractId });
         sendError(res, 401, "Unauthorized");
@@ -1159,8 +1191,8 @@ router.post(
     try {
       // Validate for whitelist management methods
       if (method === "add_whitelisted_token" || method === "remove_whitelisted_token") {
-        const adminArg = args.find((a: any) => a.type === "address" && a.value);
-        const tokenArg = args.find((a: any) => a.type === "address" && a.value && a !== adminArg);
+        const adminArg = args.find((a: BuildTxArg) => a.type === "address" && a.value);
+        const tokenArg = args.find((a: BuildTxArg) => a.type === "address" && a.value && a !== adminArg);
 
         if (!adminArg || !tokenArg) {
           logger.warn("Missing admin/token args for whitelist management", {
@@ -1253,17 +1285,32 @@ router.post(
             ...pathVars,
           });
 
-          const scArgs = (args || []).map((a: any) => {
-            if (a.type === "address") return Address.fromString(a.value).toScVal();
-            if (a.type === "i128") return nativeToScVal(BigInt(a.value), { type: "i128" });
+          const scArgs = (args || []).map((a: BuildTxArg) => {
+            if (a.type === "address")
+              return Address.fromString(a.value as string).toScVal();
+            if (a.type === "i128")
+              return nativeToScVal(BigInt(a.value as string | number | bigint), {
+                type: "i128",
+              });
             if (a.type === "u32") return nativeToScVal(a.value, { type: "u32" });
-            if (a.type === "u64") return nativeToScVal(BigInt(a.value), { type: "u64" });
+            if (a.type === "u64")
+              return nativeToScVal(BigInt(a.value as string | number | bigint), {
+                type: "u64",
+              });
             if (a.type === "bool") return nativeToScVal(a.value, { type: "bool" });
             if (a.type === "vec") {
-              const vecElements = a.value.map((item: any) => {
-                if (item.type === "i128") return nativeToScVal(BigInt(item.value), { type: "i128" });
+              const vecElements = (a.value as BuildTxArg[]).map((item: BuildTxArg) => {
+                if (item.type === "i128")
+                  return nativeToScVal(
+                    BigInt(item.value as string | number | bigint),
+                    { type: "i128" },
+                  );
                 if (item.type === "u32") return nativeToScVal(item.value, { type: "u32" });
-                if (item.type === "u64") return nativeToScVal(BigInt(item.value), { type: "u64" });
+                if (item.type === "u64")
+                  return nativeToScVal(
+                    BigInt(item.value as string | number | bigint),
+                    { type: "u64" },
+                  );
                 return nativeToScVal(item.value);
               });
               return nativeToScVal(vecElements);
@@ -1307,12 +1354,12 @@ router.post(
       let xdr: string;
       try {
         xdr = await requestPromise;
-      } catch (err: any) {
+      } catch (err: unknown) {
         logger.debug("RPC promise rejected for build-tx, clearing cache entry", {
           traceId,
           ...pathVars,
           cacheKey,
-          error: err?.message ?? String(err),
+          error: formatError(err),
         });
         buildTxCache.del(cacheKey);
         throw err;
@@ -1355,20 +1402,19 @@ router.post(
       });
 
       res.json({ success: true, xdr });
-    } catch (err: any) {
-      const message = err?.message ?? String(err);
-      const stack = err?.stack;
+    } catch (err: unknown) {
+      const message = formatError(err);
       logger.debug("Build-tx error caught", {
         traceId,
         ...pathVars,
         error: message,
-        stack,
+        stack: err instanceof Error ? err.stack : undefined,
       });
       logger.error("Failed to build build-tx transaction", {
         traceId,
         ...pathVars,
         error: message,
-        stack,
+        stack: err instanceof Error ? err.stack : undefined,
       });
       logger.debug("Build-tx error response body prepared", {
         traceId,
@@ -1437,8 +1483,8 @@ router.post(
       let account;
       try {
         account = await server.getAccount(sourceAddress as string);
-      } catch (err: any) {
-        const errMsg = String(err?.message || err);
+      } catch (err: unknown) {
+        const errMsg = formatError(err);
         const { status, message } = classifySimError(errMsg);
         logger.error("Failed to get account for partial release", {
           traceId,
@@ -1446,7 +1492,6 @@ router.post(
           index,
           sourceAddress,
           error: errMsg,
-          stack: err?.stack,
         });
         sendError(res, status, message);
         return;
@@ -1497,8 +1542,8 @@ router.post(
           let prepared;
           try {
             prepared = await server.prepareTransaction(tx);
-          } catch (err: any) {
-            const errMsg = String(err?.message || err);
+          } catch (err: unknown) {
+            const errMsg = formatError(err);
             const { status, message } = classifySimError(errMsg);
             logger.error("Failed to prepare transaction for partial release", {
               traceId,
@@ -1520,10 +1565,19 @@ router.post(
       let xdr: string;
       try {
         xdr = await requestPromise;
-      } catch (err: any) {
+      } catch (err: unknown) {
         partialReleaseCache.del(cacheKey);
-        if (err && err.status) {
-          sendError(res, err.status, err.message);
+        if (
+          typeof err === "object" &&
+          err !== null &&
+          "status" in err &&
+          "message" in err
+        ) {
+          const { status, message } = err as {
+            status: number;
+            message: string;
+          };
+          sendError(res, status, message);
           return;
         }
         throw err;
@@ -1536,8 +1590,8 @@ router.post(
       }
 
       res.json({ success: true, xdr });
-    } catch (err: any) {
-      const errMsg = String(err?.message || err);
+    } catch (err: unknown) {
+      const errMsg = formatError(err);
       // Structured, server-side-only error detail – the client receives a clean
       // 500 body with no internal stack trace leakage (#117).
       logger.error("Unexpected error in partial release", {
@@ -1545,7 +1599,7 @@ router.post(
         contractId: req.params.contractId,
         index: req.params.index,
         error: errMsg,
-        stack: err?.stack,
+        stack: err instanceof Error ? err.stack : undefined,
       });
       sendError(res, 500, "Internal server error");
     }
@@ -1582,7 +1636,6 @@ router.get(
         contractId,
         index,
         ip: req.ip ?? req.socket?.remoteAddress,
-        requestId: (req as any).requestId,
       });
 
       const cached = timeRemainingCache.get<number>(cacheKey);
@@ -1640,13 +1693,12 @@ router.get(
         logger.info("Time remaining served from in-flight cache", { contractId, index });
       }
       sendSuccess(res, { secondsRemaining });
-    } catch (err: any) {
+    } catch (err: unknown) {
       if (err instanceof SimError) {
         logger.warn("Simulation error for time-remaining", {
           contractId,
           index,
           status: err.status,
-          requestId: (req as any).requestId,
         });
         if (err.status === 404) {
           sendError(res, 404, "Job not found");
@@ -1656,11 +1708,10 @@ router.get(
         return;
       }
       logger.error("Failed to get time remaining", {
-        error: err?.message,
+        error: formatError(err),
         contractId: req.params.contractId,
         index: req.params.index,
-        stack: err?.stack,
-        requestId: (req as any).requestId,
+        stack: err instanceof Error ? err.stack : undefined,
       });
       sendError(res, 500, "Internal server error");
     }
@@ -1810,12 +1861,12 @@ router.post(
       let xdr: string;
       try {
         xdr = await requestPromise;
-      } catch (err: any) {
+      } catch (err: unknown) {
         logger.debug("RPC promise rejected, clearing cache entry", {
           traceId,
           ...pathVars,
           cacheKey,
-          error: err?.message ?? String(err),
+          error: formatError(err),
         });
         claimAutoReleaseCache.del(cacheKey);
         throw err;
@@ -1846,20 +1897,19 @@ router.post(
       });
 
       res.json(responseBody);
-    } catch (err: any) {
-      const message = err?.message ?? String(err);
-      const stack = err?.stack;
+    } catch (err: unknown) {
+      const message = formatError(err);
       logger.debug("Claim auto-release error caught", {
         traceId,
         ...pathVars,
         error: message,
-        stack,
+        stack: err instanceof Error ? err.stack : undefined,
       });
       logger.error("Failed to build claim-auto-release tx", {
         traceId,
         ...pathVars,
         error: message,
-        stack,
+        stack: err instanceof Error ? err.stack : undefined,
       });
       const responseBody = { success: false, error: "Internal server error" };
       logger.debug("Claim auto-release error response body prepared", {
