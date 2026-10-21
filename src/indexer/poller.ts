@@ -9,7 +9,6 @@ import {
   updateContractPointer,
   registerContract,
   adjustPollerInterval,
-  getCurrentPollIntervalMs as getDbPollIntervalMs,
   resetPollerThrottleState,
   verifySchemaUpToDate,
   assertSchemaValid,
@@ -557,15 +556,18 @@ export async function pollEvents(): Promise<boolean> {
     const totalElapsed = performance.now() - pollStart;
     failureMonitor.recordSuccess();
 
-    // --- Dynamic poller throttling (#265) ---
-    const throttleState = adjustPollerInterval(totalEvents);
+    // --- Dynamic poller throttling ---
+    adjustPollerInterval(totalEvents);
     adjustIndexerRunnerPollInterval(totalEvents);
+
+    const sawActivity = anyGroupPolled;
+    currentPollIntervalMs = nextPollIntervalMs(currentPollIntervalMs, sawActivity);
 
     logger.info("Processed indexer poll", {
       eventCount: totalEvents,
       upToLedger: currentLedger,
       elapsedMs: Math.round(totalElapsed),
-      pollIntervalMs: throttleState.currentIntervalMs,
+      pollIntervalMs: currentPollIntervalMs,
     });
 
     if (anyGroupPolled) {
@@ -613,6 +615,9 @@ export async function pollEvents(): Promise<boolean> {
     }
 
     // A failed poll advanced nothing, so report no progress to the throttler.
+    adjustPollerInterval(0);
+    adjustIndexerRunnerPollInterval(0);
+    currentPollIntervalMs = nextPollIntervalMs(currentPollIntervalMs, false);
     return false;
   }
 }
@@ -620,10 +625,9 @@ export async function pollEvents(): Promise<boolean> {
 let pollerTimeout: NodeJS.Timeout | null = null;
 let pollerRunning = false;
 
-/** One poll plus the interval adjustment its outcome implies. */
+/** One poll cycle. The interval adjustment is performed directly within pollEvents(). */
 async function runPollCycle(): Promise<void> {
-  const sawActivity = await pollEvents();
-  currentPollIntervalMs = nextPollIntervalMs(currentPollIntervalMs, sawActivity);
+  await pollEvents();
 }
 
 async function pollLoop() {
