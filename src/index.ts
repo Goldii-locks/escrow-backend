@@ -13,6 +13,7 @@ import { startPoller } from "./indexer/poller.js";
 import { startReconciliationJob } from "./indexer/reconciliation.js";
 import { markIndexerStarted } from "./indexer/status.js";
 import logger from "./utils/logger.js";
+import { requestIdMiddleware, requestLogger } from "./middleware/request-id.js";
 
 dotenv.config();
 
@@ -47,24 +48,13 @@ if (process.env.NODE_ENV === "production") {
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+app.use(requestIdMiddleware);
 app.use(cors());
 app.use(helmet());
 app.use(express.json());
 
 // Structured HTTP request logging (#86)
-app.use((req: Request, res: Response, next: NextFunction) => {
-  const start = Date.now();
-  res.on("finish", () => {
-    logger.info("HTTP request", {
-      method: req.method,
-      url: req.originalUrl,
-      status: res.statusCode,
-      durationMs: Date.now() - start,
-      ip: req.ip ?? req.socket?.remoteAddress,
-    });
-  });
-  next();
-});
+app.use(requestLogger);
 
 app.get("/health", (_req, res) => {
   res.json({ status: "ok", contract: process.env.CONTRACT_ID });

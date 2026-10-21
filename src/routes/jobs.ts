@@ -488,7 +488,7 @@ router.post(
   createJobDraftRateLimit,
   createJobDraftValidation,
   (req: Request, res: Response) => {
-    const traceId = randomUUID();
+    const traceId = req.id;
     const pathVars = { route: "/api/jobs/create-job-draft" };
 
     logger.debug("Create-job-draft handler entered", {
@@ -1140,7 +1140,7 @@ router.post(
   ),
   async (req: Request, res: Response) => {
     const { contractId, method, args, sourceAddress } = req.body;
-    const traceId = randomUUID();
+    const traceId = req.id;
     const pathVars = { contractId, method, sourceAddress };
 
     logger.debug("Build-tx handler entered", {
@@ -1408,7 +1408,7 @@ router.post(
     logger.warn("Invalid body for partial-release", { body: req.body }),
   ),
   async (req: Request, res: Response) => {
-    const traceId = randomUUID();
+    const traceId = req.id;
     try {
       const { contractId, index } = req.params;
 
@@ -1582,7 +1582,7 @@ router.get(
         contractId,
         index,
         ip: req.ip ?? req.socket?.remoteAddress,
-        requestId: (req as any).requestId,
+        requestId: req.id,
       });
 
       const cached = timeRemainingCache.get<number>(cacheKey);
@@ -1646,7 +1646,7 @@ router.get(
           contractId,
           index,
           status: err.status,
-          requestId: (req as any).requestId,
+          requestId: req.id,
         });
         if (err.status === 404) {
           sendError(res, 404, "Job not found");
@@ -1660,7 +1660,7 @@ router.get(
         contractId: req.params.contractId,
         index: req.params.index,
         stack: err?.stack,
-        requestId: (req as any).requestId,
+        requestId: req.id,
       });
       sendError(res, 500, "Internal server error");
     }
@@ -1686,7 +1686,7 @@ router.post(
     const { index } = req.params;
     const { sourceAddress } = req.body;
     const cacheKey = `${contractId}:${index}:${sourceAddress}`;
-    const traceId = randomUUID();
+    const traceId = req.id;
     const pathVars = { contractId, index, sourceAddress };
 
     logger.debug("Claim auto-release handler entered", {
@@ -1900,7 +1900,7 @@ router.post(
   async (req: Request, res: Response) => {
     const { signedXdr, sourceAddress } = req.body as { signedXdr: string; sourceAddress?: string };
     const cacheKey = signedXdr;
-    const traceId = randomUUID();
+    const traceId = req.id;
 
     logger.info("Submit transaction request received", {
       traceId,
