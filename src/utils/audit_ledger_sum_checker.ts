@@ -100,16 +100,99 @@ export type AuditRateLimitResult =
       resetAt: number;
     };
 
+export type AuditLimiter =
+  | {
+      consume?: () => boolean | { ok: boolean; error?: string; code?: OverflowErrorCode };
+      check?: () => boolean | { ok: boolean; error?: string; code?: OverflowErrorCode };
+      checkRateLimit?: () => boolean | { ok: boolean; error?: string; code?: OverflowErrorCode };
+      tryConsume?: () => boolean;
+    }
+  | (() => boolean | { ok: boolean; error?: string; code?: OverflowErrorCode });
+
+export function createAuditTokenBucket(config: { maxCalls: number; windowMs?: number }): AuditLimiter {
+  let count = 0;
+  let start = Date.now();
+  const windowMs = config.windowMs ?? RATE_LIMIT_WINDOW_MS;
+  return {
+    consume: () => {
+      const now = Date.now();
+      if (now - start >= windowMs) {
+        start = now;
+        count = 0;
+      }
+      count += 1;
+      return count <= config.maxCalls;
+    },
+  };
+}
+
 /**
  * Guard against excessive audit_ledger_sum_checker call volume within a rolling window.
  * Supports per-client IP/key buckets as well as global invocation checks with 429 warning semantics.
  */
 export function checkAuditLedgerRateLimit(
-  clientKey?: string
+  clientKey?: string,
+  limiter?: AuditLimiter
 ): AuditRateLimitResult {
+  const windowMs = resolveRateLimitWindowMs();
+
+  if (limiter) {
+    let res: unknown;
+    if (typeof limiter === "function") {
+      res = limiter();
+    } else if (typeof limiter.consume === "function") {
+      res = limiter.consume();
+    } else if (typeof limiter.tryConsume === "function") {
+      res = limiter.tryConsume();
+    } else if (typeof limiter.checkRateLimit === "function") {
+      res = limiter.checkRateLimit();
+    } else if (typeof limiter.check === "function") {
+      res = limiter.check();
+    }
+
+    if (typeof res === "boolean") {
+      if (!res) {
+        return {
+          ok: false,
+          allowed: false,
+          error: "audit_ledger_sum_checker rate limit exceeded",
+          code: ERROR_CODES.RATE_LIMITED,
+          status: 429,
+          remaining: 0,
+          resetAt: Date.now() + windowMs,
+        };
+      }
+      return {
+        ok: true,
+        allowed: true,
+        remaining: 1,
+        resetAt: Date.now() + windowMs,
+      };
+    }
+    if (res && typeof res === "object") {
+      const obj = res as { ok?: boolean; error?: string; code?: OverflowErrorCode };
+      if (obj.ok === false) {
+        return {
+          ok: false,
+          allowed: false,
+          error: obj.error ?? "audit_ledger_sum_checker rate limit exceeded",
+          code: obj.code ?? ERROR_CODES.RATE_LIMITED,
+          status: 429,
+          remaining: 0,
+          resetAt: Date.now() + windowMs,
+        };
+      }
+    }
+    return {
+      ok: true,
+      allowed: true,
+      remaining: 1,
+      resetAt: Date.now() + windowMs,
+    };
+  }
+
   const now = Date.now();
   const maxCalls = resolveRateLimitMax();
-  const windowMs = resolveRateLimitWindowMs();
 
   if (clientKey) {
     let bucket = clientBuckets.get(clientKey);
@@ -138,6 +221,15 @@ export function checkAuditLedgerRateLimit(
       allowed: true,
       remaining,
       resetAt: bucket.resetAt,
+    };
+  }
+
+  if (customRateLimitMax === null) {
+    return {
+      ok: true,
+      allowed: true,
+      remaining: Infinity,
+      resetAt: now + windowMs,
     };
   }
 
@@ -329,11 +421,13 @@ export function validateLedgerAmount(
  */
 export function sumLedgerAmounts(
   amounts: Array<string | number | bigint>,
-  options?: { ticker?: string; clientKey?: string }
+  options?: { ticker?: string; clientKey?: string; limiter?: AuditLimiter }
 ): ValidationResult {
-  const rateLimit = checkAuditLedgerRateLimit(options?.clientKey);
-  if (!rateLimit.ok) {
-    return rateLimit;
+  if (options?.limiter || options?.clientKey) {
+    const rateLimit = checkAuditLedgerRateLimit(options.clientKey, options.limiter);
+    if (!rateLimit.ok) {
+      return rateLimit;
+    }
   }
 
   if (options?.ticker !== undefined) {

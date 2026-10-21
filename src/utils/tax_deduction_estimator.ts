@@ -39,21 +39,82 @@ export function setTaxEstimatorRateLimitMax(max: number | null): void {
   customRateLimitMax = max;
 }
 
-function resolveRateLimitMax(): number {
-  if (customRateLimitMax !== null && customRateLimitMax > 0) {
-    return customRateLimitMax;
-  }
-  const configured = Number(process.env.TAX_ESTIMATOR_RATE_MAX ?? RATE_LIMIT_MAX_CALLS);
-  return Number.isFinite(configured) && configured > 0 ? configured : RATE_LIMIT_MAX_CALLS;
+export type TaxLimiter =
+  | {
+      consume?: () => boolean | { ok: boolean; error?: string; code?: TaxEstimatorErrorCode };
+      check?: () => boolean | { ok: boolean; error?: string; code?: TaxEstimatorErrorCode };
+      checkRateLimit?: () => boolean | { ok: boolean; error?: string; code?: TaxEstimatorErrorCode };
+      tryConsume?: () => boolean;
+    }
+  | (() => boolean | { ok: boolean; error?: string; code?: TaxEstimatorErrorCode });
+
+export function createTaxTokenBucket(config: { maxCalls: number; windowMs?: number }): TaxLimiter {
+  let count = 0;
+  let start = Date.now();
+  const windowMs = config.windowMs ?? RATE_LIMIT_WINDOW_MS;
+  return {
+    consume: () => {
+      const now = Date.now();
+      if (now - start >= windowMs) {
+        start = now;
+        count = 0;
+      }
+      count += 1;
+      return count <= config.maxCalls;
+    },
+  };
 }
 
 /**
  * Guard against excessive tax deduction estimator call volume within a rolling window.
  * Callers get 429-style rejection semantics when thresholds are exceeded.
  */
-export function checkTaxEstimatorRateLimit():
+export function checkTaxEstimatorRateLimit(limiter?: TaxLimiter):
   | { ok: true }
   | { ok: false; error: string; code: TaxEstimatorErrorCode; status: 429 } {
+  if (limiter) {
+    let res: unknown;
+    if (typeof limiter === "function") {
+      res = limiter();
+    } else if (typeof limiter.consume === "function") {
+      res = limiter.consume();
+    } else if (typeof limiter.tryConsume === "function") {
+      res = limiter.tryConsume();
+    } else if (typeof limiter.checkRateLimit === "function") {
+      res = limiter.checkRateLimit();
+    } else if (typeof limiter.check === "function") {
+      res = limiter.check();
+    }
+
+    if (typeof res === "boolean") {
+      if (!res) {
+        return {
+          ok: false,
+          error: "tax_deduction_estimator rate limit exceeded",
+          code: ERROR_CODES.RATE_LIMITED,
+          status: 429,
+        };
+      }
+      return { ok: true };
+    }
+    if (res && typeof res === "object") {
+      const obj = res as { ok?: boolean; error?: string; code?: TaxEstimatorErrorCode };
+      if (obj.ok === false) {
+        return {
+          ok: false,
+          error: obj.error ?? "tax_deduction_estimator rate limit exceeded",
+          code: obj.code ?? ERROR_CODES.RATE_LIMITED,
+          status: 429,
+        };
+      }
+    }
+    return { ok: true };
+  }
+
+  if (customRateLimitMax === null) {
+    return { ok: true };
+  }
+
   const now = Date.now();
   if (now - rateLimitWindowStart >= RATE_LIMIT_WINDOW_MS) {
     rateLimitWindowStart = now;
@@ -61,7 +122,7 @@ export function checkTaxEstimatorRateLimit():
   }
 
   rateLimitCallCount += 1;
-  const maxCalls = resolveRateLimitMax();
+  const maxCalls = customRateLimitMax;
 
   if (rateLimitCallCount > maxCalls) {
     return {
@@ -123,6 +184,7 @@ export const VALID_ROUNDING_POLICIES: RoundingPolicy[] = [
 export interface CalculateTaxOptions {
   roundingMode?: RoundingPolicy;
   roundingPolicy?: RoundingPolicy;
+  limiter?: TaxLimiter;
 }
 
 /**
@@ -204,6 +266,10 @@ export const validateTaxDeductionRemainder = verifyTaxDeductionRemainder;
 
 const CONTRACT_TAX_BPS_SCALE = 10_000n;
 
+export interface PreviewTaxWithholdingOptions {
+  limiter?: TaxLimiter;
+}
+
 /**
  * Preview on-chain tax withholding using the same flat-bps arithmetic as the
  * contract: withholding = floor(remainingBalance * taxRateBps / 10_000).
@@ -213,9 +279,10 @@ const CONTRACT_TAX_BPS_SCALE = 10_000n;
  */
 export function previewTaxWithholding(
   remainingBalance: string | number | bigint,
-  taxRateBps: string | number | bigint
+  taxRateBps: string | number | bigint,
+  options?: PreviewTaxWithholdingOptions
 ): TaxWithholdingPreviewOutcome {
-  const rateLimitCheck = checkTaxEstimatorRateLimit();
+  const rateLimitCheck = checkTaxEstimatorRateLimit(options?.limiter);
   if (!rateLimitCheck.ok) {
     return rateLimitCheck;
   }
@@ -532,7 +599,9 @@ export function calculateTaxDeduction(
     };
   }
 
-  const rateLimitCheck = checkTaxEstimatorRateLimit();
+  const limiter =
+    typeof roundingModeOrOptions === "object" ? roundingModeOrOptions?.limiter : undefined;
+  const rateLimitCheck = checkTaxEstimatorRateLimit(limiter);
   if (!rateLimitCheck.ok) {
     return rateLimitCheck;
   }
@@ -1061,10 +1130,15 @@ function validateBracket(
  * Each bracket's tax is rounded with its own `roundingMode` if set, else the
  * call's rounding policy (default: "truncate").
  */
+export interface EstimateBracketTaxOptions {
+  roundingMode?: RoundingPolicy;
+  limiter?: TaxLimiter;
+}
+
 export function estimateBracketTax(
   grossAmount: string | number | bigint,
   brackets: TaxBracket[],
-  roundingModeOrOptions?: RoundingPolicy | { roundingMode?: RoundingPolicy }
+  roundingModeOrOptions?: RoundingPolicy | EstimateBracketTaxOptions
 ): BracketTaxOutcome {
   let roundingMode: RoundingPolicy = "truncate";
 
@@ -1084,7 +1158,9 @@ export function estimateBracketTax(
     };
   }
 
-  const rateLimitCheck = checkTaxEstimatorRateLimit();
+  const limiter =
+    typeof roundingModeOrOptions === "object" ? roundingModeOrOptions?.limiter : undefined;
+  const rateLimitCheck = checkTaxEstimatorRateLimit(limiter);
   if (!rateLimitCheck.ok) {
     return rateLimitCheck;
   }
