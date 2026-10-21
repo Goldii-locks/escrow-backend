@@ -3,6 +3,7 @@ import { requireAdmin } from "../middleware/adminAuth.js";
 import { getIndexerStatusData } from "../indexer/db.js";
 import { getIndexerUptimeSeconds } from "../indexer/status.js";
 import { getLatestReconciliationResults } from "../indexer/reconciliation.js";
+import { sendSuccess } from "../utils/api-response.js";
 
 const router = Router();
 
@@ -10,8 +11,7 @@ router.use(requireAdmin);
 
 router.get("/indexer-status", (_req, res) => {
   const status = getIndexerStatusData();
-  res.json({
-    success: true,
+  sendSuccess(res, {
     lastIndexedLedger: status.lastIndexedLedger,
     totalEvents: status.totalEvents,
     uptimeSeconds: getIndexerUptimeSeconds(),

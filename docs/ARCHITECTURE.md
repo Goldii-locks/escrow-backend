@@ -64,14 +64,12 @@ Legend:
 | `src/middleware/financial-report-exporter-rate-limit.ts` | unwired | [#718](https://github.com/Goldii-locks/escrow-backend/issues/718) |
 | `src/middleware/job-contract-rate-limit.ts` | live | — |
 | `src/middleware/job-contract-security.ts` | live | — |
-| `src/middleware/partial-payment-allocator-rate-limit.ts` | unwired | [#718](https://github.com/Goldii-locks/escrow-backend/issues/718) |
 | `src/middleware/rateLimiter.ts` | live | — |
 | `src/middleware/refund-ratio-rate-limit.ts` | unwired | [#718](https://github.com/Goldii-locks/escrow-backend/issues/718) |
 | `src/middleware/tax-deduction-rate-limit.ts` | unwired | [#718](https://github.com/Goldii-locks/escrow-backend/issues/718) |
 | `src/middleware/validate.ts` | live | — |
 | `src/routes/admin.ts` | live | — |
 | `src/routes/jobs.ts` | live | — |
-| `src/routes/partial-payment-allocator-example.ts` | unwired | [#718](https://github.com/Goldii-locks/escrow-backend/issues/718) |
 | `src/routes/webhooks.ts` | live | — |
 | `src/routes/whitelist.test.ts` | unwired | [#718](https://github.com/Goldii-locks/escrow-backend/issues/718) |
 | `src/schemas/jobs.ts` | live | — |

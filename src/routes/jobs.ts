@@ -656,20 +656,20 @@ router.get("/:contractId/history", (req: Request, res: Response) => {
     const limit = parseInt((req.query.limit as string) || "10", 10);
 
     if (!contractId || contractId.trim() === "") {
-      res.status(400).json({ success: false, error: "contractId is required" });
+      sendError(res, 400, "contractId is required");
       return;
     }
     if (isNaN(page) || page < 1) {
-      res.status(400).json({ success: false, error: "page must be a positive integer" });
+      sendError(res, 400, "page must be a positive integer");
       return;
     }
     if (isNaN(limit) || limit < 1 || limit > 100) {
-      res.status(400).json({ success: false, error: "limit must be between 1 and 100" });
+      sendError(res, 400, "limit must be between 1 and 100");
       return;
     }
 
     const result = getEventsByContract(contractId, page, limit);
-    res.json({ success: true, ...result });
+    sendSuccess(res, result);
   } catch (err: any) {
     // Log the detail server-side only; never forward raw DB errors (#672).
     logger.error("Failed to fetch job history", {
@@ -1215,7 +1215,7 @@ router.post(
           cached: true,
           xdrLength: cached.length,
         });
-        res.json({ success: true, xdr: cached });
+        sendSuccess(res, { xdr: cached });
         return;
       }
 
@@ -1259,11 +1259,15 @@ router.post(
             if (a.type === "u32") return nativeToScVal(a.value, { type: "u32" });
             if (a.type === "u64") return nativeToScVal(BigInt(a.value), { type: "u64" });
             if (a.type === "bool") return nativeToScVal(a.value, { type: "bool" });
+            // Hex-encoded bytes, e.g. the BytesN<32> milestone spec hashes
+            // `initialize` takes.
+            if (a.type === "bytes") return nativeToScVal(Buffer.from(a.value, "hex"));
             if (a.type === "vec") {
               const vecElements = a.value.map((item: any) => {
                 if (item.type === "i128") return nativeToScVal(BigInt(item.value), { type: "i128" });
                 if (item.type === "u32") return nativeToScVal(item.value, { type: "u32" });
                 if (item.type === "u64") return nativeToScVal(BigInt(item.value), { type: "u64" });
+                if (item.type === "bytes") return nativeToScVal(Buffer.from(item.value, "hex"));
                 return nativeToScVal(item.value);
               });
               return nativeToScVal(vecElements);
@@ -1354,7 +1358,7 @@ router.post(
         xdrLength: xdr.length,
       });
 
-      res.json({ success: true, xdr });
+      sendSuccess(res, { xdr });
     } catch (err: any) {
       const message = err?.message ?? String(err);
       const stack = err?.stack;
@@ -1469,7 +1473,7 @@ router.post(
           source: "cache",
           xdrLength: cachedXdr.length,
         });
-        res.json({ success: true, xdr: cachedXdr });
+        sendSuccess(res, { xdr: cachedXdr });
         return;
       }
 
@@ -1535,7 +1539,7 @@ router.post(
         logger.info("Partial-release XDR served from in-flight cache", { contractId, index });
       }
 
-      res.json({ success: true, xdr });
+      sendSuccess(res, { xdr });
     } catch (err: any) {
       const errMsg = String(err?.message || err);
       // Structured, server-side-only error detail – the client receives a clean
@@ -1711,11 +1715,11 @@ router.post(
           source: "cache",
           xdrLength: cached.length,
         });
-        const responseBody = { success: true, xdr: cached };
+        const responseBody = { xdr: cached };
         logger.debug("Claim auto-release response body prepared", {
           traceId,
           ...pathVars,
-          success: responseBody.success,
+          success: true,
           xdrLength: responseBody.xdr.length,
         });
         logger.info("Claim auto-release response sent", {
@@ -1726,7 +1730,7 @@ router.post(
           cached: true,
           xdrLength: cached.length,
         });
-        res.json(responseBody);
+        sendSuccess(res, responseBody);
         return;
       }
 
@@ -1740,11 +1744,11 @@ router.post(
           source: "in-flight",
           xdrLength: xdr.length,
         });
-        const responseBody = { success: true, xdr };
+        const responseBody = { xdr };
         logger.debug("Claim auto-release response body prepared", {
           traceId,
           ...pathVars,
-          success: responseBody.success,
+          success: true,
           xdrLength: responseBody.xdr.length,
         });
         logger.info("Claim auto-release response sent", {
@@ -1756,7 +1760,7 @@ router.post(
           inFlight: true,
           xdrLength: xdr.length,
         });
-        res.json(responseBody);
+        sendSuccess(res, responseBody);
         return;
       }
 
@@ -1829,11 +1833,11 @@ router.post(
         ...pathVars,
         xdrLength: xdr.length,
       });
-      const responseBody = { success: true, xdr };
+      const responseBody = { xdr };
       logger.debug("Claim auto-release response body prepared", {
         traceId,
         ...pathVars,
-        success: responseBody.success,
+        success: true,
         xdrLength: responseBody.xdr.length,
       });
       logger.info("Claim auto-release response sent", {
@@ -1845,7 +1849,7 @@ router.post(
         xdrLength: xdr.length,
       });
 
-      res.json(responseBody);
+      sendSuccess(res, responseBody);
     } catch (err: any) {
       const message = err?.message ?? String(err);
       const stack = err?.stack;
@@ -1861,12 +1865,12 @@ router.post(
         error: message,
         stack,
       });
-      const responseBody = { success: false, error: "Internal server error" };
+      const clientError = "Internal server error";
       logger.debug("Claim auto-release error response body prepared", {
         traceId,
         ...pathVars,
-        success: responseBody.success,
-        clientError: responseBody.error,
+        success: false,
+        clientError,
       });
       logger.info("Claim auto-release response sent", {
         traceId,
@@ -1875,7 +1879,7 @@ router.post(
         success: false,
         error: message,
       });
-      res.status(500).json(responseBody);
+      sendError(res, 500, clientError);
     }
   },
 );

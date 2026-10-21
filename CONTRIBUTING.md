@@ -23,6 +23,52 @@ Before changing runtime behavior, review:
 - [Architecture overview](./docs/ARCHITECTURE.md)
 - [CSV serialization guide](./docs/CSV_SERIALIZATION_GUIDE.md)
 
+## End-to-End Tests (Soroban quickstart)
+
+`npm test` runs the unit suites under `__tests__/` with RPC mocked. A separate,
+opt-in suite under `test/e2e/` runs the real backend against a local Stellar
+network with the escrow contract deployed, covering
+`create-job-draft` → `build-tx initialize` → sign → `submit` → indexer poll →
+`GET /api/jobs/by-wallet/:address` → `GET /api/jobs/:contractId`.
+It runs nightly in CI ([e2e-nightly.yml](./.github/workflows/e2e-nightly.yml))
+and can be started manually from the Actions tab.
+
+Prerequisites:
+
+- Docker, with port `8000` free
+- The compiled escrow contract Wasm. Clone
+  [escrow-contract](https://github.com/Goldii-locks/escrow-contract) next to
+  this repo and build it:
+  ```bash
+  cd ../escrow-contract
+  cargo build --release --target wasm32v1-none -p milestone-escrow
+  ```
+
+Run it:
+
+```bash
+npm run test:e2e
+```
+
+The suite starts `stellar/quickstart --local --enable-soroban-rpc` in Docker
+(or reuses one already answering on `E2E_RPC_URL`), deploys the Wasm and the
+native XLM token contract, then spawns the backend on port `3101` with a
+throwaway SQLite database. A container the suite started is stopped
+afterwards.
+
+Optional overrides:
+
+| Variable | Default |
+|---|---|
+| `ESCROW_WASM_PATH` | `../escrow-contract/target/wasm32v1-none/release/milestone_escrow.wasm` |
+| `E2E_RPC_URL` | `http://localhost:8000/soroban/rpc` |
+| `E2E_FRIENDBOT_URL` | `http://localhost:8000/friendbot` |
+| `E2E_NETWORK_PASSPHRASE` | `Standalone Network ; February 2017` |
+| `E2E_BACKEND_PORT` | `3101` |
+| `E2E_DOCKER_CONTAINER` | `escrow-backend-e2e-quickstart` |
+| `E2E_QUICKSTART_IMAGE` | `stellar/quickstart:latest` |
+| `E2E_KEEP_NETWORK` | unset; `1` leaves the container running for debugging |
+
 ## Code Style
 
 Follow the project's existing code style and use ESLint to check:

@@ -172,12 +172,12 @@ describe("GET /api/jobs/:contractId/history – HTTP", () => {
       .expect(200);
 
     expect(res.body.success).toBe(true);
-    expect(Array.isArray(res.body.events)).toBe(true);
-    expect(res.body.events).toHaveLength(1);
-    expect(res.body.events[0].event_type).toBe("initialized");
-    expect(res.body.total).toBeDefined();
-    expect(res.body.page).toBeDefined();
-    expect(res.body.limit).toBeDefined();
+    expect(Array.isArray(res.body.data.events)).toBe(true);
+    expect(res.body.data.events).toHaveLength(1);
+    expect(res.body.data.events[0].event_type).toBe("initialized");
+    expect(res.body.data.total).toBeDefined();
+    expect(res.body.data.page).toBeDefined();
+    expect(res.body.data.limit).toBeDefined();
   });
 
   it("returns empty events array for unknown contract", async () => {
@@ -186,8 +186,8 @@ describe("GET /api/jobs/:contractId/history – HTTP", () => {
       .expect(200);
 
     expect(res.body.success).toBe(true);
-    expect(res.body.events).toHaveLength(0);
-    expect(res.body.total).toBe(0);
+    expect(res.body.data.events).toHaveLength(0);
+    expect(res.body.data.total).toBe(0);
   });
 
   it("returns events in chronological order", async () => {
@@ -200,8 +200,8 @@ describe("GET /api/jobs/:contractId/history – HTTP", () => {
       .get(`/api/jobs/${cid}/history`)
       .expect(200);
 
-    expect(res.body.events).toHaveLength(3);
-    expect(res.body.events.map((e: any) => e.event_type)).toEqual([
+    expect(res.body.data.events).toHaveLength(3);
+    expect(res.body.data.events.map((e: any) => e.event_type)).toEqual([
       "initialized",
       "funded",
       "approved",
@@ -219,10 +219,10 @@ describe("GET /api/jobs/:contractId/history – HTTP", () => {
       .expect(200);
 
     expect(res.body.success).toBe(true);
-    expect(res.body.events).toHaveLength(2);
-    expect(res.body.total).toBe(4);
-    expect(res.body.page).toBe(1);
-    expect(res.body.limit).toBe(2);
+    expect(res.body.data.events).toHaveLength(2);
+    expect(res.body.data.total).toBe(4);
+    expect(res.body.data.page).toBe(1);
+    expect(res.body.data.limit).toBe(2);
   });
 
   it("each event entry has the expected shape", async () => {
@@ -233,7 +233,7 @@ describe("GET /api/jobs/:contractId/history – HTTP", () => {
       .get(`/api/jobs/${cid}/history`)
       .expect(200);
 
-    const event = res.body.events[0];
+    const event = res.body.data.events[0];
     expect(event).toMatchObject({
       id: expect.any(Number),
       contract_id: expect.any(String),
