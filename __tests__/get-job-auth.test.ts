@@ -2,6 +2,7 @@
 import { jest } from "@jest/globals";
 import request from "supertest";
 import express from "express";
+import { jobRetval, JOB_PARTIES } from "./helpers/job-retval.js";
 
 // Mock Stellar SDK RPC server
 const mockGetAccount = jest.fn<() => Promise<unknown>>();
@@ -49,18 +50,10 @@ describe("GET /api/jobs/:contractId with API key authentication", () => {
   });
 
   it("returns 200 with job data when a valid API key is provided", async () => {
-    const milestones = {
-      map: (fn: (m: unknown, i: number) => unknown) =>
-        [{ amount: () => ({ toString: () => "100" }), status: () => ({ funded: true }) }].map(fn),
-    };
-    const retval = {
-      client: () => ({ toString: () => "GCLIENT" }),
-      freelancer: () => ({ toString: () => "GFREELANCER" }),
-      arbiter: () => ({ toString: () => "GARBITER" }),
-      token: () => ({ toString: () => "GTOKEN" }),
-      funded: () => true,
-      milestones: () => milestones,
-    };
+    const retval = jobRetval({
+      funded: true,
+      milestones: [{ amount: "100", status: "Pending" }],
+    });
     mockSimulateTransaction.mockResolvedValue({ result: { retval } });
 
     const res = await request(buildApp())
@@ -70,7 +63,7 @@ describe("GET /api/jobs/:contractId with API key authentication", () => {
 
     expect(res.body.success).toBe(true);
     expect(res.body.data.id).toBe(VALID_CONTRACT);
-    expect(res.body.data.client).toBe("GCLIENT");
-    expect(Array.isArray(res.body.data.milestones)).toBe(true);
+    expect(res.body.data.client).toBe(JOB_PARTIES.client);
+    expect(res.body.data.milestones).toEqual([{ index: 0, amount: "100", status: "Pending" }]);
   });
 });

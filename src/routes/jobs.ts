@@ -370,19 +370,32 @@ function classifySubmitError(rawError: string): Classified {
 // ---------------------------------------------------------------------------
 const parseJobFromResult = (result: any, contractId: string) => {
   if ("result" in result && result.result?.retval) {
-    const val = result.result.retval;
-    const client = val.client().toString();
-    const freelancer = val.freelancer().toString();
-    const arbiter = val.arbiter().toString();
-    const token = val.token().toString();
-    const funded = val.funded();
-    const milestones = val.milestones().map((m: any, i: number) => ({
+    // retval is an xdr.ScVal holding the contract's `Job` struct. Decoded, it
+    // is a plain object: addresses as strings, i128 amounts as bigint, and
+    // unit enum variants such as MilestoneStatus as a one-element ["Variant"].
+    const job = scValToNative(result.result.retval) as {
+      client: string;
+      freelancer: string;
+      arbiter: string;
+      token: string;
+      funded: boolean;
+      milestones: Array<{ amount: bigint; status: [string] }>;
+    };
+    const milestones = job.milestones.map((m, i) => ({
       index: i,
-      amount: m.amount().toString(),
-      status: Object.keys(m.status())[0],
+      amount: m.amount.toString(),
+      status: m.status[0],
     }));
 
-    return { id: contractId, client, freelancer, arbiter, token, funded, milestones };
+    return {
+      id: contractId,
+      client: job.client,
+      freelancer: job.freelancer,
+      arbiter: job.arbiter,
+      token: job.token,
+      funded: job.funded,
+      milestones,
+    };
   }
   return null;
 };

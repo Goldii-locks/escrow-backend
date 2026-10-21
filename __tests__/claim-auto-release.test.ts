@@ -209,12 +209,13 @@ describe("POST /api/jobs/:contractId/milestones/:index/claim-auto-release – su
     expect(res.body).toEqual({ success: true, data: { xdr: "AAAAAQ==" } });
   });
 
-  it("response shape is exactly { success, xdr }", async () => {
+  it("response shape is exactly { success, data: { xdr } }", async () => {
     mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==" });
 
     const res = await request(buildApp()).post(ENDPOINT).send(VALID_BODY).expect(200);
 
-    expect(Object.keys(res.body)).toEqual(["success", "xdr"]);
+    expect(Object.keys(res.body)).toEqual(["success", "data"]);
+    expect(Object.keys(res.body.data)).toEqual(["xdr"]);
     expect(res.body.success).toBe(true);
     expect(typeof res.body.data.xdr).toBe("string");
   });
