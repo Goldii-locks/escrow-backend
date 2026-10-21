@@ -92,20 +92,21 @@ const BASE_PARAMS: GetEventsParams = {
 
 describe("EVENT_TYPES", () => {
   it("contains the expected event type strings", () => {
-    expect(EVENT_TYPES).toContain("initialized");
-    expect(EVENT_TYPES).toContain("funded");
-    expect(EVENT_TYPES).toContain("delivered");
-    expect(EVENT_TYPES).toContain("approved");
-    expect(EVENT_TYPES).toContain("dispute_raised");
-    expect(EVENT_TYPES).toContain("dispute_resolved");
-    expect(EVENT_TYPES).toContain("partial_release");
-    expect(EVENT_TYPES).toContain("auto_release_claimed");
-    expect(EVENT_TYPES).toContain("token_whitelisted");
-    expect(EVENT_TYPES).toContain("token_removed");
+    expect(EVENT_TYPES).toContain("init");
+    expect(EVENT_TYPES).toContain("fund");
+    expect(EVENT_TYPES).toContain("deliver");
+    expect(EVENT_TYPES).toContain("approve");
+    expect(EVENT_TYPES).toContain("dispute");
+    expect(EVENT_TYPES).toContain("resolve");
+    expect(EVENT_TYPES).toContain("claim");
+    expect(EVENT_TYPES).toContain("wtok");
+    expect(EVENT_TYPES).toContain("wldel");
   });
 
-  it("contains exactly 10 event types", () => {
-    expect(EVENT_TYPES.length).toBe(10);
+  it("contains unique topics of at most 9 characters", () => {
+    expect(EVENT_TYPES).toHaveLength(69);
+    expect(new Set(EVENT_TYPES).size).toBe(EVENT_TYPES.length);
+    expect(EVENT_TYPES.every((type) => type.length <= 9)).toBe(true);
   });
 });
 

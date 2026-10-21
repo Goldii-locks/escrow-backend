@@ -2,21 +2,77 @@ import type { Server } from "@stellar/stellar-sdk/rpc";
 import logger from "../utils/logger.js";
 import { formatError } from "../utils/format-error.js";
 
-/**
- * The set of Soroban contract event types the indexer cares about.
- * Only events whose first topic matches one of these strings will be fetched.
- */
+/** Canonical event topics emitted by milestone-escrow. */
 export const EVENT_TYPES = [
-  "initialized",
-  "funded",
-  "delivered",
-  "approved",
-  "dispute_raised",
-  "dispute_resolved",
-  "partial_release",
-  "auto_release_claimed",
-  "token_whitelisted",
-  "token_removed",
+  "acceptarb",
+  "acceptjob",
+  "adcovls",
+  "adcovrf",
+  "admin",
+  "admincxl",
+  "adminexc",
+  "adminprp",
+  "admovrf",
+  "admovrls",
+  "admstrm",
+  "adtwsplt",
+  "adtxrfd",
+  "adtxrls",
+  "approve",
+  "arbsplit",
+  "cancel",
+  "cancelrev",
+  "claim",
+  "cxlappr",
+  "cxlspref",
+  "deliver",
+  "dispescal",
+  "dispute",
+  "emoverrid",
+  "empause",
+  "emunpause",
+  "epalloc",
+  "epspltref",
+  "extend",
+  "fund",
+  "init",
+  "intyield",
+  "iyspltref",
+  "m_ext",
+  "m_extcns",
+  "msadmref",
+  "msadmrel",
+  "msfund",
+  "msigappr",
+  "msiginit",
+  "mslock",
+  "msrev",
+  "p_strcns",
+  "p_stream",
+  "pause",
+  "pf_lock",
+  "pf_ovr",
+  "pf_set",
+  "pf_split",
+  "resolve",
+  "resume",
+  "sprefnet",
+  "splitref",
+  "sweep",
+  "taxwh",
+  "taxwith",
+  "twspltref",
+  "unaccref",
+  "upgrade",
+  "withdraw",
+  "wldel",
+  "wtok",
+  "yldacc",
+  "yldcons",
+  "yldlock",
+  "yldrate",
+  "yldset",
+  "yldunlock",
 ] as const;
 
 export type EventType = (typeof EVENT_TYPES)[number];
@@ -155,27 +211,25 @@ export async function fetchEventsWithRetry(
             // an enumerated topic filter: that migration is structurally
             // impossible, for two independent reasons.
             //
-            //   1. It does not fit. The contract emits 52 distinct topic[0]
+            //   1. It does not fit. The contract emits 69 distinct topic[0]
             //      discriminators (the symbol_short! literals across
             //      milestone-escrow/src/lib.rs). Soroban RPC caps filters at
             //      5 topics per filter and 5 filters per request — 25
-            //      alternatives maximum. 52 cannot be expressed, neither as
+            //      alternatives maximum. 69 cannot be expressed, neither as
             //      one filter nor split across filters. Exceeding either cap
             //      is a hard -32602: "maximum 5 topics per filter" and
             //      "maximum 5 filters per request" respectively.
             //
             //   2. It would buy nothing. contractIds already scopes every
-            //      request to our own contract, and we want all 52 of the
-            //      event types that contract emits. Enumerating them would
+            //      request to our own contract, and we want all 69 of the
+            //      event topics that contract emits. Enumerating them would
             //      be semantically identical to sending no topic filter at
             //      all — just fighting the 25-item cap to arrive back here.
             //
-            // Note also that EVENT_TYPES' ten strings are not those
-            // discriminators: none of the ten matches any symbol the
-            // contract emits, and several exceed symbol_short!'s 9-character
-            // limit, so they could never have been emitted. EVENT_TYPES is
-            // retained for its EventType alias and is deliberately not used
-            // to build this request.
+            // EVENT_TYPES contains the canonical emitted topic names (also
+            // used to validate webhook subscriptions), but those raw ASCII
+            // names are not base64-encoded XDR ScVals and cannot be used here.
+            // This list is deliberately not used to build the RPC request.
             topics: [["*"]],
           },
         ],

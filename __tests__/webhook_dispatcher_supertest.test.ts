@@ -61,7 +61,7 @@ describe("webhook_dispatcher supertest validations (#521)", () => {
   const VALID_BODY = {
     contract_id: CONTRACT_A,
     webhook_url: "https://example.com/hook",
-    event_types: ["funded", "approved"],
+    event_types: ["approve", "fund"],
   };
 
   it("POST /api/webhooks/subscribe returns 200 with subscription + traceId", async () => {
@@ -101,7 +101,7 @@ describe("webhook_dispatcher supertest validations (#521)", () => {
   it("POST /api/webhooks/subscribe returns 400 for non-array event_types", async () => {
     const res = await request(app)
       .post("/api/webhooks/subscribe")
-      .send({ ...VALID_BODY, event_types: "funded" })
+      .send({ ...VALID_BODY, event_types: "fund" })
       .expect(400);
 
     expect(res.body.success).toBe(false);
@@ -118,8 +118,24 @@ describe("webhook_dispatcher supertest validations (#521)", () => {
     expect(typeof res.body.data.traceId).toBe("string");
   });
 
+  it.each([
+    [[1], /only strings/i],
+    [[], /non-empty/i],
+    [["approved"], /unknown event_types: approved/i],
+    [["toolongname"], /between 1 and 9 characters/i],
+    [["fund", "fund"], /duplicates/i],
+  ])("rejects invalid event_types %j with an explanation", async (eventTypes, error) => {
+    const res = await request(app)
+      .post("/api/webhooks/subscribe")
+      .send({ ...VALID_BODY, event_types: eventTypes })
+      .expect(400);
+
+    expect(res.body.success).toBe(false);
+    expect(res.body.error).toMatch(error);
+  });
+
   it("POST /api/webhooks/unsubscribe returns 200 for an existing subscription", async () => {
-    addSubscription(CONTRACT_A, "https://example.com/hook", ["funded"]);
+    addSubscription(CONTRACT_A, "https://example.com/hook", ["fund"]);
 
     const res = await request(app)
       .post("/api/webhooks/unsubscribe")

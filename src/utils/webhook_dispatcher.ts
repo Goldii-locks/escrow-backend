@@ -13,9 +13,11 @@ import {
   type WebhookSubscription,
 } from "../indexer/db.js";
 import { deliverWebhooks } from "../indexer/webhook-delivery.js";
+import { EVENT_TYPES } from "../indexer/event_type_filter.js";
 import logger from "./logger.js";
 
 export const WEBHOOK_DISPATCHER_ROUTE_PREFIX = "/api/webhooks";
+const EVENT_TYPE_SET = new Set<string>(EVENT_TYPES);
 
 export type SubscribeInput = {
   contract_id: string;
@@ -44,15 +46,61 @@ export type UnsubscribeResult =
   | DispatchFailure;
 
 function normalizeEventTypes(
-  event_types: SubscribeInput["event_types"]
+  eventTypes: unknown,
 ): { ok: true; types: string[] } | { ok: false; error: string } {
-  if (!event_types || event_types === "*") {
+  if (eventTypes === undefined || eventTypes === "*") {
     return { ok: true, types: ["*"] };
   }
-  if (Array.isArray(event_types)) {
-    return { ok: true, types: event_types };
+  if (!Array.isArray(eventTypes)) {
+    return {
+      ok: false,
+      error: "event_types must be a non-empty array of event names or '*'",
+    };
   }
-  return { ok: false, error: "event_types must be an array of strings or '*'" };
+  if (eventTypes.length === 0) {
+    return { ok: false, error: "event_types must be a non-empty array" };
+  }
+
+  const nonStrings = eventTypes.filter(
+    (type: unknown) => typeof type !== "string",
+  );
+  if (nonStrings.length > 0) {
+    return {
+      ok: false,
+      error: `event_types must contain only strings; invalid values: ${JSON.stringify(nonStrings)}`,
+    };
+  }
+
+  const types = eventTypes.filter(
+    (type: unknown): type is string => typeof type === "string",
+  );
+  const invalidLength = types.filter((type) => type.length < 1 || type.length > 9);
+  if (invalidLength.length > 0) {
+    return {
+      ok: false,
+      error: `event_types must be between 1 and 9 characters; invalid values: ${invalidLength.join(", ")}`,
+    };
+  }
+
+  const duplicates = types.filter(
+    (type, index) => types.indexOf(type) !== index,
+  );
+  if (duplicates.length > 0) {
+    return {
+      ok: false,
+      error: `event_types must not contain duplicates: ${[...new Set(duplicates)].join(", ")}`,
+    };
+  }
+
+  const unknownTypes = types.filter((type) => !EVENT_TYPE_SET.has(type));
+  if (unknownTypes.length > 0) {
+    return {
+      ok: false,
+      error: `Unknown event_types: ${unknownTypes.join(", ")}`,
+    };
+  }
+
+  return { ok: true, types };
 }
 
 /**

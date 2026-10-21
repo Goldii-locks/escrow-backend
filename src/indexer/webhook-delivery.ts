@@ -168,7 +168,7 @@ function subscriptionsMatchEvent(
   if (eventTypes === "*") return true;
   try {
     const types = JSON.parse(eventTypes) as string[];
-    return types.includes(eventType);
+    return types.includes("*") || types.includes(eventType);
   } catch {
     return eventTypes === eventType;
   }
