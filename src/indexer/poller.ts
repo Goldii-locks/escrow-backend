@@ -24,6 +24,7 @@ import { deliverWebhooks } from "./webhook-delivery.js";
 import { fetchEventsWithRetry } from "./event_type_filter.js";
 import { formatError } from "../utils/format-error.js";
 import logger from "../utils/logger.js";
+import { stringifyWithBigInt } from "../utils/safe-json.js";
 
 const RPC_URL =
   process.env.SOROBAN_RPC_URL || "https://soroban-testnet.stellar.org";
@@ -153,7 +154,7 @@ function toEventRow(event: any, fallbackContractId: string): EventRow {
     eventType: scValToNative(event.topic[0]) as string,
     ledgerSequence: event.ledger,
     timestamp: toEventTimestamp(event.ledgerClosedAt),
-    dataJson: JSON.stringify(scValToNative(event.value)),
+    dataJson: stringifyWithBigInt(scValToNative(event.value)),
   };
 }
 
