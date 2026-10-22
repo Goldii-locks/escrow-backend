@@ -17,6 +17,7 @@ router.get("/indexer-status", (_req, res) => {
     uptimeSeconds: getIndexerUptimeSeconds(),
     lastEventAt: status.lastEventAt,
     eventsByType: status.eventsByType,
+    undecodableEvents: status.undecodableEvents,
     reconciliation: getLatestReconciliationResults(),
   });
 });

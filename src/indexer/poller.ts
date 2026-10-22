@@ -4,6 +4,7 @@ import { scValToNative } from "@stellar/stellar-sdk";
 import {
   insertEventBatch,
   insertHistoricalEventBatch,
+  recordUndecodableEvent,
   getActiveContractIds,
   getActiveContractsWithPointers,
   updateContractPointer,
@@ -14,6 +15,7 @@ import {
   verifySchemaUpToDate,
   assertSchemaValid,
   type EventRow,
+
 } from "./db.js";
 import { RpcPollerClient } from "./rpc-poller-client.js";
 import {
@@ -155,6 +157,55 @@ function toEventRow(event: any, fallbackContractId: string): EventRow {
     timestamp: toEventTimestamp(event.ledgerClosedAt),
     dataJson: JSON.stringify(scValToNative(event.value)),
   };
+}
+
+/** Raw XDR for an event part, or null if it cannot even be serialized. */
+function rawXdr(part: any): string | null {
+  try {
+    if (Array.isArray(part)) {
+      return JSON.stringify(part.map((p) => p.toXDR("base64")));
+    }
+    return part ? part.toXDR("base64") : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Decode events one at a time (#658). An event that cannot be decoded is
+ * written to undecodable_events with its raw XDR and the error, a warning is
+ * logged, and the rest of the page is still processed.
+ */
+function decodeEventsIsolated(events: any[], fallbackContractId: string): EventRow[] {
+  const rows: EventRow[] = [];
+  for (const event of events) {
+    try {
+      rows.push(toEventRow(event, fallbackContractId));
+    } catch (err) {
+      const errorMessage = formatError(err);
+      try {
+        recordUndecodableEvent({
+          eventId: event?.id ?? null,
+          ledgerSequence: event?.ledger ?? null,
+          contractId: fallbackContractId,
+          topicXdr: rawXdr(event?.topic),
+          valueXdr: rawXdr(event?.value),
+          errorMessage,
+
+        });
+      } catch (recordErr) {
+        logger.error("Failed to record undecodable event", {
+          error: formatError(recordErr),
+        });
+      }
+      logger.warn("Skipping undecodable event", {
+        eventId: event?.id,
+        ledger: event?.ledger,
+        error: errorMessage,
+      });
+    }
+  }
+  return rows;
 }
 
 // ---------------------------------------------------------------------------
@@ -339,8 +390,7 @@ export async function fetchHistoricalEvents(
 
     eventsFound += pageEvents.length;
 
-    const batch: EventRow[] = pageEvents
-      .map((event) => toEventRow(event, contractIds[0] ?? ""))
+     const batch: EventRow[] = decodeEventsIsolated(pageEvents, contractIds[0] ?? "")
       .filter(
         (row) =>
           row.ledgerSequence >= startLedger && row.ledgerSequence <= endLedger,
@@ -536,10 +586,10 @@ export async function pollEvents(): Promise<boolean> {
       });
 
       // Build the batch to be written atomically (#84)
-      const batch: EventRow[] = events.events.map((event) =>
-        toEventRow(event, groupContractIds[0])
-      );
-
+      const batch: EventRow[] = decodeEventsIsolated(
+      events.events as any[],
+      groupContractIds[0],
+    );
       // Persist the batch and advance the ledger pointer atomically (#84).
       // Called even with an empty batch so the global pointer always advances.
       await enqueueEventInsert(batch, currentLedger);
