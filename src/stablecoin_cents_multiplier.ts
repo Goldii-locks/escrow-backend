@@ -5,6 +5,10 @@
  * stablecoin amounts and their integer (cents) representation.
  */
 
+import { escapeCsvField, formatRowToCsv } from './utils/csv-serializer.js';
+
+export { escapeCsvField };
+
 export interface CentsMultiplierOptions {
   /** Number of decimal places used by the stablecoin (defaults to 2). */
   decimals?: number;
@@ -82,29 +86,17 @@ export interface CentsFormatRow {
 }
 
 /**
- * Escape a single CSV field, quoting it when it contains a delimiter,
- * quote, or newline character.
- */
-export function escapeCsvField(value: string | number): string {
-  const text = String(value);
-  if (/[",\n\r]/.test(text)) {
-    return `"${text.replace(/"/g, '""')}"`;
-  }
-  return text;
-}
-
-/**
  * Build the CSV header block for a serialized amount table.
  */
 export function buildCsvHeader(columns: string[] = ['amount', 'cents']): string {
-  return columns.map(escapeCsvField).join(',');
+  return formatRowToCsv(columns);
 }
 
 /**
  * Build a single CSV row block from a format row.
  */
 export function buildCsvRow(row: CentsFormatRow): string {
-  return [row.amount, row.cents].map(escapeCsvField).join(',');
+  return formatRowToCsv([row.amount, row.cents]);
 }
 
 /**

@@ -1,4 +1,4 @@
-import { calculateFeeDeduction, calculateFeeShares } from "../src/utils/fee_deduction_calculator.js";
+import { calculateFeeDeduction, calculateFeeShares } from "../src/utils/fee-deduction-calculator.js";
 import { applyConversionRate, assertConversionSplitSum } from "../src/utils/conversion_rate_math.js";
 import { calculateTaxDeduction } from "../src/utils/tax_deduction_estimator.js";
 import { allocatePartialPayment } from "../src/utils/partial_payment_allocator.js";

@@ -1,15 +1,11 @@
 import { Router } from "express";
 import type { Request, Response, NextFunction } from "express";
 import {
-  Contract,
   Networks,
-  TransactionBuilder,
   BASE_FEE,
   nativeToScVal,
-  scValToNative,
   Address,
 } from "@stellar/stellar-sdk";
-import { Server } from "@stellar/stellar-sdk/rpc";
 import NodeCache from "node-cache";
 import { getJobsByWallet, getEventsByContract } from "../indexer/db.js";
 import {
@@ -75,18 +71,19 @@ import { strictLimiter, walletLookupLimiter } from "../middleware/rateLimiter.js
 import logger from "../utils/logger.js";
 import { isValidStellarContractId } from "../utils/stellar.js";
 import { randomUUID } from "crypto";
+import {
+  RPC_URL,
+  NETWORK_PASSPHRASE,
+  server,
+  classifySimError,
+  SimError,
+  simulateCall,
+  simulateRead,
+  prepareInvoke,
+} from "../utils/soroban-call.js";
 
 const router = Router();
 const CONTRACT_ID = process.env.CONTRACT_ID || "";
-const RPC_URL =
-  process.env.SOROBAN_RPC_URL || "https://soroban-testnet.stellar.org";
-const NETWORK_PASSPHRASE =
-  process.env.SOROBAN_NETWORK_PASSPHRASE || Networks.TESTNET;
-
-// #691: Apply an explicit HTTP timeout so stalled RPC connections surface as
-// a 504 rather than hanging indefinitely. Default 10 s; override via env.
-const RPC_TIMEOUT_MS = parseInt(process.env.RPC_TIMEOUT_MS || "10000", 10);
-const server = new Server(RPC_URL, { timeout: RPC_TIMEOUT_MS });
 
 /**
  * #692: Validate that the configured SOROBAN_NETWORK_PASSPHRASE matches the
@@ -241,67 +238,6 @@ function partialReleaseCacheKey(
   sourceAddress: string,
 ): string {
   return `${contractId}:${index}:${String(amount)}:${sourceAddress}`;
-}
-
-// ---------------------------------------------------------------------------
-// Simulation error helpers  (#83)
-// ---------------------------------------------------------------------------
-
-/**
- * Inspects a simulation error string and returns the appropriate HTTP status
- * code plus a client-safe message.
- *
- * Mappings:
- *  - Missing / unregistered contract → 404 (Contract not found)
- *  - Missing source account → 404 (Account not found)
- *  - Contract assertion / revert (error codes) → 422
- *  - Everything else → 500
- */
-function classifySimError(rawError: string): { status: number; message: string } {
-  // 504 – upstream RPC stalled or timed out (#691)
-  if (/timeout|ETIMEDOUT|ECONNRESET|socket hang up|request timeout|connect timeout/i.test(rawError)) {
-    return { status: 504, message: "Upstream RPC timeout" };
-  }
-
-  // 404 – source account missing on the network
-  if (/missing account|account not found/i.test(rawError)) {
-    return { status: 404, message: "Source account not found on network" };
-  }
-
-  // 404 – contract missing / unregistered on the network
-  if (
-    /not found|NotFound|contract not found/i.test(rawError) ||
-    /contract error #1\b/i.test(rawError)
-  ) {
-    return { status: 404, message: "Contract not found on network" };
-  }
-
-  // 422 – contract executed but reverted / assertion failed
-  const contractErrMatch = rawError.match(/contract error #(\d+)/i);
-  if (contractErrMatch) {
-    return {
-      status: 422,
-      message: `Contract execution reverted (error code ${contractErrMatch[1]})`,
-    };
-  }
-  if (/revert|assert|panic|trap/i.test(rawError)) {
-    return { status: 422, message: "Contract execution reverted" };
-  }
-
-  // 500 – everything else (never forward the raw error to the client)
-  return { status: 500, message: "Internal server error" };
-}
-
-/**
- * Carries an HTTP status + client-safe message out of an async cache/dedup
- * block so the outer catch can respond correctly without re-classifying.
- */
-class SimError extends Error {
-  status: number;
-  constructor(status: number, message: string) {
-    super(message);
-    this.status = status;
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -595,34 +531,19 @@ async function handleReadOnlyQuery(req: Request, res: Response): Promise<void> {
   }
 
   try {
-    const contract = new Contract(contractId);
-    const account = await server.getAccount(process.env.DEPLOYER_ADDRESS || "");
-    const tx = new TransactionBuilder(account, {
-      fee: BASE_FEE,
-      networkPassphrase: NETWORK_PASSPHRASE,
-    })
-      .addOperation(contract.call(method))
-      .setTimeout(30)
-      .build();
-    const result = await server.simulateTransaction(tx);
-
-    if ("error" in result) {
-      const { status, message } = classifySimError(String(result.error));
-      sendError(res, status, message);
-      return;
-    }
-    if (!("result" in result) || !result.result?.retval) {
-      sendError(res, 500, "Internal server error");
-      return;
-    }
+    const retval = await simulateRead(contractId, method);
 
     // i128/u64 values decode to bigint, which JSON cannot carry; send strings.
     sendSuccess(res, {
       contractId,
       method,
-      result: convertScValToNativeStrings(scValToNative(result.result.retval)),
+      result: convertScValToNativeStrings(retval),
     });
   } catch (err: unknown) {
+    if (err instanceof SimError) {
+      sendError(res, err.status, err.message);
+      return;
+    }
     logger.error("Read-only contract query failed", {
       contractId,
       method,
@@ -716,42 +637,18 @@ router.get(
 
     if (!requestPromise) {
       requestPromise = (async (): Promise<Record<string, unknown>> => {
-        const contract = new Contract(contractId);
-        const account = await server.getAccount(
-          process.env.DEPLOYER_ADDRESS || "",
-        );
-        const tx = new TransactionBuilder(account, {
-          fee: BASE_FEE,
-          networkPassphrase: NETWORK_PASSPHRASE,
-        })
-          .addOperation(
-            contract.call(
-              "calculate_platform_fee_split",
-              nativeToScVal(BigInt(amount), { type: "i128" }),
-            ),
-          )
-          .setTimeout(30)
-          .build();
-
         // Read-only simulation only – never submits a transaction (#719).
-        const result = await server.simulateTransaction(tx);
-
-        if ("error" in result) {
-          const { status, message } = classifySimError(String(result.error));
-          throw new SimError(status, message);
-        }
-
-        if ("result" in result && result.result?.retval) {
-          const retval = scValToNative(result.result.retval);
-          const split = convertScValToNativeStrings(retval) as Record<
-            string,
-            unknown
-          >;
-          feePreviewCache.set(cacheKey, split);
-          return split;
-        }
-
-        throw new SimError(500, "Internal server error");
+        const retval = await simulateRead(
+          contractId,
+          "calculate_platform_fee_split",
+          [nativeToScVal(BigInt(amount), { type: "i128" })],
+        );
+        const split = convertScValToNativeStrings(retval) as Record<
+          string,
+          unknown
+        >;
+        feePreviewCache.set(cacheKey, split);
+        return split;
       })();
       inFlightFeePreviewRequests.set(cacheKey, requestPromise);
     }
@@ -801,17 +698,7 @@ router.get(
     // zone=api_public_read rather than by a key the browser would have to ship.
 
     try {
-      const contract = new Contract(contractId);
-      const account = await server.getAccount(process.env.DEPLOYER_ADDRESS || "");
-      const tx = new TransactionBuilder(account, {
-        fee: BASE_FEE,
-        networkPassphrase: NETWORK_PASSPHRASE,
-      })
-        .addOperation(contract.call("get_job"))
-        .setTimeout(30)
-        .build();
-
-      const result = await server.simulateTransaction(tx);
+      const result = await simulateCall(contractId, "get_job");
 
       if ("error" in result) {
         const { status } = classifySimError(String(result.error));
@@ -893,17 +780,7 @@ router.get(
 
       // Fetch whitelisted tokens from contract
       const requestPromise = (async (): Promise<string[]> => {
-        const contract = new Contract(contractId as string);
-        const account = await server.getAccount(process.env.DEPLOYER_ADDRESS || "");
-        const tx = new TransactionBuilder(account, {
-          fee: BASE_FEE,
-          networkPassphrase: NETWORK_PASSPHRASE,
-        })
-          .addOperation(contract.call("get_whitelisted_tokens"))
-          .setTimeout(30)
-          .build();
-
-        const result = await server.simulateTransaction(tx);
+        const result = await simulateCall(contractId as string, "get_whitelisted_tokens");
 
         // Handle simulation error
         if ("error" in result) {
@@ -1023,31 +900,17 @@ router.post(
       logger.info("Processing whitelist update", { contractId, token, action });
 
       try {
-        const contract = new Contract(contractId);
-        const account = await server.getAccount(
-          adminAddress || process.env.DEPLOYER_ADDRESS || "",
-        );
         const method =
           action === "remove"
             ? "remove_whitelisted_token"
             : "add_whitelisted_token";
 
-        const tx = new TransactionBuilder(account, {
-          fee: BASE_FEE,
-          networkPassphrase: NETWORK_PASSPHRASE,
-        })
-          .addOperation(
-            contract.call(
-              method,
-              new Address(adminAddress).toScVal(),
-              new Address(token).toScVal(),
-            ),
-          )
-          .setTimeout(30)
-          .build();
-
-        const prepared = await server.prepareTransaction(tx);
-        const xdr = prepared.toXDR();
+        const xdr = await prepareInvoke(
+          contractId,
+          adminAddress || process.env.DEPLOYER_ADDRESS || "",
+          method,
+          [new Address(adminAddress).toScVal(), new Address(token).toScVal()],
+        );
 
         whitelistCache.del(contractId);
         logger.info("Whitelist update transaction built", { contractId, token, action });
@@ -1072,17 +935,7 @@ router.post(
     }
 
     try {
-      const contract = new Contract(contractId);
-      const account = await server.getAccount(process.env.DEPLOYER_ADDRESS || "");
-      const tx = new TransactionBuilder(account, {
-        fee: BASE_FEE,
-        networkPassphrase: NETWORK_PASSPHRASE,
-      })
-        .addOperation(contract.call("get_whitelisted_tokens"))
-        .setTimeout(30)
-        .build();
-
-      const result = await server.simulateTransaction(tx);
+      const result = await simulateCall(contractId, "get_whitelisted_tokens");
 
       if ("error" in result) {
         const errorMsg = String(result.error);
@@ -1242,7 +1095,6 @@ router.post(
             fee: BASE_FEE,
             timeout: 30,
           });
-          const contract = new Contract(contractId as string);
           logger.debug("Fetching Stellar account for build-tx", {
             traceId,
             ...pathVars,
@@ -1271,20 +1123,11 @@ router.post(
             return nativeToScVal(a.value);
           });
 
-          const tx = new TransactionBuilder(account, {
-            fee: BASE_FEE,
-            networkPassphrase: NETWORK_PASSPHRASE,
-          })
-            .addOperation(contract.call(method, ...scArgs))
-            .setTimeout(30)
-            .build();
-
           logger.debug("Calling prepareTransaction on Stellar RPC for build-tx", {
             traceId,
             ...pathVars,
           });
-          const prepared = await server.prepareTransaction(tx);
-          const xdr = prepared.toXDR();
+          const xdr = await prepareInvoke(contractId as string, account, method, scArgs);
           logger.debug("Storing build-tx XDR in cache", {
             traceId,
             ...pathVars,
@@ -1478,25 +1321,15 @@ router.post(
 
       if (!requestPromise) {
         requestPromise = (async (): Promise<string> => {
-          const contract = new Contract(contractId as string);
           const amountNum = BigInt(amount);
 
-          const tx = new TransactionBuilder(account, {
-            fee: BASE_FEE,
-            networkPassphrase: NETWORK_PASSPHRASE,
-          })
-            .addOperation(contract.call(
-              "approve_partial",
+          let xdr: string;
+          try {
+            xdr = await prepareInvoke(contractId as string, account, "approve_partial", [
               Address.fromString(sourceAddress).toScVal(),
               nativeToScVal(Number(index), { type: "u32" }),
-              nativeToScVal(amountNum, { type: "i128" })
-            ))
-            .setTimeout(30)
-            .build();
-
-          let prepared;
-          try {
-            prepared = await server.prepareTransaction(tx);
+              nativeToScVal(amountNum, { type: "i128" }),
+            ]);
           } catch (err: any) {
             const errMsg = String(err?.message || err);
             const { status, message } = classifySimError(errMsg);
@@ -1509,7 +1342,6 @@ router.post(
             throw { status, message };
           }
 
-          const xdr = prepared.toXDR();
           partialReleaseCache.set(cacheKey, xdr);
           return xdr;
         })();
@@ -1597,22 +1429,9 @@ router.get(
 
       if (!requestPromise) {
         requestPromise = (async (): Promise<number> => {
-          const contract = new Contract(contractId);
-          const account = await server.getAccount(process.env.DEPLOYER_ADDRESS || "");
-          const tx = new TransactionBuilder(account, {
-            fee: BASE_FEE,
-            networkPassphrase: NETWORK_PASSPHRASE,
-          })
-            .addOperation(
-              contract.call(
-                "time_until_auto_release",
-                nativeToScVal(Number(index), { type: "u32" }),
-              ),
-            )
-            .setTimeout(30)
-            .build();
-
-          const result = await server.simulateTransaction(tx);
+          const result = await simulateCall(contractId, "time_until_auto_release", [
+            nativeToScVal(Number(index), { type: "u32" }),
+          ]);
 
           if ("error" in result) {
             const { status, message } = classifySimError(String(result.error));
@@ -1772,28 +1591,15 @@ router.post(
           fee: BASE_FEE,
           timeout: 30,
         });
-        const contract = new Contract(contractId);
         logger.debug("Fetching Stellar account", { traceId, ...pathVars });
         const account = await server.getAccount(sourceAddress as string);
         logger.debug("Stellar account fetched", { traceId, ...pathVars });
 
-        const tx = new TransactionBuilder(account, {
-          fee: BASE_FEE,
-          networkPassphrase: NETWORK_PASSPHRASE,
-        })
-          .addOperation(
-            contract.call(
-              "claim_auto_release",
-              Address.fromString(sourceAddress).toScVal(),
-              nativeToScVal(Number(index), { type: "u32" }),
-            ),
-          )
-          .setTimeout(30)
-          .build();
-
         logger.debug("Calling prepareTransaction on Stellar RPC", { traceId, ...pathVars });
-        const prepared = await server.prepareTransaction(tx);
-        const xdr = prepared.toXDR();
+        const xdr = await prepareInvoke(contractId, account, "claim_auto_release", [
+          Address.fromString(sourceAddress).toScVal(),
+          nativeToScVal(Number(index), { type: "u32" }),
+        ]);
         logger.debug("Storing claim auto-release XDR in cache", {
           traceId,
           ...pathVars,

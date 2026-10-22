@@ -1,18 +1,548 @@
 /**
- * CSV Serialization Helpers for Partial Payment Allocator
+ * Shared CSV helpers (#634).
  *
- * This module provides functions to serialize payment allocations and formatted
- * payment rows into CSV format for file export, logging, and data interchange.
- *
- * Features:
- * - Escape special CSV characters (commas, quotes, newlines)
- * - Support for multiple output formats (minimal, detailed, full)
- * - Include headers, footers, and summaries
- * - Handle large datasets with streaming-friendly output
- * - Validate CSV output structure
+ * The single implementation of the RFC 4180 primitives used by every CSV
+ * exporter in the codebase (escaping, row formatting, line/row parsing and
+ * file IO), plus the fee deduction CSV exporters (#629) and the partial
+ * payment allocator serializers.
  */
 
+import fs from "fs";
+import path from "path";
 import type { PaymentAllocation, FormattedPaymentRow } from "./partial-payment-allocator.js";
+import {
+  ERROR_CODES as FEE_ERROR_CODES,
+  validateFeeDeductionRecord,
+  type FeeCalculatorErrorCode,
+  type FeeDeductionRecord,
+  type ValidatedFeeRow,
+} from "./fee-deduction-calculator.js";
+
+// ---------------------------------------------------------------------------
+// RFC 4180 primitives
+// ---------------------------------------------------------------------------
+
+/**
+ * Escape an individual CSV field following RFC 4180 rules.
+ * If the value contains the delimiter, quotes, or line breaks, it is wrapped
+ * in double quotes with internal quotes doubled. null/undefined become an
+ * empty cell; bigints keep their exact decimal representation.
+ */
+export function escapeCsvField(value: unknown, delimiter = ","): string {
+  if (value === null || value === undefined) {
+    return "";
+  }
+  const str = typeof value === "string" ? value : String(value);
+
+  const needsQuotes =
+    str.includes(delimiter) ||
+    str.includes('"') ||
+    str.includes("\n") ||
+    str.includes("\r");
+
+  if (needsQuotes) {
+    return `"${str.replace(/"/g, '""')}"`;
+  }
+  return str;
+}
+
+/**
+ * Format an array of values into a single escaped CSV row.
+ */
+export function formatRowToCsv(values: unknown[], delimiter = ","): string {
+  return values.map((v) => escapeCsvField(v, delimiter)).join(delimiter);
+}
+
+/**
+ * Parse a single CSV row line respecting quoted fields and escaped quotes.
+ */
+export function parseCsvLine(line: string, delimiter = ","): string[] {
+  const result: string[] = [];
+  let current = "";
+  let inQuotes = false;
+  let i = 0;
+
+  while (i < line.length) {
+    const char = line[i];
+    if (inQuotes) {
+      if (char === '"') {
+        if (i + 1 < line.length && line[i + 1] === '"') {
+          current += '"';
+          i += 2;
+        } else {
+          inQuotes = false;
+          i++;
+        }
+      } else {
+        current += char;
+        i++;
+      }
+    } else if (char === '"') {
+      inQuotes = true;
+      i++;
+    } else if (char === delimiter) {
+      result.push(current);
+      current = "";
+      i++;
+    } else {
+      current += char;
+      i++;
+    }
+  }
+  result.push(current);
+  return result;
+}
+
+/**
+ * Split CSV content into logical rows, preserving multi-line quoted fields.
+ * Blank rows are dropped.
+ */
+export function splitCsvRows(csvContent: string): string[] {
+  const rows: string[] = [];
+  let current = "";
+  let inQuotes = false;
+
+  for (let i = 0; i < csvContent.length; i++) {
+    const char = csvContent[i];
+    if (char === '"') {
+      if (inQuotes && i + 1 < csvContent.length && csvContent[i + 1] === '"') {
+        current += '""';
+        i++;
+      } else {
+        inQuotes = !inQuotes;
+        current += '"';
+      }
+    } else if ((char === "\n" || char === "\r") && !inQuotes) {
+      if (char === "\r" && i + 1 < csvContent.length && csvContent[i + 1] === "\n") {
+        i++;
+      }
+      if (current.trim().length > 0) {
+        rows.push(current);
+      }
+      current = "";
+    } else {
+      current += char;
+    }
+  }
+  if (current.trim().length > 0) {
+    rows.push(current);
+  }
+  return rows;
+}
+
+/**
+ * Count the data rows in a pre-built CSV string (one row per line),
+ * excluding the header line unless `includeHeader` is false.
+ */
+export function countCsvDataRows(csvContent: string, includeHeader = true): number {
+  const trimmed = csvContent.trim();
+  if (trimmed.length === 0) {
+    return 0;
+  }
+  const lines = trimmed.split(/\r?\n/);
+  return includeHeader ? Math.max(0, lines.length - 1) : lines.length;
+}
+
+/**
+ * Write CSV content to disk, creating parent directories as needed.
+ * Returns the number of bytes written; throws on IO failure.
+ */
+export function writeCsvFile(
+  filePath: string,
+  csvContent: string,
+  encoding: BufferEncoding = "utf-8"
+): number {
+  const dir = path.dirname(filePath);
+  if (dir && dir !== "." && !fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  fs.writeFileSync(filePath, csvContent, { encoding });
+  return Buffer.byteLength(csvContent, encoding);
+}
+
+/**
+ * Read CSV content from disk. Throws on IO failure.
+ */
+export function readCsvFile(
+  filePath: string,
+  encoding: BufferEncoding = "utf-8"
+): string {
+  return fs.readFileSync(filePath, { encoding });
+}
+
+// ---------------------------------------------------------------------------
+// Fee deduction CSV exporters (#435, moved from the fee calculator in #629)
+// ---------------------------------------------------------------------------
+//
+// Build CSV formatting blocks (tables) from fee deduction records. Each record
+// is validated step-by-step through validateFeeDeductionRecord() so overflow /
+// digit-limit violations fail fast before any table output is produced.
+
+/**
+ * Options configuring CSV table export and file serialization.
+ */
+export interface FeeCsvExportOptions {
+  /** Delimiter character, defaults to ',' */
+  delimiter?: string;
+  /** Line ending string, defaults to '\n' */
+  lineEnding?: string;
+  /** Whether to output the header row, defaults to true */
+  includeHeader?: boolean;
+  /** Column keys to export in order */
+  columns?: string[];
+  /** Custom header labels matching columns */
+  headers?: string[];
+  /** Whether to allow empty records array (default true). When false, rejects empty arrays. */
+  allowEmpty?: boolean;
+  /** File encoding when writing to disk, defaults to 'utf-8' */
+  encoding?: BufferEncoding;
+}
+
+/**
+ * Outcome of CSV formatting.
+ */
+export type FeeCsvFormattingOutcome =
+  | {
+      ok: true;
+      value: string;
+      rowCount: number;
+      columns: string[];
+    }
+  | {
+      ok: false;
+      error: string;
+      code: FeeCalculatorErrorCode;
+    };
+
+/**
+ * Outcome of file serialization.
+ */
+export type FeeCsvFileOutcome =
+  | {
+      ok: true;
+      filePath: string;
+      bytesWritten: number;
+      rowCount: number;
+    }
+  | {
+      ok: false;
+      error: string;
+      code: FeeCalculatorErrorCode;
+    };
+
+/**
+ * Outcome of CSV deserialization / parsing.
+ */
+export type FeeCsvParseOutcome =
+  | {
+      ok: true;
+      records: ValidatedFeeRow[];
+      rowCount: number;
+    }
+  | {
+      ok: false;
+      error: string;
+      code: FeeCalculatorErrorCode;
+    };
+
+/**
+ * Build a CSV formatting block from an array of fee deduction records.
+ * Validates each record against overflow and digit limits, and constructs
+ * properly escaped table output rows.
+ */
+export function buildFeeCsvBlock(
+  records: FeeDeductionRecord[],
+  options?: FeeCsvExportOptions
+): FeeCsvFormattingOutcome {
+  if (!Array.isArray(records)) {
+    return {
+      ok: false,
+      error: "records must be an array",
+      code: FEE_ERROR_CODES.INVALID_INPUT,
+    };
+  }
+
+  if (records.length === 0 && options?.allowEmpty === false) {
+    return {
+      ok: false,
+      error: "records array cannot be empty",
+      code: FEE_ERROR_CODES.EMPTY_DATA,
+    };
+  }
+
+  const delimiter = options?.delimiter ?? ",";
+  const lineEnding = options?.lineEnding ?? "\n";
+  const includeHeader = options?.includeHeader !== false;
+
+  const validatedRows: ValidatedFeeRow[] = [];
+  for (let i = 0; i < records.length; i++) {
+    const check = validateFeeDeductionRecord(records[i], i);
+    if (!check.ok) {
+      return check;
+    }
+    validatedRows.push(check.value);
+  }
+
+  // Determine column list
+  let columns: string[];
+  if (options?.columns && options.columns.length > 0) {
+    columns = [...options.columns];
+  } else {
+    const hasLabel = validatedRows.some((r) => r.label !== undefined);
+    columns = [];
+    if (hasLabel) columns.push("label");
+    columns.push(
+      "grossAmount",
+      "feeRate",
+      "scale",
+      "feeAmount",
+      "netAmount",
+      "remainder"
+    );
+  }
+
+  const headers =
+    options?.headers && options.headers.length === columns.length
+      ? options.headers
+      : columns;
+
+  const lines: string[] = [];
+
+  if (includeHeader) {
+    lines.push(formatRowToCsv(headers, delimiter));
+  }
+
+  for (const row of validatedRows) {
+    const rowValues = columns.map((col) => {
+      if (col === "label") {
+        return row.label ?? "";
+      }
+      if (col === "grossAmount") {
+        return row.grossAmount.toString();
+      }
+      if (col === "feeRate") {
+        return row.feeRate.toString();
+      }
+      if (col === "scale") {
+        return row.scale.toString();
+      }
+      if (col === "feeAmount") {
+        return row.feeAmount.toString();
+      }
+      if (col === "netAmount") {
+        return row.netAmount.toString();
+      }
+      if (col === "remainder") {
+        return row.remainder.toString();
+      }
+      return row[col] !== undefined ? row[col] : "";
+    });
+    lines.push(formatRowToCsv(rowValues, delimiter));
+  }
+
+  const value = lines.join(lineEnding) + (lines.length > 0 ? lineEnding : "");
+  return {
+    ok: true,
+    value,
+    rowCount: validatedRows.length,
+    columns,
+  };
+}
+
+/**
+ * Format exporter aliases to buildFeeCsvBlock.
+ */
+export const formatFeeTable = buildFeeCsvBlock;
+export const formatDeductionTable = buildFeeCsvBlock;
+
+/**
+ * Exporter specifically for fee deduction entries, generating CSV output.
+ */
+export function exportDeductionToCsv(
+  entries: FeeDeductionRecord[],
+  options?: FeeCsvExportOptions
+): FeeCsvFormattingOutcome {
+  return buildFeeCsvBlock(entries, options);
+}
+
+/**
+ * Exporter specifically for fee share style entries (gross + rate pairs).
+ */
+export function exportFeeToCsv(
+  entries: FeeDeductionRecord[],
+  options?: FeeCsvExportOptions
+): FeeCsvFormattingOutcome {
+  return buildFeeCsvBlock(entries, options);
+}
+
+/**
+ * Serialize fee deduction data or pre-built CSV block to a file on disk.
+ * Creates parent directories if they do not exist.
+ */
+export function exportFeeCsvFile(
+  filePath: string,
+  data: FeeDeductionRecord[] | string,
+  options?: FeeCsvExportOptions
+): FeeCsvFileOutcome {
+  if (!filePath || typeof filePath !== "string" || filePath.trim().length === 0) {
+    return {
+      ok: false,
+      error: "filePath must be a non-empty string",
+      code: FEE_ERROR_CODES.INVALID_INPUT,
+    };
+  }
+
+  let csvContent: string;
+  let rowCount: number;
+
+  if (typeof data === "string") {
+    csvContent = data;
+    rowCount = countCsvDataRows(data, options?.includeHeader !== false);
+  } else if (Array.isArray(data)) {
+    const formatted = buildFeeCsvBlock(data, options);
+    if (!formatted.ok) {
+      return formatted;
+    }
+    csvContent = formatted.value;
+    rowCount = formatted.rowCount;
+  } else {
+    return {
+      ok: false,
+      error: "data must be an array of fee deduction records or a CSV string",
+      code: FEE_ERROR_CODES.INVALID_INPUT,
+    };
+  }
+
+  try {
+    const bytesWritten = writeCsvFile(filePath, csvContent, options?.encoding ?? "utf-8");
+
+    return {
+      ok: true,
+      filePath,
+      bytesWritten,
+      rowCount,
+    };
+  } catch (err: unknown) {
+    const errorMsg = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      error: `Failed to write CSV file: ${errorMsg}`,
+      code: FEE_ERROR_CODES.FILE_WRITE_ERROR,
+    };
+  }
+}
+
+/**
+ * File serialization helper alias.
+ */
+export const serializeFeeRecordsToFile = exportFeeCsvFile;
+
+/**
+ * Helper to write raw CSV content string directly to a file on disk.
+ */
+export function writeFeeCsvToFile(
+  filePath: string,
+  csvContent: string,
+  encoding: BufferEncoding = "utf-8"
+): FeeCsvFileOutcome {
+  return exportFeeCsvFile(filePath, csvContent, { encoding });
+}
+
+/**
+ * Parse a CSV formatting block back into validated fee deduction records.
+ */
+export function parseFeeCsvBlock(
+  csvContent: string,
+  options?: { delimiter?: string }
+): FeeCsvParseOutcome {
+  if (typeof csvContent !== "string") {
+    return {
+      ok: false,
+      error: "csvContent must be a string",
+      code: FEE_ERROR_CODES.INVALID_INPUT,
+    };
+  }
+
+  const delimiter = options?.delimiter ?? ",";
+  const rows = splitCsvRows(csvContent);
+  if (rows.length === 0) {
+    return { ok: true, records: [], rowCount: 0 };
+  }
+
+  const headerFields = parseCsvLine(rows[0], delimiter).map((h) => h.trim());
+  const records: ValidatedFeeRow[] = [];
+
+  for (let r = 1; r < rows.length; r++) {
+    const fields = parseCsvLine(rows[r], delimiter);
+    const rowObj: FeeDeductionRecord = {
+      grossAmount: "0",
+      feeRate: "0",
+    };
+
+    for (let c = 0; c < headerFields.length; c++) {
+      const header = headerFields[c];
+      const val = fields[c] ?? "";
+
+      if (header === "grossAmount") {
+        if (val !== "") rowObj.grossAmount = val;
+      } else if (header === "feeRate") {
+        if (val !== "") rowObj.feeRate = val;
+      } else if (header === "scale") {
+        if (val !== "") rowObj.scale = val;
+      } else if (header === "label") {
+        if (val !== "") rowObj.label = val;
+      } else if (
+        header === "feeAmount" ||
+        header === "netAmount" ||
+        header === "remainder"
+      ) {
+        continue;
+      } else {
+        rowObj[header] = val;
+      }
+    }
+
+    const check = validateFeeDeductionRecord(rowObj, r - 1);
+    if (!check.ok) {
+      return check;
+    }
+    records.push(check.value);
+  }
+
+  return { ok: true, records, rowCount: records.length };
+}
+
+/**
+ * Read and deserialize a CSV file from disk into fee deduction records.
+ */
+export function readFeeCsvFromFile(
+  filePath: string,
+  options?: { encoding?: BufferEncoding; delimiter?: string }
+): FeeCsvParseOutcome {
+  if (!filePath || typeof filePath !== "string") {
+    return {
+      ok: false,
+      error: "filePath must be a non-empty string",
+      code: FEE_ERROR_CODES.INVALID_INPUT,
+    };
+  }
+
+  try {
+    const content = readCsvFile(filePath, options?.encoding ?? "utf-8");
+    return parseFeeCsvBlock(content, { delimiter: options?.delimiter });
+  } catch (err: unknown) {
+    const errorMsg = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      error: `Failed to read CSV file: ${errorMsg}`,
+      code: FEE_ERROR_CODES.FILE_READ_ERROR,
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Partial payment allocator serializers
+// ---------------------------------------------------------------------------
 
 // Error codes for serialization operations
 const CSV_SERIALIZATION_ERRORS = {
@@ -24,29 +554,12 @@ const CSV_SERIALIZATION_ERRORS = {
 };
 
 /**
- * Escape a CSV field value to handle special characters.
- * If the field contains comma, quote, or newline, wrap in quotes and escape internal quotes.
+ * Escape a CSV field value (comma-delimited).
  *
- * @param value - The value to escape
- * @returns Escaped value safe for CSV output
- *
- * @example
- * ```typescript
- * escapeCSVField("hello, world") // => '"hello, world"'
- * escapeCSVField('say "hi"')     // => '"say ""hi"""'
- * ```
+ * @deprecated Use `escapeCsvField`; kept as an alias for existing callers.
  */
 export function escapeCSVField(value: string | number | bigint): string {
-  const strValue = String(value);
-  
-  // Check if escaping is needed
-  if (strValue.includes(",") || strValue.includes('"') || strValue.includes("\n")) {
-    // Escape internal quotes by doubling them
-    const escaped = strValue.replace(/"/g, '""');
-    return `"${escaped}"`;
-  }
-  
-  return strValue;
+  return escapeCsvField(value);
 }
 
 /**

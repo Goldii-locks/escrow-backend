@@ -5,9 +5,8 @@
  * exports those rows as CSV.
  */
 
-import fs from "fs";
-import path from "path";
-import { escapeCSVField } from "./csv-serializer.js";
+import { formatRowToCsv, writeCsvFile } from "./csv-serializer.js";
+import { formatRefundValueForDb, parseRefundDbValue } from "./db-precision.js";
 import {
   parseIntegerInput,
   MAX_SAFE_DIGITS,
@@ -305,42 +304,8 @@ export type RefundRowResult =
   | { ok: true; row: FormattedRefundRow }
   | ValidationFailure;
 
-/**
- * Render a raw integer value with exactly `decimals` fractional digits
- * (e.g. 25_000_000n at 7 decimals -> "2.5000000").
- */
-export function formatRefundValueForDb(value: bigint, decimals: number): string {
-  if (typeof value !== "bigint") {
-    throw new TypeError("formatRefundValueForDb: value must be a bigint");
-  }
-  if (!Number.isInteger(decimals) || decimals < 0) {
-    throw new RangeError(
-      `formatRefundValueForDb: decimals must be a non-negative integer, got ${decimals}`
-    );
-  }
-  if (decimals === 0) {
-    return value.toString();
-  }
-
-  const negative = value < 0n;
-  const abs = negative ? -value : value;
-  const scale = 10n ** BigInt(decimals);
-  const fraction = (abs % scale).toString().padStart(decimals, "0");
-  const formatted = `${abs / scale}.${fraction}`;
-  return negative ? `-${formatted}` : formatted;
-}
-
-/** Parse a fixed-precision DB value back into its raw integer representation. */
-export function parseRefundDbValue(formatted: string, decimals: number): bigint {
-  const pattern =
-    decimals === 0 ? /^-?\d+$/ : new RegExp(`^-?\\d+\\.\\d{${decimals}}$`);
-  if (!pattern.test(formatted)) {
-    throw new SyntaxError(
-      `parseRefundDbValue: "${formatted}" does not match ${decimals}-decimal precision`
-    );
-  }
-  return BigInt(formatted.replace(".", ""));
-}
+// Fixed-scale refund formatters live in db-precision.ts (#635).
+export { formatRefundValueForDb, parseRefundDbValue };
 
 /**
  * Compute a refund split and format every column for DB storage. Each
@@ -435,12 +400,10 @@ export function buildRefundCsvBlock(
 
   const lines: string[] = [];
   if (options.includeHeaders !== false) {
-    lines.push(REFUND_CSV_HEADERS.map(escapeCSVField).join(","));
+    lines.push(formatRowToCsv([...REFUND_CSV_HEADERS]));
   }
   for (const row of rows) {
-    lines.push(
-      REFUND_CSV_HEADERS.map((column) => escapeCSVField(row[column])).join(",")
-    );
+    lines.push(formatRowToCsv(REFUND_CSV_HEADERS.map((column) => row[column])));
   }
   return `${lines.join("\n")}\n`;
 }
@@ -455,7 +418,6 @@ export function writeRefundCsvFile(
   options: { includeHeaders?: boolean } = {}
 ): number {
   const csv = buildRefundCsvBlock(rows, options);
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, csv, { encoding: "utf8" });
+  writeCsvFile(filePath, csv, "utf8");
   return rows.length;
 }

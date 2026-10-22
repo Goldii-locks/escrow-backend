@@ -1,6 +1,28 @@
-import fs from "fs";
-import path from "path";
-import { isAmountWithinRange, MAX_AMOUNT } from "./digit-limit-validator.js";
+import { isAmountWithinRange } from "./digit-limit-validator.js";
+import {
+  escapeCsvField,
+  formatRowToCsv,
+  parseCsvLine,
+  splitCsvRows,
+  countCsvDataRows,
+  writeCsvFile,
+  readCsvFile,
+} from "./csv-serializer.js";
+
+export { escapeCsvField, formatRowToCsv, parseCsvLine };
+export {
+  validateDbPrecisionSchema,
+  formatForDbStorage,
+  formatRawForDbStorage,
+  formatHumanForDbStorage,
+  formatDbColumns,
+  formatColumnsForDbStorage,
+  configureFormatColumns,
+  type DbPrecisionSchema,
+  type DbStorageRow,
+  type DbStorageColumns,
+  type DbFormatResult,
+} from "./db-precision.js";
 
 /**
  * Token decimals converter with overflow / digit-limit validation.
@@ -90,64 +112,6 @@ function checkConversionRateLimit():
 
   return { ok: true };
 }
-
-/**
- * Configuration options for database precision schema and column mapping.
- */
-export interface DbPrecisionSchema {
-  /** Column scale (decimal places). Defaults to token decimals if not specified. */
-  scale?: number;
-  /** Maximum precision (total digits). Defaults to the i128 amount width. */
-  precision?: number;
-  /**
-   * Whether to format with fixed decimal scale by padding fractional digits
-   * with trailing zeroes to match the column scale (e.g. "1.5000000" for decimals=7).
-   * Defaults to true for database precision schemas.
-   */
-  fixedScale?: boolean;
-  /**
-   * Whether input is raw units, human units, or auto-detected.
-   * Defaults to "auto".
-   */
-  inputType?: "auto" | "raw" | "human";
-  /** Custom column names for database storage mapping. */
-  columns?: {
-    rawAmount?: string;
-    formattedAmount?: string;
-    decimals?: string;
-  };
-}
-
-/**
- * Attributes for a database row storing a token amount with full precision.
- */
-export interface DbStorageRow {
-  /** Raw on-chain integer amount string (exact integer, no precision loss). */
-  raw_amount: string;
-  /** Decimal amount string formatted to match database precision schema. */
-  formatted_amount: string;
-  /** Token decimals (scale). */
-  decimals: number;
-  /** Alias for raw_amount in camelCase. */
-  rawAmount: string;
-  /** Alias for formatted_amount in camelCase. */
-  formattedAmount: string;
-  /** Human-readable string with trimmed trailing zeroes. */
-  trimmed_amount: string;
-  /** Dynamic custom column mapping if custom column names were configured. */
-  [key: string]: string | number;
-}
-
-export type DbStorageColumns = DbStorageRow;
-
-export type DbFormatResult =
-  | {
-      ok: true;
-      value: DbStorageRow;
-      columns: DbStorageRow;
-      row: DbStorageRow;
-    }
-  | { ok: false; error: string; code: DecimalsErrorCode };
 
 /**
  * Input record representing a token amount conversion entry for serialization / export.
@@ -243,11 +207,6 @@ export type CsvParseOutcome =
       error: string;
       code: DecimalsErrorCode;
     };
-
-function digitCount(normalized: string): number {
-  const digits = normalized.replace(/^-/, "").replace(/^0+(?=\d)/, "");
-  return digits.length === 0 ? 1 : digits.length;
-}
 
 /**
  * Validate a token's `decimals` value against the practical safe range.
@@ -545,315 +504,6 @@ export function formatToDbPrecision(
 }
 
 /**
- * Validate a database precision schema configuration.
- */
-export function validateDbPrecisionSchema(
-  schema: DbPrecisionSchema
-): { ok: true } | { ok: false; error: string; code: DecimalsErrorCode } {
-  if (schema.scale !== undefined) {
-    const scaleCheck = validateDecimals(schema.scale);
-    if (!scaleCheck.ok) {
-      return scaleCheck;
-    }
-  }
-
-  if (schema.precision !== undefined) {
-    if (
-      typeof schema.precision !== "number" ||
-      !Number.isFinite(schema.precision) ||
-      !Number.isInteger(schema.precision) ||
-      schema.precision <= 0
-    ) {
-      return {
-        ok: false,
-        error: "schema precision must be a positive integer",
-        code: ERROR_CODES.INVALID_SCHEMA,
-      };
-    }
-    if (schema.precision > MAX_AMOUNT.toString().length) {
-      return {
-        ok: false,
-        error: `schema precision cannot exceed ${MAX_AMOUNT.toString().length} digits`,
-        code: ERROR_CODES.INVALID_SCHEMA,
-      };
-    }
-    if (schema.scale !== undefined && schema.scale > schema.precision) {
-      return {
-        ok: false,
-        error: "schema scale cannot exceed precision",
-        code: ERROR_CODES.INVALID_SCHEMA,
-      };
-    }
-  }
-
-  return { ok: true };
-}
-
-/**
- * Format values calculated by token_decimals_converter to match database
- * precision schemas, producing row attributes that preserve full precision.
- *
- * @param amount - The raw integer amount (bigint, integer string/number) or human decimal amount (string/number with decimal point)
- * @param decimals - The token decimals scale (0 to 18)
- * @param schema - Optional database precision schema options (scale, precision, fixedScale, column mappings)
- */
-export function formatForDbStorage(
-  amount: string | number | bigint | ConversionResult | { ok: true; value: string },
-  decimals: number,
-  schema?: DbPrecisionSchema
-): DbFormatResult {
-  const decimalsCheck = validateDecimals(decimals);
-  if (!decimalsCheck.ok) {
-    return decimalsCheck;
-  }
-
-  if (schema) {
-    const schemaCheck = validateDbPrecisionSchema(schema);
-    if (!schemaCheck.ok) {
-      return schemaCheck;
-    }
-  }
-
-  let unwrapped: string | number | bigint;
-  if (typeof amount === "object" && amount !== null && "ok" in amount) {
-    if (!amount.ok) {
-      return amount;
-    }
-    unwrapped = amount.value;
-  } else {
-    unwrapped = amount;
-  }
-
-  const effectiveScale = schema?.scale !== undefined ? schema.scale : decimals;
-  const isFixedScale = schema?.fixedScale ?? true;
-  const inputType = schema?.inputType ?? "auto";
-
-  let rawBigInt: bigint;
-  let rawStr: string;
-
-  if (typeof unwrapped === "bigint") {
-    if (inputType === "human") {
-      const rawResult = toRawUnits(unwrapped.toString(), effectiveScale);
-      if (!rawResult.ok) {
-        return rawResult;
-      }
-      rawBigInt = rawResult.value;
-      rawStr = rawBigInt.toString();
-    } else {
-      const rawCheck = validateRawAmount(unwrapped, "amount");
-      if (!rawCheck.ok) {
-        return rawCheck;
-      }
-      rawBigInt = rawCheck.value;
-      rawStr = rawBigInt.toString();
-    }
-  } else if (typeof unwrapped === "number") {
-    if (!Number.isFinite(unwrapped)) {
-      return {
-        ok: false,
-        error: "amount must be a finite number",
-        code: ERROR_CODES.INVALID_AMOUNT,
-      };
-    }
-    if (unwrapped < 0 || Object.is(unwrapped, -0)) {
-      return {
-        ok: false,
-        error: "amount cannot be negative",
-        code: ERROR_CODES.INVALID_AMOUNT,
-      };
-    }
-    if (inputType === "human" || !Number.isInteger(unwrapped)) {
-      const rawResult = toRawUnits(unwrapped, effectiveScale);
-      if (!rawResult.ok) {
-        return rawResult;
-      }
-      rawBigInt = rawResult.value;
-      rawStr = rawBigInt.toString();
-    } else {
-      const rawCheck = validateRawAmount(unwrapped, "amount");
-      if (!rawCheck.ok) {
-        return rawCheck;
-      }
-      rawBigInt = rawCheck.value;
-      rawStr = rawBigInt.toString();
-    }
-  } else {
-    const trimmed = unwrapped.trim();
-    if (trimmed.startsWith("-")) {
-      return {
-        ok: false,
-        error: "amount cannot be negative",
-        code: ERROR_CODES.INVALID_AMOUNT,
-      };
-    }
-    if (inputType === "human" || trimmed.includes(".")) {
-      const rawResult = toRawUnits(trimmed, effectiveScale);
-      if (!rawResult.ok) {
-        return rawResult;
-      }
-      rawBigInt = rawResult.value;
-      rawStr = rawBigInt.toString();
-    } else {
-      const rawCheck = validateRawAmount(trimmed, "amount");
-      if (!rawCheck.ok) {
-        return rawCheck;
-      }
-      rawBigInt = rawCheck.value;
-      rawStr = rawBigInt.toString();
-    }
-  }
-
-  const maxDigits = schema?.precision ?? MAX_AMOUNT.toString().length;
-  if (digitCount(rawStr) > maxDigits) {
-    return {
-      ok: false,
-      error: `amount exceeds maximum allowed precision of ${maxDigits} digits`,
-      code: ERROR_CODES.EXCESSIVE_DIGITS,
-    };
-  }
-
-  const formattedResult = toHumanUnits(rawBigInt, effectiveScale, { fixedScale: isFixedScale });
-  if (!formattedResult.ok) {
-    return formattedResult;
-  }
-
-  const trimmedResult = toHumanUnits(rawBigInt, effectiveScale, { fixedScale: false });
-  const trimmedAmount = trimmedResult.ok ? trimmedResult.value : formattedResult.value;
-
-  const rawCol = schema?.columns?.rawAmount ?? "raw_amount";
-  const formattedCol = schema?.columns?.formattedAmount ?? "formatted_amount";
-  const decimalsCol = schema?.columns?.decimals ?? "decimals";
-
-  const row: DbStorageRow = {
-    raw_amount: rawStr,
-    formatted_amount: formattedResult.value,
-    decimals: effectiveScale,
-    rawAmount: rawStr,
-    formattedAmount: formattedResult.value,
-    trimmed_amount: trimmedAmount,
-    [rawCol]: rawStr,
-    [formattedCol]: formattedResult.value,
-    [decimalsCol]: effectiveScale,
-  };
-
-  return {
-    ok: true,
-    value: row,
-    columns: row,
-    row,
-  };
-}
-
-/**
- * Format raw integer amount explicitly for database storage.
- */
-export function formatRawForDbStorage(
-  rawAmount: string | number | bigint,
-  decimals: number,
-  schema?: DbPrecisionSchema
-): DbFormatResult {
-  return formatForDbStorage(rawAmount, decimals, { ...schema, inputType: "raw" });
-}
-
-/**
- * Format human decimal amount explicitly for database storage.
- */
-export function formatHumanForDbStorage(
-  humanAmount: string | number,
-  decimals: number,
-  schema?: DbPrecisionSchema
-): DbFormatResult {
-  return formatForDbStorage(humanAmount, decimals, { ...schema, inputType: "human" });
-}
-
-/**
- * Alias for formatForDbStorage.
- */
-export const formatDbColumns = formatForDbStorage;
-
-/**
- * Alias for formatForDbStorage matching the exact issue name.
- */
-export const formatColumnsForDbStorage = formatForDbStorage;
-
-/**
- * Factory to configure format columns for database storage with default schema rules.
- */
-export function configureFormatColumns(defaultSchema?: DbPrecisionSchema) {
-  return {
-    schema: defaultSchema,
-    format: (
-      amount: string | number | bigint | ConversionResult | { ok: true; value: string },
-      decimals?: number,
-      overrideSchema?: DbPrecisionSchema
-    ) =>
-      formatForDbStorage(
-        amount,
-        decimals ?? defaultSchema?.scale ?? 7,
-        { ...defaultSchema, ...overrideSchema }
-      ),
-    formatRaw: (
-      rawAmount: string | number | bigint,
-      decimals?: number,
-      overrideSchema?: DbPrecisionSchema
-    ) =>
-      formatRawForDbStorage(
-        rawAmount,
-        decimals ?? defaultSchema?.scale ?? 7,
-        { ...defaultSchema, ...overrideSchema }
-      ),
-    formatHuman: (
-      humanAmount: string | number,
-      decimals?: number,
-      overrideSchema?: DbPrecisionSchema
-    ) =>
-      formatHumanForDbStorage(
-        humanAmount,
-        decimals ?? defaultSchema?.scale ?? 7,
-        { ...defaultSchema, ...overrideSchema }
-      ),
-    validateSchema: (schema: DbPrecisionSchema) => validateDbPrecisionSchema(schema),
-  };
-}
-
-/**
- * Escape an individual CSV field following RFC 4180 rules.
- * If the value contains commas, quotes, or newlines, it will be wrapped in
- * double quotes, with internal quotes doubled.
- */
-export function escapeCsvField(value: unknown, delimiter = ","): string {
-  if (value === null || value === undefined) {
-    return "";
-  }
-  let str: string;
-  if (typeof value === "bigint") {
-    str = value.toString();
-  } else if (typeof value === "string") {
-    str = value;
-  } else {
-    str = String(value);
-  }
-
-  const needsQuotes =
-    str.includes(delimiter) ||
-    str.includes('"') ||
-    str.includes("\n") ||
-    str.includes("\r");
-
-  if (needsQuotes) {
-    return `"${str.replace(/"/g, '""')}"`;
-  }
-  return str;
-}
-
-/**
- * Format an array of values into a single CSV row.
- */
-export function formatRowToCsv(values: unknown[], delimiter = ","): string {
-  return values.map((v) => escapeCsvField(v, delimiter)).join(delimiter);
-}
-
-/**
  * Validate a single token conversion record step-by-step.
  * Resolves both rawAmount and humanAmount ensuring numerical consistency
  * and adherence to digit limits.
@@ -1130,13 +780,7 @@ export function exportToCsvFile(
 
   if (typeof data === "string") {
     csvContent = data;
-    const trimmed = data.trim();
-    if (trimmed.length === 0) {
-      rowCount = 0;
-    } else {
-      const splitLines = trimmed.split(/\r?\n/);
-      rowCount = options?.includeHeader !== false ? Math.max(0, splitLines.length - 1) : splitLines.length;
-    }
+    rowCount = countCsvDataRows(data, options?.includeHeader !== false);
   } else if (Array.isArray(data)) {
     const formatted = buildCsvBlock(data, options);
     if (!formatted.ok) {
@@ -1153,13 +797,7 @@ export function exportToCsvFile(
   }
 
   try {
-    const dir = path.dirname(filePath);
-    if (dir && dir !== "." && !fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
-    const encoding = options?.encoding ?? "utf-8";
-    fs.writeFileSync(filePath, csvContent, { encoding });
-    const bytesWritten = Buffer.byteLength(csvContent, encoding);
+    const bytesWritten = writeCsvFile(filePath, csvContent, options?.encoding ?? "utf-8");
 
     return {
       ok: true,
@@ -1192,90 +830,6 @@ export function writeCsvToFile(
   encoding: BufferEncoding = "utf-8"
 ): FileSerializationOutcome {
   return exportToCsvFile(filePath, csvContent, { encoding });
-}
-
-/**
- * Parse a single CSV row line respecting quoted fields and escaped quotes.
- */
-export function parseCsvLine(line: string, delimiter = ","): string[] {
-  const result: string[] = [];
-  let current = "";
-  let inQuotes = false;
-  let i = 0;
-
-  while (i < line.length) {
-    const char = line[i];
-    if (inQuotes) {
-      if (char === '"') {
-        if (i + 1 < line.length && line[i + 1] === '"') {
-          current += '"';
-          i += 2;
-          continue;
-        } else {
-          inQuotes = false;
-          i++;
-          continue;
-        }
-      } else {
-        current += char;
-        i++;
-        continue;
-      }
-    } else {
-      if (char === '"') {
-        inQuotes = true;
-        i++;
-        continue;
-      } else if (char === delimiter) {
-        result.push(current);
-        current = "";
-        i++;
-        continue;
-      } else {
-        current += char;
-        i++;
-        continue;
-      }
-    }
-  }
-  result.push(current);
-  return result;
-}
-
-/**
- * Split CSV content into logical rows, preserving multi-line quoted fields.
- */
-function splitCsvRows(csvContent: string): string[] {
-  const rows: string[] = [];
-  let current = "";
-  let inQuotes = false;
-
-  for (let i = 0; i < csvContent.length; i++) {
-    const char = csvContent[i];
-    if (char === '"') {
-      if (inQuotes && i + 1 < csvContent.length && csvContent[i + 1] === '"') {
-        current += '""';
-        i++;
-      } else {
-        inQuotes = !inQuotes;
-        current += '"';
-      }
-    } else if ((char === "\n" || char === "\r") && !inQuotes) {
-      if (char === "\r" && i + 1 < csvContent.length && csvContent[i + 1] === "\n") {
-        i++;
-      }
-      if (current.trim().length > 0) {
-        rows.push(current);
-      }
-      current = "";
-    } else {
-      current += char;
-    }
-  }
-  if (current.trim().length > 0) {
-    rows.push(current);
-  }
-  return rows;
 }
 
 /**
@@ -1353,8 +907,7 @@ export function readCsvFromFile(
   }
 
   try {
-    const encoding = options?.encoding ?? "utf-8";
-    const content = fs.readFileSync(filePath, { encoding });
+    const content = readCsvFile(filePath, options?.encoding ?? "utf-8");
     return parseCsvBlock(content, { delimiter: options?.delimiter });
   } catch (err: unknown) {
     const errorMsg = err instanceof Error ? err.message : String(err);
