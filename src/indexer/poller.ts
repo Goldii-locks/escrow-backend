@@ -13,8 +13,14 @@ import {
   resetPollerThrottleState,
   verifySchemaUpToDate,
   assertSchemaValid,
+  getDb,
   type EventRow,
 } from "./db.js";
+import {
+  isVacuumLocked,
+  pruneOldEvents,
+  runVacuum,
+} from "./sqlite_vacuum_cleaner.js";
 import { RpcPollerClient } from "./rpc-poller-client.js";
 import {
   IndexerRunnerFailureMonitor,
@@ -653,6 +659,9 @@ export function startPoller() {
       pollerTimeout = setTimeout(pollLoop, currentPollIntervalMs);
     }
   });
+
+  // Wire in the SQLite maintenance scheduler (Issue 3).
+  startMaintenanceScheduler();
 }
 
 export function stopPoller() {
@@ -663,4 +672,120 @@ export function stopPoller() {
   }
   resetPollerThrottleState();
   currentPollIntervalMs = POLL_INTERVAL_MIN_MS;
+  stopMaintenanceScheduler();
+}
+
+// ---------------------------------------------------------------------------
+// SQLite maintenance scheduler (Issue 3)
+// ---------------------------------------------------------------------------
+// Runs PRAGMA wal_checkpoint(TRUNCATE) and PRAGMA optimize on a configurable
+// interval (default 6 hours). Skips execution while a vacuum write-lock is
+// active. Only prunes old events when EVENT_RETENTION_DAYS is explicitly set.
+
+/** Default maintenance interval: 6 hours in ms. */
+export const DEFAULT_DB_MAINTENANCE_INTERVAL_MS = 21_600_000;
+
+let maintenanceTimeout: NodeJS.Timeout | null = null;
+
+/**
+ * Execute one SQLite maintenance cycle:
+ *   1. Skip (reschedule) when `isVacuumLocked()` is true so we never overlap
+ *      with an active vacuum write batch.
+ *   2. Run `PRAGMA wal_checkpoint(TRUNCATE)` to flush the WAL file and free
+ *      disk space accumulated since the last checkpoint.
+ *   3. Run `PRAGMA optimize` to update internal query-planner statistics.
+ *   4. If `EVENT_RETENTION_DAYS` is explicitly set in the environment, prune
+ *      events older than that many days and then run a full `VACUUM`.
+ *
+ * Errors are caught and logged so a maintenance failure never crashes the
+ * poller.
+ */
+export function runMaintenanceCycle(): void {
+  if (isVacuumLocked()) {
+    logger.debug("SQLite maintenance skipped – vacuum lock is active");
+    return;
+  }
+
+  const db = getDb();
+
+  try {
+    db.pragma("wal_checkpoint(TRUNCATE)");
+    db.pragma("optimize");
+    logger.info("SQLite maintenance completed", { operation: "wal_checkpoint+optimize" });
+  } catch (err) {
+    logger.error("SQLite maintenance failed (wal_checkpoint/optimize)", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return;
+  }
+
+  // Retention pruning – only when EVENT_RETENTION_DAYS is explicitly configured.
+  const retentionRaw = process.env.EVENT_RETENTION_DAYS;
+  if (retentionRaw !== undefined && retentionRaw.trim() !== "") {
+    const retentionDays = parseInt(retentionRaw, 10);
+    if (!Number.isInteger(retentionDays) || retentionDays <= 0) {
+      logger.warn("SQLite maintenance: invalid EVENT_RETENTION_DAYS – skipping pruning", {
+        received: retentionRaw,
+      });
+      return;
+    }
+    try {
+      const pruned = pruneOldEvents(db, retentionDays);
+      logger.info("SQLite maintenance: pruned old events", { retentionDays, pruned });
+      runVacuum(db);
+      logger.info("SQLite maintenance: VACUUM complete after retention prune");
+    } catch (err) {
+      logger.error("SQLite maintenance: retention prune/vacuum failed", {
+        error: err instanceof Error ? err.message : String(err),
+        retentionDays,
+      });
+    }
+  }
+}
+
+function scheduleNextMaintenance(intervalMs: number): void {
+  maintenanceTimeout = setTimeout(() => {
+    runMaintenanceCycle();
+    const next = parseInt(
+      process.env.DB_MAINTENANCE_INTERVAL_MS ?? String(DEFAULT_DB_MAINTENANCE_INTERVAL_MS),
+      10,
+    );
+    scheduleNextMaintenance(
+      Number.isFinite(next) && next > 0 ? next : DEFAULT_DB_MAINTENANCE_INTERVAL_MS,
+    );
+  }, intervalMs);
+}
+
+/** Start the maintenance scheduler and run the first cycle immediately. */
+export function startMaintenanceScheduler(): void {
+  if (maintenanceTimeout !== null) return; // already running
+
+  // Run once immediately at startup, then on the configured interval.
+  runMaintenanceCycle();
+
+  const intervalMs = parseInt(
+    process.env.DB_MAINTENANCE_INTERVAL_MS ?? String(DEFAULT_DB_MAINTENANCE_INTERVAL_MS),
+    10,
+  );
+  scheduleNextMaintenance(
+    Number.isFinite(intervalMs) && intervalMs > 0
+      ? intervalMs
+      : DEFAULT_DB_MAINTENANCE_INTERVAL_MS,
+  );
+
+  logger.info("SQLite maintenance scheduler started", {
+    intervalMs:
+      Number.isFinite(intervalMs) && intervalMs > 0
+        ? intervalMs
+        : DEFAULT_DB_MAINTENANCE_INTERVAL_MS,
+    retentionPruningEnabled: process.env.EVENT_RETENTION_DAYS !== undefined,
+  });
+}
+
+/** Stop the maintenance scheduler. */
+export function stopMaintenanceScheduler(): void {
+  if (maintenanceTimeout) {
+    clearTimeout(maintenanceTimeout);
+    maintenanceTimeout = null;
+  }
 }
