@@ -3,6 +3,9 @@
  *
  * Orchestrates subscription mutations and outbound delivery with Winston
  * debug telemetry so pipeline flows can be traced end-to-end via traceId.
+ *
+ * This is the single webhook dispatcher module. Delivery itself (including
+ * notification opt-out handling) lives in src/indexer/webhook-delivery.ts.
  */
 
 import { randomUUID } from "crypto";

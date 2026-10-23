@@ -13,6 +13,15 @@ const WEBHOOK_DELIVERY_LEDGER_PAGE_SIZE =
   parseInt(process.env.WEBHOOK_DELIVERY_PAGE_SIZE || "500", 10) || 500;
 
 /**
+ * Subscription opt-out is not yet supported by the live delivery path. The
+ * unreachable `src/indexer/webhook_dispatcher.ts` module that claimed this
+ * feature has been removed; this constant documents that there is exactly
+ * one webhook dispatcher (this module plus `src/utils/webhook_dispatcher.ts`
+ * for subscription management).
+ */
+export const WEBHOOK_DISPATCHER_MODULE = "webhook-delivery";
+
+/**
  * Webhook payload envelope version. Bump this integer whenever the shape of
  * the delivered payload changes in a breaking way so subscribers can tell
  * which schema they received (see `docs/webhooks.md`).
