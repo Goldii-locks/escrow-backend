@@ -1,6 +1,5 @@
 import express from "express";
 import type { Request, Response, NextFunction } from "express";
-import cors from "cors";
 import helmet from "helmet";
 import jobRoutes from "./routes/jobs.js";
 import adminRoutes from "./routes/admin.js";
@@ -9,6 +8,9 @@ import { generalLimiter } from "./middleware/rateLimiter.js";
 import { legacyApiDeprecation } from "./middleware/api-version.js";
 import { readinessHandler } from "./readiness.js";
 import logger from "./utils/logger.js";
+import { globalCors } from "./middleware/global-cors.js";
+import { globalErrorHandler } from "./middleware/error-handler.js";
+import { resolveTrustProxy } from "./utils/trust-proxy.js";
 
 // Fail fast in production rather than booting into a silently insecure or
 // misdirected state. Without this the server starts happily and passes
@@ -49,18 +51,10 @@ export function assertProductionEnv(
 }
 
 /**
- * Global error handler – prevents stack trace leakage.
+ * Global error handler (#603): body-parser errors (malformed JSON, oversized
+ * payloads) keep their 4xx status; anything else is a 500 with no detail.
  */
-export function globalErrorHandler(
-  err: unknown,
-  req: Request,
-  res: Response,
-  _next: NextFunction,
-): void {
-  const message = err instanceof Error ? err.message : String(err);
-  logger.error("Unhandled error", { error: message, path: req.path });
-  res.status(500).json({ success: false, error: "Internal server error" });
-}
+export { globalErrorHandler } from "./middleware/error-handler.js";
 
 /**
  * Build the configured Express app. Pure: no DB, poller, or listener side
@@ -69,7 +63,10 @@ export function globalErrorHandler(
 export function createApp(): express.Express {
   const app = express();
 
-  app.use(cors());
+  // #600: key req.ip (and so every rate limiter) on the real client behind nginx.
+  app.set("trust proxy", resolveTrustProxy());
+
+  app.use(globalCors());
   app.use(helmet());
   app.use(express.json());
 

@@ -109,6 +109,11 @@ export const NETWORK_PASSPHRASE =
 const RPC_TIMEOUT_MS = config.rpcTimeoutMs;
 export const server = new Server(RPC_URL, { timeout: RPC_TIMEOUT_MS });
 
+/** RPC URL the module-level Server was built with (#602). */
+export function getRpcUrl(): string {
+  return RPC_URL;
+}
+
 /**
  * Source account for read-only simulations (#616). Simulation never checks
  * the source sequence number, so a local Account needs no RPC getAccount
