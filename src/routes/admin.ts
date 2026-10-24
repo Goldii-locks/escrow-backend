@@ -1,7 +1,12 @@
 import { Router } from "express";
 import { randomUUID } from "crypto";
 import { requireAdmin } from "../middleware/adminAuth.js";
-import { getIndexerStatusData } from "../indexer/db.js";
+import {
+  getIndexerStatusData,
+  getSubscriptions,
+  getActiveSubscriptions,
+  getDisabledSubscriptions,
+} from "../indexer/db.js";
 import { getIndexerUptimeSeconds } from "../indexer/status.js";
 import { getLatestReconciliationResults } from "../indexer/reconciliation.js";
 import {
@@ -192,6 +197,18 @@ router.get("/indexer-status", (_req, res) => {
     reconciliation: getLatestReconciliationResults(),
     failedDeliveries: getFailedDeliveryCount(),
     deadDeliveries: getDeadDeliveries(),
+  });
+});
+
+// GET /api/admin/webhook-subscriptions – every webhook subscription,
+// including the ones that were auto-disabled after repeated delivery
+// failures (#701).
+router.get("/webhook-subscriptions", (_req, res) => {
+  res.json({
+    success: true,
+    subscriptions: getSubscriptions(),
+    active: getActiveSubscriptions(),
+    disabled: getDisabledSubscriptions(),
   });
 });
 
