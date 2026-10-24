@@ -7,6 +7,7 @@ import adminRoutes from "./routes/admin.js";
 import webhookRoutes from "./routes/webhooks.js";
 import { generalLimiter } from "./middleware/rateLimiter.js";
 import { legacyApiDeprecation } from "./middleware/api-version.js";
+import { readinessHandler } from "./readiness.js";
 import logger from "./utils/logger.js";
 
 // Fail fast in production rather than booting into a silently insecure or
@@ -90,6 +91,9 @@ export function createApp(): express.Express {
   app.get("/health", (_req, res) => {
     res.json({ status: "ok", contract: process.env.CONTRACT_ID });
   });
+
+  // Readiness reflects the database and the poller; /health stays pure liveness.
+  app.get("/ready", readinessHandler);
 
   app.use("/api", legacyApiDeprecation);
   app.use("/api", generalLimiter);
