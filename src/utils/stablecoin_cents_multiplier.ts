@@ -636,7 +636,9 @@ function expandExponent(text: string): string {
   return `${negative ? "-" : ""}${expanded}`;
 }
 
-function validateConvertDecimals(decimals: number): ConversionResult | null {
+function validateConvertDecimals(
+  decimals: number,
+): Extract<ConversionResult, { ok: false }> | null {
   if (!Number.isInteger(decimals) || decimals < 0) {
     return {
       ok: false,
