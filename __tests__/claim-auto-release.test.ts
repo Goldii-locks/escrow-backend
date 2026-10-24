@@ -20,7 +20,9 @@ jest.unstable_mockModule("../src/utils/logger.js", () => ({
   default: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
 }));
 
-const { default: router, resetClaimAutoReleaseCache } = await import("../src/routes/jobs.js");
+const { default: router, resetClaimAutoReleaseCache, UNSIGNED_TX_TIMEOUT_S } = await import(
+  "../src/routes/jobs.js"
+);
 const { default: mockLogger } = await import("../src/utils/logger.js");
 const { resetClaimAutoReleaseRateLimitBuckets } = await import(
   "../src/middleware/job-contract-rate-limit.js"
@@ -850,7 +852,8 @@ describe("POST /api/jobs/:contractId/milestones/:index/claim-auto-release – tr
     expect(buildMeta.index).toBe(0);
     expect(buildMeta.sourceAddress).toBe(VALID_ADDRESS);
     expect(buildMeta.fee).toBeDefined();
-    expect(buildMeta.timeout).toBe(30);
+    // Unsigned XDRs get a 120–300s signing window (#677).
+    expect(buildMeta.timeout).toBe(UNSIGNED_TX_TIMEOUT_S);
 
     expect(debugCallsFor("Fetching Stellar account")).toHaveLength(1);
     expect(debugCallsFor("Stellar account fetched")).toHaveLength(1);

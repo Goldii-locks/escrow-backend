@@ -59,8 +59,19 @@ npm run dev
 
 - [Architecture overview](./docs/ARCHITECTURE.md) — live request/indexer paths and reachability table
 - [CSV serialization guide](./docs/CSV_SERIALIZATION_GUIDE.md)
-- [Webhook delivery](./docs/webhooks.md) — event types, payload shapes, retry policy
+- [Webhook delivery](./docs/webhooks.md) — event types, payload shapes, retry policy, idempotency
 - [OpenAPI 3.0 specification](./docs/openapi.yaml) — complete machine-readable route definitions, parameter schemas, and response shapes
+
+### Webhook idempotency
+
+Webhooks are delivered at least once, so receivers must tolerate duplicates.
+Each POST body includes an `event_id`, and each request carries:
+
+- `X-Milesto-Event-Id`: stable per on-chain event (the RPC event id; events indexed before it was stored use `<contract_id>:<ledger_sequence>:<event_type>`). **Dedupe on this.**
+- `X-Milesto-Delivery-Id`: UUID per logical delivery (event to subscriber), constant across all of its retries, including those made by the background retry sweep.
+- `X-Milesto-Delivery-Attempt`: the attempt number, starting at `1`.
+
+See [docs/webhooks.md](./docs/webhooks.md#idempotency) for the full contract.
 
 ## API Documentation
 

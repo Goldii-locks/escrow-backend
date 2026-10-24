@@ -23,6 +23,10 @@ import {
   buildTxCacheKey,
   inFlightBuildTxRequests,
   BUILD_TX_CACHE_TTL,
+  UNSIGNED_TX_TIMEOUT_S,
+  unsignedTxValidUntil,
+  getFreshCachedXdr,
+  setCachedXdr,
 } from "./caches.js";
 
 const router = Router();
@@ -95,7 +99,7 @@ router.post(
       const cacheKey = buildTxCacheKey(contractId, method, sourceAddress, args || []);
 
       logger.debug("Checking build-tx cache", { traceId, ...pathVars, cacheKey });
-      const cached = buildTxCache.get<string>(cacheKey);
+      const cached = getFreshCachedXdr(buildTxCache, cacheKey);
       if (cached !== undefined) {
         logger.info("Build-tx XDR served from cache", {
           traceId,
@@ -142,7 +146,7 @@ router.post(
             ...pathVars,
             method,
             fee: BASE_FEE,
-            timeout: 30,
+            timeout: UNSIGNED_TX_TIMEOUT_S,
           });
           const contract = new Contract(contractId as string);
           logger.debug("Fetching Stellar account for build-tx", {
@@ -173,7 +177,7 @@ router.post(
             networkPassphrase: NETWORK_PASSPHRASE,
           })
             .addOperation(contract.call(method, ...scArgs))
-            .setTimeout(30)
+            .setTimeout(UNSIGNED_TX_TIMEOUT_S)
             .build();
 
           logger.debug("Calling prepareTransaction on Stellar RPC for build-tx", {
@@ -189,7 +193,7 @@ router.post(
             xdrLength: xdr.length,
             ttlSeconds: BUILD_TX_CACHE_TTL,
           });
-          buildTxCache.set(cacheKey, xdr);
+          setCachedXdr(buildTxCache, cacheKey, xdr, unsignedTxValidUntil(tx), BUILD_TX_CACHE_TTL);
           return xdr;
         })();
 

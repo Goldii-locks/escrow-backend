@@ -23,6 +23,11 @@ import {
   partialReleaseCache,
   partialReleaseCacheKey,
   inFlightPartialReleaseRequests,
+  UNSIGNED_TX_TIMEOUT_S,
+  unsignedTxValidUntil,
+  getFreshCachedXdr,
+  setCachedXdr,
+  PARTIAL_RELEASE_CACHE_TTL,
 } from "./caches.js";
 import {
   classifySimError,
@@ -102,7 +107,7 @@ router.post(
       );
 
       logger.debug("Checking partial-release cache", { traceId, contractId, index, cacheKey });
-      const cachedXdr = partialReleaseCache.get<string>(cacheKey);
+      const cachedXdr = getFreshCachedXdr(partialReleaseCache, cacheKey);
       if (cachedXdr !== undefined) {
         logger.info("Partial-release XDR served from cache", {
           traceId,
@@ -133,7 +138,7 @@ router.post(
               nativeToScVal(Number(index), { type: "u32" }),
               nativeToScVal(amountNum, { type: "i128" })
             ))
-            .setTimeout(30)
+            .setTimeout(UNSIGNED_TX_TIMEOUT_S)
             .build();
 
           let prepared;
@@ -152,7 +157,13 @@ router.post(
           }
 
           const xdr = prepared.toXDR();
-          partialReleaseCache.set(cacheKey, xdr);
+          setCachedXdr(
+            partialReleaseCache,
+            cacheKey,
+            xdr,
+            unsignedTxValidUntil(tx),
+            PARTIAL_RELEASE_CACHE_TTL,
+          );
           return xdr;
         })();
 

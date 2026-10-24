@@ -22,6 +22,10 @@ import {
   claimAutoReleaseCache,
   inFlightClaimAutoReleaseRequests,
   CLAIM_AUTO_RELEASE_TTL,
+  UNSIGNED_TX_TIMEOUT_S,
+  unsignedTxValidUntil,
+  getFreshCachedXdr,
+  setCachedXdr,
 } from "./caches.js";
 
 const router = Router();
@@ -64,7 +68,7 @@ router.post(
 
     try {
       logger.debug("Checking claim auto-release cache", { traceId, ...pathVars, cacheKey });
-      const cached = claimAutoReleaseCache.get<string>(cacheKey);
+      const cached = getFreshCachedXdr(claimAutoReleaseCache, cacheKey);
       if (cached !== undefined) {
         logger.info("Claim auto-release XDR served from cache", {
           traceId,
@@ -131,7 +135,7 @@ router.post(
           traceId,
           ...pathVars,
           fee: BASE_FEE,
-          timeout: 30,
+          timeout: UNSIGNED_TX_TIMEOUT_S,
         });
         const contract = new Contract(contractId);
         logger.debug("Fetching Stellar account", { traceId, ...pathVars });
@@ -149,7 +153,7 @@ router.post(
               nativeToScVal(Number(index), { type: "u32" }),
             ),
           )
-          .setTimeout(30)
+          .setTimeout(UNSIGNED_TX_TIMEOUT_S)
           .build();
 
         logger.debug("Calling prepareTransaction on Stellar RPC", { traceId, ...pathVars });
@@ -162,7 +166,13 @@ router.post(
           xdrLength: xdr.length,
           ttlSeconds: CLAIM_AUTO_RELEASE_TTL,
         });
-        claimAutoReleaseCache.set(cacheKey, xdr);
+        setCachedXdr(
+          claimAutoReleaseCache,
+          cacheKey,
+          xdr,
+          unsignedTxValidUntil(tx),
+          CLAIM_AUTO_RELEASE_TTL,
+        );
         return xdr;
       })();
 
