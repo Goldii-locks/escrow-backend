@@ -7,6 +7,13 @@ services:
   backend:
     image: ${ECR_REGISTRY}/escrow-backend:${BACKEND_TAG:-latest}
     restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     env_file:
       - ./backend.env           # chmod 600 — see DECISIONS.md for required keys
     expose:
