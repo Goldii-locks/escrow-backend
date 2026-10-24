@@ -481,6 +481,13 @@ export async function pollEvents(): Promise<boolean> {
     // These SQLite reads/writes must live inside the try: a SQLITE_BUSY,
     // locked, corrupt, or full-disk DB would otherwise reject outside any
     // catch, surface as an unhandled rejection, and crash the process.
+    // The escrow factory (#660): index it so its `created` events register
+    // each new escrow contract.
+    const factoryContractId = process.env.FACTORY_CONTRACT_ID;
+    if (factoryContractId && !getActiveContractIds().includes(factoryContractId)) {
+      registerContract(factoryContractId, "factory");
+    }
+
     let contractIds: string[] = getActiveContractIds();
 
     // Fall back to the legacy single CONTRACT_ID env var so existing deployments
@@ -613,6 +620,62 @@ export async function pollEvents(): Promise<boolean> {
           toEventRow(event, groupContractIds[0])
         );
 
+        // Register escrow contracts created by the factory (#660) so the next
+        // poll indexes them, and fetch the new contract's first page now so a
+        // job created this cycle is visible without waiting a poll interval.
+        let childEventCount = 0;
+        for (const ev of [...batch]) {
+          if (ev.eventType.toLowerCase() !== "created") continue;
+          let childContractId: string | null = null;
+          try {
+            const data = JSON.parse(ev.dataJson) as Record<string, unknown>;
+            childContractId =
+              (typeof data.contract_id === "string" ? data.contract_id : null) ||
+              (typeof data.contractId === "string" ? data.contractId : null) ||
+              (typeof data.address === "string" ? data.address : null) ||
+              (typeof data.child === "string" ? data.child : null);
+          } catch {
+            // Ignore parse errors on dataJson
+          }
+          if (!childContractId) continue;
+
+          logger.info("Factory created new escrow child contract", {
+            childContractId,
+            ledgerSequence: ev.ledgerSequence,
+          });
+          registerContract(childContractId, "escrow_child", ev.ledgerSequence);
+
+          try {
+            const childEvents = await rpcClient.getEvents(
+              buildGetEventsRequest({
+                startLedger: ev.ledgerSequence,
+                contractIds: [childContractId],
+                limit: pageLimit,
+              }),
+            );
+            const childPage: any[] = (childEvents as any).events ?? [];
+            const childBatch: EventRow[] = childPage.map((childEv) =>
+              toEventRow(childEv, childContractId as string)
+            );
+            batch.push(...childBatch);
+            childEventCount += childBatch.length;
+            // A full page may not be the end: only jump the child's pointer to
+            // the chain head when the page ran short, else to its last event.
+            const childLedger =
+              childPage.length < pageLimit
+                ? currentLedger
+                : Math.max(
+                    ...childPage.map((e: any) => Number(e.ledger) || ev.ledgerSequence)
+                  );
+            updateContractPointer(childContractId, childLedger);
+          } catch (childErr) {
+            logger.warn("Failed immediate poll for new child contract, will catch up next cycle", {
+              childContractId,
+              error: formatError(childErr),
+            });
+          }
+        }
+
         const pageMaxLedger =
           pageEvents.length > 0
             ? Math.max(...pageEvents.map((e: any) => Number(e.ledger) || startLedger))
@@ -637,7 +700,7 @@ export async function pollEvents(): Promise<boolean> {
           updateContractPointer(contractId, newLedger);
         }
 
-        totalEvents += pageEvents.length;
+        totalEvents += pageEvents.length + childEventCount;
         diagnosticsBatch.push(...batch);
         lastStoredLedger = newLedger;
         if (isLastPage) break;

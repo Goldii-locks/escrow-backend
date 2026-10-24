@@ -66,6 +66,60 @@ export function resetJobsByWalletCache(): void {
 }
 
 /**
+ * Invalidate jobs-by-wallet cache entries for specific addresses, or all entries
+ * if no addresses are passed.
+ */
+export function invalidateJobsByWalletCache(addresses?: string[]): void {
+  if (!addresses || addresses.length === 0) {
+    resetJobsByWalletCache();
+    return;
+  }
+  const allKeys = jobsByWalletCache.keys();
+  for (const rawAddress of addresses) {
+    if (!rawAddress || typeof rawAddress !== "string") continue;
+    const prefix = `${rawAddress.trim().toLowerCase()}::`;
+    for (const key of allKeys) {
+      if (key.startsWith(prefix)) {
+        jobsByWalletCache.del(key);
+      }
+    }
+    // Also remove from inFlightJobsByWalletRequests if pending
+    for (const key of inFlightJobsByWalletRequests.keys()) {
+      if (key.startsWith(prefix)) {
+        inFlightJobsByWalletRequests.delete(key);
+      }
+    }
+  }
+}
+
+function extractAddressesFromEvents(events: EventRow[]): string[] {
+  const addresses = new Set<string>();
+  for (const ev of events) {
+    const type = (ev.eventType || "").toLowerCase();
+    if (
+      type === "init" ||
+      type === "initialized" ||
+      type === "funded" ||
+      type === "dispute_raised" ||
+      type === "dispute_resolved" ||
+      type === "partial_release" ||
+      type === "approved" ||
+      type === "delivered"
+    ) {
+      try {
+        const data = JSON.parse(ev.dataJson) as Record<string, unknown>;
+        if (typeof data.client === "string") addresses.add(data.client);
+        if (typeof data.freelancer === "string") addresses.add(data.freelancer);
+        if (typeof data.arbiter === "string") addresses.add(data.arbiter);
+      } catch {
+        // Ignore unparseable data_json
+      }
+    }
+  }
+  return Array.from(addresses);
+}
+
+/**
  * Index names used by the indexer_runner execution loop – validated via
  * EXPLAIN QUERY PLAN (#250).
  */
@@ -1044,6 +1098,26 @@ export function deregisterContract(contractId: string): void {
   tx();
 }
 
+export interface MonitoredContractRecord {
+  id: number;
+  contract_id: string;
+  label: string | null;
+  active: number;
+  registered_at: string;
+  last_ledger_sequence: number;
+  start_ledger: number;
+}
+
+/**
+ * Returns all monitored contracts with active status and registration time.
+ */
+export function getAllContracts(): MonitoredContractRecord[] {
+  const db = getDb();
+  return db
+    .prepare("SELECT * FROM monitored_contracts ORDER BY id ASC")
+    .all() as MonitoredContractRecord[];
+}
+
 /**
  * Returns the contract_ids currently marked active for polling.
  */
@@ -1253,6 +1327,11 @@ export function insertEventBatch(events: EventRow[], newLedger: number): void {
   });
 
   batchTransaction();
+
+  const affectedAddresses = extractAddressesFromEvents(events);
+  if (affectedAddresses.length > 0) {
+    invalidateJobsByWalletCache(affectedAddresses);
+  }
 
   const payloadSizeBytes = events.reduce(
     (sum, ev) => sum + Buffer.byteLength(ev.dataJson, "utf8"),
@@ -1916,6 +1995,12 @@ export function insertHistoricalEventBatch(
   });
 
   const inserted = importTransaction();
+
+  const affectedAddresses = extractAddressesFromEvents(events);
+  if (affectedAddresses.length > 0) {
+    invalidateJobsByWalletCache(affectedAddresses);
+  }
+
   logger.info("sqlite_schema_manager historical range imported", {
     startLedger: validRange.startLedger,
     endLedger: validRange.endLedger,
