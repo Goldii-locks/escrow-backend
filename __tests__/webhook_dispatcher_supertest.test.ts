@@ -30,12 +30,22 @@ const { default: router } = await import("../src/routes/webhooks.js");
 const CONTRACT_A =
   "CA3D5K7UXYZ123456789012345678901234567890123456789012345678901";
 
+const ADMIN_KEY = "webhook-supertest-admin-key";
+const originalAdminKey = process.env.ADMIN_API_KEY;
+
 let testDb: Database.Database;
 let app: express.Express;
 
 function buildApp(): express.Express {
   const instance = express();
   instance.use(express.json());
+  // #604: both mutation routes require the admin credential. This suite's
+  // subject is dispatcher validation, so attach the key centrally; the 401
+  // paths are covered in webhook-subscribe-auth.test.ts.
+  instance.use((req, _res, next) => {
+    req.headers["x-api-key"] = ADMIN_KEY;
+    next();
+  });
   instance.use("/api/webhooks", router);
   return instance;
 }
@@ -53,8 +63,14 @@ afterAll(() => {
 });
 
 beforeEach(() => {
+  process.env.ADMIN_API_KEY = ADMIN_KEY;
   testDb.exec("DELETE FROM webhook_subscriptions");
   jest.clearAllMocks();
+});
+
+afterEach(() => {
+  if (originalAdminKey === undefined) delete process.env.ADMIN_API_KEY;
+  else process.env.ADMIN_API_KEY = originalAdminKey;
 });
 
 describe("webhook_dispatcher supertest validations (#521)", () => {
