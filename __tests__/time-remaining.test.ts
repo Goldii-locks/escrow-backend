@@ -12,6 +12,11 @@ let testDb: Database.Database;
 let app: express.Express;
 
 beforeAll(async () => {
+  // These tests cover validation, CORS and rate limiting, not the contract
+  // read itself. Point the RPC at a closed local port so the simulation
+  // behind each request fails at once instead of reaching testnet (#616:
+  // reads no longer stop at a getAccount lookup first).
+  process.env.SOROBAN_RPC_URL = "https://127.0.0.1:9";
   testDb = new Database(":memory:");
   setDb(testDb);
   initSchema();

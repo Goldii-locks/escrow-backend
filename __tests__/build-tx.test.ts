@@ -407,7 +407,7 @@ describe("POST /api/jobs/build-tx — contract argument type mapping", () => {
     const res = await request(app).post("/api/jobs/build-tx").send(body).expect(200);
     expect(res.body).toEqual({ success: true, xdr: "AAAAAQ==" });
 
-    const tx = mockPrepareTransaction.mock.calls[0]?.[0] as { toXDR: () => string };
+    const tx = (mockPrepareTransaction.mock.calls[0] as unknown[])[0] as { toXDR: () => string };
     const envelope = StellarXdr.TransactionEnvelope.fromXDR(tx.toXDR(), "base64");
     const hostFn = envelope
       .v1()
@@ -435,7 +435,7 @@ describe("POST /api/jobs/build-tx — contract argument type mapping", () => {
     const res = await request(app).post("/api/jobs/build-tx").send(body).expect(200);
     expect(res.body).toEqual({ success: true, xdr: "AAAAAQ==" });
 
-    const tx = mockPrepareTransaction.mock.calls[0]?.[0] as { toXDR: () => string };
+    const tx = (mockPrepareTransaction.mock.calls[0] as unknown[])[0] as { toXDR: () => string };
     const envelope = StellarXdr.TransactionEnvelope.fromXDR(tx.toXDR(), "base64");
     const hostFn = envelope
       .v1()
