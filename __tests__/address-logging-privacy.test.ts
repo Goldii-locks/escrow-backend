@@ -58,16 +58,16 @@ const stubAccount = {
   incrementSequenceNumber: () => {},
 };
 
+// get_job's retval as scValToNative decodes it (#597); the scValToNative mock
+// below passes it through unchanged.
 function makeJobRetval() {
   return {
-    client:     () => ({ toString: () => G_CLIENT }),
-    freelancer: () => ({ toString: () => G_FREELANCER }),
-    arbiter:    () => ({ toString: () => G_ARBITER }),
-    token:      () => ({ toString: () => C_TOKEN }),
-    funded:     () => true,
-    milestones: () => [
-      { amount: () => ({ toString: () => "1000000" }), status: () => ({ approved: true }) },
-    ],
+    client:     G_CLIENT,
+    freelancer: G_FREELANCER,
+    arbiter:    G_ARBITER,
+    token:      C_TOKEN,
+    funded:     true,
+    milestones: [{ amount: 1000000n, status: ["Approved"] }],
   };
 }
 
@@ -92,7 +92,7 @@ jest.unstable_mockModule("@stellar/stellar-sdk", () => ({
   Networks:     { TESTNET: "Test SDF Network ; September 2015" },
   BASE_FEE:     "100",
   nativeToScVal: jest.fn(),
-  scValToNative: jest.fn(),
+  scValToNative: (value: unknown) => value,
   Address:       jest.fn(),
   // StrKey is used by src/schemas/jobs.ts and src/utils/stellar.ts for address
   // validation. Return a minimal stub so module loading doesn't throw.

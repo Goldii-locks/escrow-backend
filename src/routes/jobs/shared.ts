@@ -164,22 +164,32 @@ export async function assertRpcNetworkMatches(): Promise<void> {
 // Helper: parse job fields out of a successful simulation result
 // ---------------------------------------------------------------------------
 export const parseJobFromResult = (result: any, contractId: string) => {
-  if ("result" in result && result.result?.retval) {
-    const val = result.result.retval;
-    const client = val.client().toString();
-    const freelancer = val.freelancer().toString();
-    const arbiter = val.arbiter().toString();
-    const token = val.token().toString();
-    const funded = val.funded();
-    const milestones = val.milestones().map((m: any, i: number) => ({
-      index: i,
-      amount: m.amount().toString(),
-      status: Object.keys(m.status())[0],
-    }));
+  if (!("result" in result) || !result.result?.retval) return null;
 
-    return { id: contractId, client, freelancer, arbiter, token, funded, milestones };
+  // retval is an xdr.ScVal (an scvMap for the contract's Job struct); decode
+  // it rather than calling accessors that ScVal does not have (#597).
+  const job = scValToNative(result.result.retval);
+  if (!job || typeof job !== "object" || !Array.isArray(job.milestones)) {
+    throw new Error("unexpected get_job retval shape");
   }
-  return null;
+
+  // Unit enum variants decode to a one-element array, e.g. ["Pending"].
+  const decodeStatus = (status: unknown): string =>
+    String(Array.isArray(status) ? status[0] : status);
+
+  return {
+    id: contractId,
+    client: String(job.client),
+    freelancer: String(job.freelancer),
+    arbiter: String(job.arbiter),
+    token: String(job.token),
+    funded: convertScValToNativeStrings(job.funded),
+    milestones: job.milestones.map((m: any, i: number) => ({
+      index: i,
+      amount: String(m.amount),
+      status: decodeStatus(m.status),
+    })),
+  };
 };
 
 /**

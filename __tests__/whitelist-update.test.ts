@@ -2,6 +2,7 @@ import { jest } from "@jest/globals";
 import request from "supertest";
 import express from "express";
 import { autoAuth } from "./helpers/api-key-helper.js";
+import { testAddress, tokenVecScVal } from "./helpers/scval-fixtures.js";
 import {
   resetJobWhitelistRateLimitBuckets,
   resetWhitelistUpdateRateLimitBuckets,
@@ -81,11 +82,7 @@ describe("POST /api/jobs/:contractId/whitelist/update", () => {
 
     mockSimulateTransaction.mockResolvedValue({
       result: {
-        retval: {
-          forEach: (fn: (item: unknown) => void) => {
-            fn({ toString: () => "TOKEN1" });
-          },
-        },
+        retval: tokenVecScVal(testAddress(11)),
       },
     });
   });

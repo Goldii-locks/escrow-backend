@@ -3,6 +3,7 @@ import request from "supertest";
 import express from "express";
 import Database from "better-sqlite3";
 import { initSchema, setDb } from "../src/indexer/db.js";
+import { jobScVal } from "./helpers/scval-fixtures.js";
 
 /**
  * #679: GET /api/jobs/:contractId caches job state, collapses concurrent
@@ -43,18 +44,7 @@ app.use(express.json());
 app.use("/api/jobs", router);
 
 function jobResult(funded: boolean) {
-  return {
-    result: {
-      retval: {
-        client: () => ({ toString: () => "GCLIENT" }),
-        freelancer: () => ({ toString: () => "GFREELANCER" }),
-        arbiter: () => ({ toString: () => "GARBITER" }),
-        token: () => ({ toString: () => "CTOKEN" }),
-        funded: () => funded,
-        milestones: () => [],
-      },
-    },
-  };
+  return { result: { retval: jobScVal([], funded) } };
 }
 
 let testDb: Database.Database;
