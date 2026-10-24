@@ -49,6 +49,23 @@ Rules:
 This policy is enforced by `__tests__/address-logging-privacy.test.ts`, which asserts
 that no full G-address appears in `info`-level output for the by-wallet, create-job-draft,
 and job-fetch endpoints.
+## Testing & Coverage
+
+Run tests locally:
+```bash
+npm test
+```
+
+To run with coverage checking:
+```bash
+npm test -- --coverage
+```
+
+The CI suite enforces global test coverage thresholds in `jest.config.js`:
+- **Lines**: 85%
+- **Branches**: 75%
+
+Pull requests that cause global coverage to drop below these thresholds will fail the CI build.
 
 ## Code Style
 
