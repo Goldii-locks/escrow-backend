@@ -1,0 +1,681 @@
+openapi: 3.0.3
+info:
+  title: Milestone Escrow Backend API
+  version: 1.0.0
+  description: >-
+    Express + TypeScript backend for the Soroban milestone escrow platform.
+    Provides API endpoints for job querying, transaction building, transaction submission,
+    indexer health, and event webhook subscriptions.
+servers:
+  - url: http://localhost:3001
+    description: Local development server
+  - url: /api/v1
+    description: Modern versioned base path
+  - url: /api
+    description: Legacy compatibility base path (returns Deprecation: true)
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: x-api-key
+      description: API key required for client requests when API_KEYS is enforced.
+    AdminApiKeyAuth:
+      type: apiKey
+      in: header
+      name: x-api-key
+      description: Admin API key required for administrative and indexer monitoring endpoints (ADMIN_API_KEYS). Bearer token also supported.
+
+  schemas:
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: ok
+        contract:
+          type: string
+          example: CDD5WKK3WT3QVKXMXTJNDIXE4T73FK6GGXDSD6UTJAH6YYZU52SQ4MUH
+
+    ApiError:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: false
+        error:
+          type: string
+          example: Invalid contractId provided
+
+    ValidationError:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: false
+        error:
+          type: string
+          example: Request validation failed
+        fields:
+          type: array
+          items:
+            type: object
+            properties:
+              field:
+                type: string
+              message:
+                type: string
+
+    JobMilestone:
+      type: object
+      properties:
+        description:
+          type: string
+        amount:
+          type: string
+        status:
+          type: string
+        approved:
+          type: boolean
+
+    JobState:
+      type: object
+      properties:
+        contractId:
+          type: string
+        client:
+          type: string
+        freelancer:
+          type: string
+        arbiter:
+          type: string
+        token:
+          type: string
+        funded:
+          type: boolean
+        milestones:
+          type: array
+          items:
+            $ref: '#/components/schemas/JobMilestone'
+
+    JobDraft:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          example: draft
+        client:
+          type: string
+        freelancer:
+          type: string
+        arbiter:
+          type: string
+        token:
+          type: string
+        autoReleaseDays:
+          type: integer
+        milestones:
+          type: array
+          items:
+            type: object
+
+    IndexerStatus:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        lastIndexedLedger:
+          type: integer
+        totalEvents:
+          type: integer
+        uptimeSeconds:
+          type: number
+        lastEventAt:
+          type: string
+          nullable: true
+        eventsByType:
+          type: object
+        reconciliation:
+          type: object
+
+paths:
+  /health:
+    get:
+      summary: Health check endpoint
+      description: Returns health status of the backend server and configured contract ID.
+      responses:
+        '200':
+          description: Server is healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+  /api/jobs/by-wallet/{address}:
+    get:
+      summary: Query jobs by wallet address
+      description: Returns indexed jobs where the address participates as client, freelancer, or arbiter. Public read-only.
+      parameters:
+        - name: address
+          in: path
+          required: true
+          description: Stellar account address (G... 56 chars)
+          schema:
+            type: string
+        - name: page
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 20
+            maximum: 100
+      responses:
+        '200':
+          description: List of jobs for wallet
+        '400':
+          description: Invalid address or pagination parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '429':
+          description: Rate limit exceeded (BY_WALLET_RATE_LIMIT_MAX)
+
+  /api/jobs/create-job-draft:
+    post:
+      summary: Create off-chain job draft
+      description: Validates and creates a draft escrow configuration before on-chain deployment. Public endpoint.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - client
+                - freelancer
+                - arbiter
+                - token
+                - milestones
+              properties:
+                client:
+                  type: string
+                  description: Stellar G... address
+                freelancer:
+                  type: string
+                  description: Stellar G... address
+                arbiter:
+                  type: string
+                  description: Stellar G... address
+                token:
+                  type: string
+                  description: Soroban C... token contract address
+                autoReleaseDays:
+                  type: integer
+                  default: 7
+                milestones:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - amount
+                    properties:
+                      description:
+                        type: string
+                      amount:
+                        type: string
+      responses:
+        '201':
+          description: Draft created successfully
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationError'
+        '429':
+          description: Rate limit exceeded (CREATE_JOB_DRAFT_RATE_MAX)
+
+  /api/jobs/query:
+    get:
+      summary: Read-only contract state query
+      description: Simulates read-only methods on a contract.
+      parameters:
+        - name: contractId
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: method
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Query simulation result
+        '400':
+          description: Invalid contractId or method
+    post:
+      summary: Read-only contract state query
+      description: Simulates read-only methods on a contract with body parameters.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - contractId
+                - method
+              properties:
+                contractId:
+                  type: string
+                method:
+                  type: string
+                args:
+                  type: array
+                  items:
+                    type: object
+      responses:
+        '200':
+          description: Query simulation result
+        '400':
+          description: Invalid parameters
+
+  /api/jobs/whitelisted-tokens:
+    get:
+      summary: Whitelisted tokens query alias
+      description: Alias query param route that forwards to /:contractId/whitelist.
+      parameters:
+        - name: contractId
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: List of whitelisted token contract IDs
+        '400':
+          description: Missing or invalid contractId
+
+  /api/jobs/{contractId}/history:
+    get:
+      summary: Job event history
+      description: Returns indexed event timeline for an escrow contract. Public read-only.
+      parameters:
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: page
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 10
+      responses:
+        '200':
+          description: Event history result
+        '400':
+          description: Invalid contractId or pagination
+
+  /api/jobs/{contractId}/fee-preview:
+    get:
+      summary: Preview platform fee calculation
+      description: Computes platform fee breakdown for a milestone or contract amount.
+      parameters:
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: amount
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Fee preview breakdown
+        '400':
+          description: Invalid parameters
+
+  /api/jobs/{contractId}:
+    get:
+      summary: Fetch job state
+      description: Simulates get_job against the Soroban contract to return live escrow state. Public read-only.
+      parameters:
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Job state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobState'
+        '400':
+          description: Invalid contractId
+        '404':
+          description: Job not found
+        '429':
+          description: Rate limit exceeded (JOB_CONTRACT_RATE_MAX)
+
+  /api/jobs/{contractId}/whitelist:
+    get:
+      summary: Get whitelisted tokens for contract
+      description: Queries whitelisted payment tokens accepted by the escrow contract.
+      parameters:
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Whitelisted tokens list
+        '400':
+          description: Invalid contractId
+        '429':
+          description: Rate limit exceeded (JOB_WHITELIST_RATE_MAX)
+
+  /api/jobs/{contractId}/whitelist/update:
+    post:
+      summary: Build whitelist update transaction
+      description: Builds unsigned transaction XDR for adding or removing whitelisted tokens.
+      parameters:
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                token:
+                  type: string
+                action:
+                  type: string
+                  enum: [add, remove]
+                adminAddress:
+                  type: string
+                addresses:
+                  type: array
+                  items:
+                    type: string
+      responses:
+        '200':
+          description: Unsigned transaction XDR or updated list
+        '400':
+          description: Invalid contractId or body
+        '429':
+          description: Rate limit exceeded (JOB_WHITELIST_UPDATE_RATE_MAX)
+
+  /api/jobs/build-tx:
+    post:
+      summary: Build unsigned Soroban transaction
+      description: Builds an unsigned transaction XDR for authorized contract entrypoints for the caller's wallet to sign.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - contractId
+                - method
+                - sourceAddress
+              properties:
+                contractId:
+                  type: string
+                method:
+                  type: string
+                args:
+                  type: array
+                  items:
+                    type: object
+                sourceAddress:
+                  type: string
+      responses:
+        '200':
+          description: Transaction XDR built
+        '400':
+          description: Invalid parameters or disallowed method
+        '429':
+          description: Rate limit exceeded (BUILD_TX_RATE_MAX)
+
+  /api/jobs/{contractId}/milestones/{index}/partial-release:
+    post:
+      summary: Build partial milestone release transaction
+      description: Builds unsigned transaction XDR for partial milestone release.
+      parameters:
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: index
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - amount
+                - sourceAddress
+              properties:
+                amount:
+                  type: string
+                sourceAddress:
+                  type: string
+      responses:
+        '200':
+          description: Unsigned transaction XDR
+        '400':
+          description: Validation error
+        '429':
+          description: Rate limit exceeded (PARTIAL_RELEASE_RATE_MAX)
+
+  /api/jobs/{contractId}/milestones/{index}/time-remaining:
+    get:
+      summary: Time remaining until milestone auto-release
+      description: Queries the remaining seconds until milestone auto-release eligibility.
+      parameters:
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: index
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Remaining seconds
+        '400':
+          description: Invalid parameters
+        '429':
+          description: Rate limit exceeded (TIME_REMAINING_RATE_MAX)
+
+  /api/jobs/{contractId}/milestones/{index}/auto-release:
+    get:
+      summary: Time remaining until milestone auto-release (alias)
+      description: Alias for /time-remaining. Queries the remaining seconds until milestone auto-release eligibility.
+      parameters:
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: index
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Remaining seconds
+        '400':
+          description: Invalid parameters
+        '429':
+          description: Rate limit exceeded (TIME_REMAINING_RATE_MAX)
+
+  /api/jobs/{contractId}/milestones/{index}/claim-auto-release:
+    post:
+      summary: Build claim auto-release transaction
+      description: Builds unsigned transaction XDR for claiming an auto-released milestone.
+      parameters:
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: index
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - sourceAddress
+              properties:
+                sourceAddress:
+                  type: string
+      responses:
+        '200':
+          description: Unsigned transaction XDR
+        '400':
+          description: Validation error
+        '429':
+          description: Rate limit exceeded (CLAIM_AUTO_RELEASE_RATE_MAX)
+
+  /api/jobs/submit:
+    post:
+      summary: Submit signed transaction
+      description: Submits a signed transaction XDR to the Stellar / Soroban network.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - signedXdr
+              properties:
+                signedXdr:
+                  type: string
+                sourceAddress:
+                  type: string
+      responses:
+        '200':
+          description: Transaction submitted result
+        '400':
+          description: Invalid transaction payload
+        '429':
+          description: Rate limit exceeded (SUBMIT_RATE_MAX)
+
+  /api/admin/indexer-status:
+    get:
+      summary: Get indexer and reconciliation status
+      description: Administrative status of the indexer poller, database, and reconciliation engine.
+      security:
+        - AdminApiKeyAuth: []
+      responses:
+        '200':
+          description: Indexer status data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IndexerStatus'
+        '401':
+          description: Unauthorized (missing or invalid admin API key)
+
+  /api/webhooks/subscribe:
+    post:
+      summary: Subscribe to escrow contract webhook notifications
+      description: Registers a webhook URL to receive notifications for contract events.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - contract_id
+                - webhook_url
+              properties:
+                contract_id:
+                  type: string
+                webhook_url:
+                  type: string
+                event_types:
+                  type: array
+                  items:
+                    type: string
+      responses:
+        '200':
+          description: Subscription created successfully
+        '400':
+          description: Validation error
+
+  /api/webhooks/unsubscribe:
+    post:
+      summary: Unsubscribe from escrow contract webhook notifications
+      description: Removes an existing webhook subscription.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - contract_id
+                - webhook_url
+              properties:
+                contract_id:
+                  type: string
+                webhook_url:
+                  type: string
+      responses:
+        '200':
+          description: Unsubscribed successfully
+        '400':
+          description: Validation error
