@@ -559,3 +559,176 @@ export function toCents(
 
   return { ok: true, value: BigInt(combined) };
 }
+
+// ---------------------------------------------------------------------------
+// Exact configurable-precision conversion (#627, #628)
+// ---------------------------------------------------------------------------
+
+/**
+ * Options for exact decimal-to-cents conversion. Ported from the deleted root
+ * `src/stablecoin_cents_multiplier.ts`, reimplemented on bigint arithmetic:
+ * `decimals` sets the asset precision and `rounding` is applied to the
+ * discarded digits (`round` is half-up, matching the old documented default).
+ */
+export interface CentsConvertOptions {
+  decimals?: number;
+  rounding?: "floor" | "ceil" | "round";
+}
+
+function parseDecimalDigits(
+  input: string | number,
+  label: string,
+):
+  | { ok: true; sign: 1; int: string; frac: string }
+  | { ok: false; error: string; code: CentsErrorCode } {
+  if (typeof input === "number" && !Number.isFinite(input)) {
+    return {
+      ok: false,
+      error: `${label} must be a finite number`,
+      code: ERROR_CODES.INVALID_AMOUNT,
+    };
+  }
+  const text = String(input).trim();
+  const expanded = /[eE]/.test(text) ? expandExponent(text) : text;
+  const match = /^([+-]?)(\d*)(?:\.(\d*))?$/.exec(expanded);
+  if (!match || (match[2] === "" && (match[3] ?? "") === "")) {
+    return {
+      ok: false,
+      error: `${label} must be a numeric decimal value`,
+      code: ERROR_CODES.INVALID_AMOUNT,
+    };
+  }
+  if (match[1] === "-") {
+    return {
+      ok: false,
+      error: `${label} cannot be negative`,
+      code: ERROR_CODES.INVALID_AMOUNT,
+    };
+  }
+  return {
+    ok: true,
+    sign: 1,
+    int: match[2] === "" ? "0" : match[2].replace(/^0+(?=\d)/, ""),
+    frac: match[3] ?? "",
+  };
+}
+
+/** Expand exponent notation (e.g. `1e-7`) into plain decimal notation. */
+function expandExponent(text: string): string {
+  const negative = text.startsWith("-");
+  const unsigned = negative ? text.slice(1) : text;
+  const [mantissa, expPart] = unsigned.split(/[eE]/);
+  const exponent = parseInt(expPart, 10);
+  if (!Number.isFinite(exponent)) {
+    return text;
+  }
+  const dotIndex = mantissa.indexOf(".");
+  const digits = mantissa.replace(".", "");
+  const pointIndex = (dotIndex === -1 ? mantissa.length : dotIndex) + exponent;
+  let expanded: string;
+  if (pointIndex <= 0) {
+    expanded = `0.${"0".repeat(-pointIndex)}${digits}`;
+  } else if (pointIndex >= digits.length) {
+    expanded = `${digits}${"0".repeat(pointIndex - digits.length)}`;
+  } else {
+    expanded = `${digits.slice(0, pointIndex)}.${digits.slice(pointIndex)}`;
+  }
+  return `${negative ? "-" : ""}${expanded}`;
+}
+
+function validateConvertDecimals(
+  decimals: number,
+): Extract<ConversionResult, { ok: false }> | null {
+  if (!Number.isInteger(decimals) || decimals < 0) {
+    return {
+      ok: false,
+      error: `decimals must be a non-negative integer, received ${decimals}`,
+      code: ERROR_CODES.INVALID_AMOUNT,
+    };
+  }
+  return null;
+}
+
+/**
+ * Convert a human-readable amount into integer base units with configurable
+ * precision. All scaling uses bigint digit arithmetic (never float
+ * multiplication), so `toCentsExact("0.29", { rounding: "floor" })` is exactly
+ * `29n`. Rejects results outside the i128 amount range.
+ */
+export function toCentsExact(
+  amount: string | number,
+  options: CentsConvertOptions = {},
+): ConversionResult {
+  const decimals = options.decimals ?? CENTS_DECIMALS;
+  const rounding = options.rounding ?? "round";
+  const badDecimals = validateConvertDecimals(decimals);
+  if (badDecimals) {
+    return badDecimals;
+  }
+
+  const parsed = parseDecimalDigits(amount, "amount");
+  if (!parsed.ok) {
+    return parsed;
+  }
+
+  const kept = (parsed.frac + "0".repeat(decimals)).slice(0, decimals);
+  const discarded = parsed.frac.slice(decimals);
+  let magnitude = BigInt(`${parsed.int}${kept}`);
+  if (/[1-9]/.test(discarded)) {
+    const first = discarded[0];
+    const rest = discarded.slice(1);
+    const aboveHalf = first > "5" || (first === "5" && /[1-9]/.test(rest));
+    const isHalf = first === "5" && !/[1-9]/.test(rest);
+    let roundUp = false;
+    if (rounding === "ceil") {
+      roundUp = true;
+    } else if (rounding === "round") {
+      roundUp = aboveHalf || isHalf;
+    }
+    // "floor" on a non-negative amount truncates: roundUp stays false.
+    if (roundUp) {
+      magnitude += 1n;
+    }
+  }
+
+  if (!isAmountWithinRange(magnitude)) {
+    return {
+      ok: false,
+      error: "converted amount exceeds the i128 amount range",
+      code: ERROR_CODES.CONVERSION_OVERFLOW,
+    };
+  }
+  return { ok: true, value: magnitude };
+}
+
+/**
+ * Convert integer base units back into a human-readable decimal string with
+ * configurable precision. Exact decimal arithmetic: no float division, so
+ * `fromCentsExact(7)` is exactly `"0.07"`.
+ */
+export function fromCentsExact(
+  cents: string | number | bigint,
+  options: CentsConvertOptions = {},
+): DollarsResult {
+  const decimals = options.decimals ?? CENTS_DECIMALS;
+  const badDecimals = validateConvertDecimals(decimals);
+  if (badDecimals) {
+    return badDecimals;
+  }
+
+  const checked = validateCentsAmount(cents, "cents");
+  if (!checked.ok) {
+    return { ok: false, error: checked.error, code: checked.code };
+  }
+  const digits = checked.value.toString();
+  let decimal: string;
+  if (digits.length > decimals) {
+    const whole = digits.slice(0, digits.length - decimals);
+    const frac = digits.slice(digits.length - decimals);
+    decimal = decimals === 0 ? whole : `${whole}.${frac}`;
+  } else {
+    decimal = decimals === 0 ? digits : `0.${"0".repeat(decimals - digits.length)}${digits}`;
+  }
+  decimal = decimal.replace(/(\.\d*?)0+$/, "$1").replace(/\.$/, "");
+  return { ok: true, value: decimal };
+}
