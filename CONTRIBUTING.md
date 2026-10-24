@@ -23,6 +23,33 @@ Before changing runtime behavior, review:
 - [Architecture overview](./docs/ARCHITECTURE.md)
 - [CSV serialization guide](./docs/CSV_SERIALIZATION_GUIDE.md)
 
+## Logging Policy
+
+### Wallet address privacy
+
+Full Stellar G-addresses (56-character public keys) **must not appear in `info`-level log lines**.
+
+The production log level is `info` (`LOG_LEVEL=info`). The HTTP request logger in
+`src/index.ts` already records the caller's IP on every request, so logging a full address
+at `info` alongside it builds a durable IP↔wallet map — more than the service needs to
+operate.
+
+Rules:
+- Use `maskAddress(addr)` (exported from `src/routes/jobs.ts`) at `info` level.
+  It produces `GABC…WXYZ` — enough for same-session correlation without exposing the full key.
+- If you need the full address for debugging, log it at `debug`:
+  ```ts
+  logger.info("Doing thing",  { address: maskAddress(address) });
+  logger.debug("Doing thing (full address)", { address });
+  ```
+- Contract IDs and counts are safe at `info`; they identify the contract, not the person.
+- The indexer (`src/indexer/poller.ts`) follows the same rule: only byte counts appear in
+  diagnostics, never payload contents.
+
+This policy is enforced by `__tests__/address-logging-privacy.test.ts`, which asserts
+that no full G-address appears in `info`-level output for the by-wallet, create-job-draft,
+and job-fetch endpoints.
+
 ## Code Style
 
 Follow the project's existing code style and use ESLint to check:

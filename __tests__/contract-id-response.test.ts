@@ -279,7 +279,8 @@ describe("GET /api/jobs/:contractId – logging traces", () => {
     expect(infoSpy).toHaveBeenCalledWith("Job fetched successfully", {
       contractId: VALID_CONTRACT,
       client: "GCLIENT",
-      freelancer: "GFREELANCER",
+      // Info logs mask addresses of 10+ characters (#683).
+      freelancer: "GFRE\u2026NCER",
       arbiter: "GARBITER",
       token: "GTOKEN",
       funded: true,

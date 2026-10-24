@@ -9,6 +9,7 @@ import {
   createJobDraftValidation,
   logger,
   randomUUID,
+  maskAddress,
 } from "./shared.js";
 import type {
   CreateJobDraftBody,
@@ -91,11 +92,18 @@ router.post(
       logger.info("Job draft created", {
         traceId,
         ...pathVars,
+        client: maskAddress(client),
+        freelancer: maskAddress(freelancer),
+        arbiter: maskAddress(arbiter),
+        token: maskAddress(token),
+        milestoneCount: body.milestones?.length ?? 0,
+      });
+      logger.debug("Job draft created (full addresses)", {
+        traceId,
         client,
         freelancer,
         arbiter,
         token,
-        milestoneCount: body.milestones?.length ?? 0,
       });
 
       sendSuccess(res, draft);
