@@ -58,23 +58,65 @@ export const milestoneIndexSchema = z
   )
   .transform((v) => (typeof v === "number" ? v : parseInt(v, 10)));
 
+/** Largest value the escrow contract's i128 amounts can hold. */
+export const I128_MAX = (1n << 127n) - 1n;
+/** Largest value a Soroban u64 argument can hold. */
+export const U64_MAX = (1n << 64n) - 1n;
+
+const DECIMAL_DIGITS = /^[0-9]+$/;
+
 /**
- * Amount: a positive numeric string or integer that can be coerced to BigInt.
- * Accepts strings like "100", "100000000", or plain numbers.
+ * Builds a strict on-chain amount schema (#678).
+ *
+ * Only plain decimal-digit strings are accepted. JSON numbers are rejected
+ * outright: anything above 2^53 has already lost precision by the time
+ * JSON.parse hands it to us, so silently accepting them would build a
+ * transaction for a different amount than the user typed. Values must be in
+ * 1..i128::MAX.
+ *
+ * `invalidMessage` is used for strings that are not a positive integer, so
+ * each route can keep its existing wording.
  */
-export const amountSchema = z
-  .union([z.string(), z.number(), z.bigint()])
-  .refine(
-    (v) => {
-      try {
-        const n = BigInt(v as string | number | bigint);
-        return n > 0n;
-      } catch {
-        return false;
+export function positiveAmountStringSchema(
+  field = "amount",
+  invalidMessage = `${field} must be a positive integer`,
+) {
+  return z
+    .unknown()
+    .superRefine((value, ctx) => {
+      if (value === undefined || value === null) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: `${field} is required` });
+        return;
       }
-    },
-    { message: "amount must be a positive numeric value" },
-  );
+      if (typeof value !== "string") {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `${field} must be a string of digits`,
+        });
+        return;
+      }
+      if (!DECIMAL_DIGITS.test(value) || BigInt(value) <= 0n) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: invalidMessage });
+        return;
+      }
+      if (BigInt(value) > I128_MAX) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `${field} must not exceed i128::MAX (${I128_MAX})`,
+        });
+      }
+    })
+    .transform((value) => value as string);
+}
+
+/**
+ * Amount: a positive decimal string within i128 range. JSON numbers are
+ * rejected with "amount must be a string of digits".
+ */
+export const amountSchema = positiveAmountStringSchema(
+  "amount",
+  "amount must be a positive numeric value",
+);
 
 /**
  * Named Stellar account field (G…) with field-specific error messages.
@@ -137,31 +179,25 @@ export const contractMilestoneParamsSchema = z.object({
   index: milestoneIndexSchema,
 });
 
-const BUILD_TX_I128_MIN = -(1n << 127n);
-const BUILD_TX_I128_MAX = (1n << 127n) - 1n;
-const BUILD_TX_U64_MAX = (1n << 64n) - 1n;
 const BUILD_TX_U32_MAX = 4294967295;
 
-/** True when v is an integer-valued string/number within [min, max] (#618). */
-function isBigIntInRange(v: string | number, min: bigint, max: bigint): boolean {
-  try {
-    if (typeof v === "number" && !Number.isInteger(v)) return false;
-    const n = BigInt(v);
-    return n >= min && n <= max;
-  } catch {
-    return false;
+// i128/u64 values must be decimal strings so they reach the XDR unrounded:
+// a JSON number above 2^53 has already lost precision when it arrives (#678).
+// i128 build-tx arguments are escrow amounts, so they follow the body amount
+// rules (1..i128::MAX).
+const buildTxI128ValueSchema = positiveAmountStringSchema("amount");
+
+const buildTxU64ValueSchema = z.unknown().superRefine((value, ctx) => {
+  let message: string | undefined;
+  if (typeof value !== "string") {
+    message = "u64 value must be a string of digits";
+  } else if (!DECIMAL_DIGITS.test(value)) {
+    message = "u64 value must be a non-negative integer";
+  } else if (BigInt(value) > U64_MAX) {
+    message = `u64 value must not exceed u64::MAX (${U64_MAX})`;
   }
-}
-
-const buildTxI128ValueSchema = z.union([z.string(), z.number()]).refine(
-  (v) => isBigIntInRange(v, BUILD_TX_I128_MIN, BUILD_TX_I128_MAX),
-  { message: "value must be a decimal string within the i128 range" },
-);
-
-const buildTxU64ValueSchema = z.union([z.string(), z.number()]).refine(
-  (v) => isBigIntInRange(v, 0n, BUILD_TX_U64_MAX),
-  { message: "value must be a decimal string between 0 and 2^64-1" },
-);
+  if (message) ctx.addIssue({ code: z.ZodIssueCode.custom, message });
+});
 
 const buildTxU32ValueSchema = z
   .union([z.string(), z.number()])
@@ -214,7 +250,8 @@ export const buildTxBodySchema = z.object({
     .refine((m) => m === "" || (BUILD_TX_ALLOWED_METHODS as readonly string[]).includes(m), {
       message: `method must be one of: ${BUILD_TX_ALLOWED_METHODS.join(", ")}`,
     }),
-  // Optional arguments for the method, defaults to an empty array
+  // Optional arguments for the method, defaults to an empty array. i128/u64
+  // values must be decimal strings so they reach the XDR unrounded (#678).
   args: z.array(buildTxArgSchema).optional().default([]),
   // The Stellar address of the transaction source account
   sourceAddress: stellarAccountField("sourceAddress"),
@@ -242,21 +279,11 @@ export const submitBodySchema = z.object({
  * POST /:contractId/milestones/:index/partial-release body.
  * Keeps its pre-existing field-specific error wording (rather than the
  * generic amountSchema/stellarAddressSchema messages) since __tests__/
- * partial-release.test.ts asserts on these exact strings.
+ * partial-release.test.ts asserts on these exact strings. JSON numbers are
+ * rejected with "amount must be a string of digits" (#678).
  */
 export const partialReleaseBodySchema = z.object({
-  amount: z
-    .union([z.string(), z.number()])
-    .refine(
-      (val) => {
-        try {
-          return BigInt(String(val)) > 0n;
-        } catch {
-          return false;
-        }
-      },
-      { message: "amount must be a positive integer" },
-    ),
+  amount: positiveAmountStringSchema("amount"),
   sourceAddress: z
     .string({ required_error: "sourceAddress is required" })
     .refine(isValidStellarAddress, {
@@ -333,20 +360,7 @@ export const createJobDraftBodySchema = z.object({
   milestones: z
     .array(
       z.object({
-        amount: z
-          .union([z.string(), z.number()], {
-            invalid_type_error: "amount must be a positive integer",
-          })
-          .refine(
-            (val) => {
-              try {
-                return BigInt(String(val)) > 0n;
-              } catch {
-                return false;
-              }
-            },
-            { message: "amount must be a positive integer" },
-          ),
+        amount: positiveAmountStringSchema("amount"),
       }),
       { required_error: "milestones is required", invalid_type_error: "milestones must be an array" },
     )
@@ -509,7 +523,6 @@ export type CreateJobDraftBody = z.infer<typeof createJobDraftBodySchema>;
  * Query params: ?amount=<stroops> for GET /:contractId/fee-preview.
  * Validates `amount` as a positive i128 decimal string (#719).
  */
-const I128_MAX = (1n << 127n) - 1n;
 
 export const feePreviewQuerySchema = z.object({
   amount: z

@@ -13,6 +13,7 @@ received (current: `1`).
 ```jsonc
 {
   "version": 1,
+  "event_id": "CABC...XYZ:12345678:fund",
   "event_type": "fund",
   "contract_id": "CABC...XYZ",
   "ledger_sequence": 12345678,
@@ -24,6 +25,7 @@ received (current: `1`).
 | Field             | Type   | Description                                             |
 | ----------------- | ------ | ------------------------------------------------------- |
 | `version`         | number | Envelope schema version. Currently always `1`.          |
+| `event_id`        | string | Stable event identifier, `<contract_id>:<ledger_sequence>:<event_type>`. Same value as the `X-Milesto-Event-Id` header. |
 | `event_type`      | string | Contract topic that fired, e.g. `fund`, `approve`.      |
 | `contract_id`     | string | Soroban contract address (`C...`) that emitted the event. |
 | `ledger_sequence` | number | Ledger the event was ingested from.                     |
@@ -33,6 +35,30 @@ received (current: `1`).
 Amounts are stroop-scale integers (`i128` on-chain). Addresses are
 `G...`/`C...` strings. Enum fields (e.g. `status`) serialise to their
 variant name.
+
+## Idempotency
+
+Delivery is **at-least-once**: a timeout, a lost response, or a re-index
+can make the same event arrive more than once. Every POST carries these
+headers so receivers can dedupe:
+
+| Header                       | Value                                                                 |
+| ---------------------------- | --------------------------------------------------------------------- |
+| `X-Milesto-Event-Id`         | The event's stable id (same as body `event_id`). Identical for every delivery of the same on-chain event, to every subscriber, including after a re-index. |
+| `X-Milesto-Delivery-Id`      | UUID for one logical delivery (one event to one subscription), derived from that pair. Stays the same across all of that delivery's retries, including those made by the background retry sweep. |
+| `X-Milesto-Delivery-Attempt` | Attempt number within the delivery, starting at `1`. Failed deliveries are retried until `WEBHOOK_MAX_DELIVERY_ATTEMPTS`. |
+
+Recommended receiver contract:
+
+- **Deduplicate on `X-Milesto-Event-Id`.** Record processed event ids
+  (for example a unique column) and return `2xx` without reprocessing when
+  one is seen again.
+- Use `X-Milesto-Delivery-Id` + `X-Milesto-Delivery-Attempt` for logging
+  and tracing retries. An attempt above `1` means an earlier attempt failed
+  or timed out from the indexer's point of view, which may still have been
+  processed on your side.
+- Return `2xx` only once the event is durably handled. Any other status (or
+  no response) is retried up to the attempt limit.
 
 ## Event `data` shapes
 

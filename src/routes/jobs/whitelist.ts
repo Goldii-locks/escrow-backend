@@ -12,6 +12,7 @@ import type {
 } from "./shared.js";
 import { whitelistCache ,
   inFlightWhitelistRequests,
+  UNSIGNED_TX_TIMEOUT_S,
 } from "./caches.js";
 
 const router = Router();
@@ -209,7 +210,7 @@ router.post(
               new Address(token).toScVal(),
             ),
           )
-          .setTimeout(30)
+          .setTimeout(UNSIGNED_TX_TIMEOUT_S)
           .build();
 
         const prepared = await server.prepareTransaction(tx);

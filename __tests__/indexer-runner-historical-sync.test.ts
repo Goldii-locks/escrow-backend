@@ -7,6 +7,7 @@ import {
   getLastIndexedLedger,
   registerContract,
   getEventsByContract,
+  getIndexerStateValue,
 } from "../src/indexer/db.js";
 
 const mockLogger = {
@@ -40,9 +41,14 @@ jest.unstable_mockModule("@stellar/stellar-sdk", () => ({
   scValToNative: (val: unknown) => val,
 }));
 
-const { pollEvents, resetFailureState, fetchHistoricalEvents } = await import(
-  "../src/indexer/poller.js"
-);
+const {
+  pollEvents,
+  resetFailureState,
+  runConfiguredHistoricalBackfill,
+  historicalBackfillStateKey,
+  startPoller,
+  stopPoller,
+} = await import("../src/indexer/poller.js");
 const { resetLedgerRangeTrackerState, getLedgerRangeMetadata } = await import(
   "../src/indexer/ledger-range-tracker.js"
 );
@@ -57,9 +63,6 @@ function rpcEvent(ledger: number, eventType = "initialized", contractId = "C1") 
   };
 }
 
-// Historical ranges are imported by fetchHistoricalEvents, which the admin
-// backfill endpoint drives (#703); the LEDGER_RANGE_START/END env vars no
-// longer switch the live poller into import mode.
 describe("indexer_runner dynamic historical sync ranges (#254)", () => {
   let testDb: Database.Database;
   const envKeys = [
@@ -105,8 +108,8 @@ describe("indexer_runner dynamic historical sync ranges (#254)", () => {
     }
   });
 
-  it("indexes the configured start/end range with correct event counts", async () => {
-
+  /** Serves rpcEvent()s for [startLedger, 14] on a ledger-window request. */
+  function serveRange10to14(): void {
     mockGetEvents.mockImplementation(async (opts: any) => {
       const start = opts.startLedger as number;
       const events = [];
@@ -115,10 +118,17 @@ describe("indexer_runner dynamic historical sync ranges (#254)", () => {
       }
       return { events };
     });
+  }
 
-    const result = await fetchHistoricalEvents(10, 14);
+  it("indexes the configured start/end range with correct event counts", async () => {
+    process.env.LEDGER_RANGE_START = "10";
+    process.env.LEDGER_RANGE_END = "14";
+    serveRange10to14();
 
-    expect(result).toEqual({ eventsFound: 5, eventsImported: 5 });
+    const outcome = await runConfiguredHistoricalBackfill();
+
+    expect(outcome.status).toBe("completed");
+    expect(outcome.result).toEqual({ eventsFound: 5, eventsImported: 5 });
     expect(getLedgerRangeMetadata(10, 14).totalEvents).toBe(5);
     expect(getEventsByContract("C1", 1, 100).total).toBe(5);
     // Historical import must not advance the live pointer
@@ -126,6 +136,8 @@ describe("indexer_runner dynamic historical sync ranges (#254)", () => {
   });
 
   it("uses inclusive boundaries and ignores events past endLedger", async () => {
+    process.env.LEDGER_RANGE_START = "20";
+    process.env.LEDGER_RANGE_END = "22";
 
     mockGetEvents.mockResolvedValue({
       events: [
@@ -137,7 +149,7 @@ describe("indexer_runner dynamic historical sync ranges (#254)", () => {
       ],
     });
 
-    await fetchHistoricalEvents(20, 22);
+    await runConfiguredHistoricalBackfill();
 
     expect(getLedgerRangeMetadata(20, 22).totalEvents).toBe(3);
     expect(getLedgerRangeMetadata(19, 19).totalEvents).toBe(0);
@@ -145,7 +157,114 @@ describe("indexer_runner dynamic historical sync ranges (#254)", () => {
     expect(getLastIndexedLedger()).toBe(100);
   });
 
-  it("live polling follows the chain head from the live pointer", async () => {
+  describe("run-once backfill (#675)", () => {
+    it("imports the configured range exactly once and records it in indexer_state", async () => {
+      process.env.LEDGER_RANGE_START = "10";
+      process.env.LEDGER_RANGE_END = "14";
+      serveRange10to14();
+
+      const first = await runConfiguredHistoricalBackfill();
+      const callsAfterFirst = mockGetEvents.mock.calls.length;
+      const second = await runConfiguredHistoricalBackfill();
+
+      expect(first.status).toBe("completed");
+      expect(second.status).toBe("already_complete");
+      expect(mockGetEvents.mock.calls.length).toBe(callsAfterFirst);
+      expect(getEventsByContract("C1", 1, 100).total).toBe(5);
+
+      const recorded = JSON.parse(getIndexerStateValue(historicalBackfillStateKey(10, 14))!);
+      expect(recorded).toMatchObject({ eventsFound: 5, eventsImported: 5 });
+      expect(typeof recorded.completedAt).toBe("string");
+    });
+
+    it("shares one import between concurrent callers", async () => {
+      process.env.LEDGER_RANGE_START = "10";
+      process.env.LEDGER_RANGE_END = "14";
+      serveRange10to14();
+
+      const [a, b] = await Promise.all([
+        runConfiguredHistoricalBackfill(),
+        runConfiguredHistoricalBackfill(),
+      ]);
+
+      expect(a).toBe(b);
+      expect(mockGetEvents).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not record a failed import, so the next run retries it", async () => {
+      process.env.LEDGER_RANGE_START = "10";
+      process.env.LEDGER_RANGE_END = "14";
+      // endLedger beyond the chain head fails validation.
+      mockGetLatestLedger.mockResolvedValue({ sequence: 12 });
+
+      const failed = await runConfiguredHistoricalBackfill();
+      expect(failed.status).toBe("failed");
+      expect(getIndexerStateValue(historicalBackfillStateKey(10, 14))).toBeUndefined();
+
+      mockGetLatestLedger.mockResolvedValue({ sequence: 500 });
+      serveRange10to14();
+      const retried = await runConfiguredHistoricalBackfill();
+      expect(retried.status).toBe("completed");
+    });
+
+    it("treats a different range as a new backfill", async () => {
+      process.env.LEDGER_RANGE_START = "10";
+      process.env.LEDGER_RANGE_END = "14";
+      serveRange10to14();
+      await runConfiguredHistoricalBackfill();
+
+      process.env.LEDGER_RANGE_START = "10";
+      process.env.LEDGER_RANGE_END = "12";
+      const outcome = await runConfiguredHistoricalBackfill();
+      expect(outcome.status).toBe("completed");
+    });
+
+    it("reports not_configured when no range env is set", async () => {
+      expect((await runConfiguredHistoricalBackfill()).status).toBe("not_configured");
+      expect(mockGetEvents).not.toHaveBeenCalled();
+    });
+
+    it("keeps pollEvents on the live pointer while a range is configured", async () => {
+      process.env.LEDGER_RANGE_START = "10";
+      process.env.LEDGER_RANGE_END = "14";
+      mockGetEvents.mockResolvedValue({ events: [rpcEvent(101)] });
+
+      const advanced = await pollEvents();
+
+      expect(advanced).toBe(true);
+      expect(mockGetEvents).toHaveBeenCalledTimes(1);
+      expect(mockGetEvents).toHaveBeenCalledWith(
+        expect.objectContaining({ startLedger: 101 }),
+      );
+      expect(getLastIndexedLedger()).toBe(500);
+    });
+
+    it("startPoller backfills once, then resumes live polling from the live pointer", async () => {
+      process.env.LEDGER_RANGE_START = "10";
+      process.env.LEDGER_RANGE_END = "14";
+      serveRange10to14();
+
+      try {
+        startPoller();
+        // Wait for the backfill and the first live cycle to complete.
+        for (let i = 0; i < 50 && getLastIndexedLedger() !== 500; i++) {
+          await new Promise((resolve) => setImmediate(resolve));
+        }
+      } finally {
+        stopPoller();
+      }
+
+      const ledgerRequests = mockGetEvents.mock.calls
+        .map(([opts]) => (opts as { startLedger?: number }).startLedger)
+        .filter((start) => start !== undefined);
+      // One historical window request, then live polling from pointer + 1.
+      expect(ledgerRequests).toEqual([10, 101]);
+      expect(getIndexerStateValue(historicalBackfillStateKey(10, 14))).toBeDefined();
+      expect(getLastIndexedLedger()).toBe(500);
+    });
+  });
+
+  it("falls back to live polling when no historical range env is set", async () => {
     mockGetEvents.mockResolvedValue({
       events: [rpcEvent(101)],
     });
