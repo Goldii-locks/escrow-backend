@@ -22,7 +22,7 @@ import {
   adjustIndexerRunnerPollInterval,
 } from "./indexer_runner.js";
 import { deliverWebhooks } from "./webhook-delivery.js";
-import { fetchEventsWithRetry } from "./event_type_filter.js";
+import { buildGetEventsRequest } from "./event_type_filter.js";
 import { formatError } from "../utils/format-error.js";
 import { config } from "../config.js";
 import logger from "../utils/logger.js";
@@ -449,23 +449,10 @@ export function extractOldestLedger(source: unknown): number | undefined {
 
 export async function pollEvents(): Promise<boolean> {
   const pollStartedAt = performance.now();
-
-  // --- Resolve active contract IDs from the DB (#85) ---
-  let contractIds: string[] = getActiveContractIds();
-
-  // Fall back to the legacy single CONTRACT_ID env var so existing deployments
-  // keep working without any DB seed step.
-  if (contractIds.length === 0 && process.env.CONTRACT_ID) {
-    registerContract(process.env.CONTRACT_ID, "default");
-    contractIds = [process.env.CONTRACT_ID];
-  }
-
-  if (contractIds.length === 0) {
-    logger.debug("No CONTRACT_IDs configured – skipping indexer poll");
-    return false;
-  }
+  const pollStart = performance.now();
 
   // --- Alerting: stall detection before polling (#253, #271) ---
+  // Reads only in-memory monitor state, so it is safe outside the try.
   const lastSuccessAt = failureMonitor.getLastSuccessfulAt();
   let stallWindow: StallWindow | null = null;
 
@@ -489,11 +476,26 @@ export async function pollEvents(): Promise<boolean> {
     }
   }
 
-  const pollStart = performance.now();
-
   try {
-    // Validate the schema before matching events against EVENT_TYPES – a stale
-    // schema must not silently pass through the topic filter (#282).
+    // --- Resolve active contract IDs from the DB (#85, #689) ---
+    // These SQLite reads/writes must live inside the try: a SQLITE_BUSY,
+    // locked, corrupt, or full-disk DB would otherwise reject outside any
+    // catch, surface as an unhandled rejection, and crash the process.
+    let contractIds: string[] = getActiveContractIds();
+
+    // Fall back to the legacy single CONTRACT_ID env var so existing deployments
+    // keep working without any DB seed step.
+    if (contractIds.length === 0 && process.env.CONTRACT_ID) {
+      registerContract(process.env.CONTRACT_ID, "default");
+      contractIds = [process.env.CONTRACT_ID];
+    }
+
+    if (contractIds.length === 0) {
+      logger.debug("No CONTRACT_IDs configured – skipping indexer poll");
+      return false;
+    }
+    // Validate the schema before ingesting events – a stale schema must not
+    // silently accept rows for unknown contract topics (#282, #687).
     verifySchemaUpToDate();
 
     const currentLedger = (await rpcClient.getLatestLedger()).sequence;
@@ -553,12 +555,17 @@ export async function pollEvents(): Promise<boolean> {
         cursorValue: string | undefined,
       ): Promise<any> => {
         try {
-          return await fetchEventsWithRetry(rpcClient.rpcServer, {
-            startLedger: pageStart,
-            contractIds: groupContractIds,
-            limit: pageLimit,
-            ...(cursorValue ? { cursor: cursorValue } : {}),
-          });
+          // All RPC calls share RpcPollerClient's single retry policy, which
+          // backs off on timeouts, resets, 429s (honouring Retry-After) and
+          // 5xx (#688).
+          return await rpcClient.getEvents(
+            buildGetEventsRequest({
+              startLedger: pageStart,
+              contractIds: groupContractIds,
+              limit: pageLimit,
+              ...(cursorValue ? { cursor: cursorValue } : {}),
+            }),
+          );
         } catch (err) {
           const oldest = extractOldestLedger(err);
           if (oldest !== undefined && pageStart < oldest && !cursorValue) {
@@ -576,11 +583,13 @@ export async function pollEvents(): Promise<boolean> {
             }
             startLedger = oldest;
             minStartLedger = Math.min(minStartLedger, startLedger);
-            return await fetchEventsWithRetry(rpcClient.rpcServer, {
-              startLedger: oldest,
-              contractIds: groupContractIds,
-              limit: pageLimit,
-            });
+            return await rpcClient.getEvents(
+              buildGetEventsRequest({
+                startLedger: oldest,
+                contractIds: groupContractIds,
+                limit: pageLimit,
+              }),
+            );
           }
           throw err;
         }
@@ -703,10 +712,27 @@ export async function pollEvents(): Promise<boolean> {
 let pollerTimeout: NodeJS.Timeout | null = null;
 let pollerRunning = false;
 
-/** One poll plus the interval adjustment its outcome implies. */
+/**
+ * One poll plus the interval adjustment its outcome implies (#689).
+ *
+ * Never rejects: `pollEvents` already converts failures to a `false`
+ * return, but a defensive catch keeps the loop alive even if a future code
+ * path throws outside that contract (or rejects the interval update).
+ */
 async function runPollCycle(): Promise<void> {
-  const sawActivity = await pollEvents();
-  currentPollIntervalMs = nextPollIntervalMs(currentPollIntervalMs, sawActivity);
+  try {
+    const sawActivity = await pollEvents();
+    currentPollIntervalMs = nextPollIntervalMs(currentPollIntervalMs, sawActivity);
+  } catch (err) {
+    const consecutiveFailures = failureMonitor.recordFailure("poll", {
+      error: formatError(err),
+      operation: "run_poll_cycle",
+    });
+    logger.error("Poll cycle escaped pollEvents catch – recording failure", {
+      error: formatError(err),
+      consecutiveFailures,
+    });
+  }
 }
 
 async function pollLoop() {
@@ -730,12 +756,19 @@ export function startPoller() {
   });
 
   // The first cycle runs immediately; the loop is scheduled off its outcome so
-  // the very first idle poll already widens the wait.
-  void runPollCycle().then(() => {
-    if (pollerRunning) {
-      pollerTimeout = setTimeout(pollLoop, currentPollIntervalMs);
-    }
-  });
+  // the very first idle poll already widens the wait. A rejection handler
+  // keeps an unexpected throw from becoming an unhandled rejection (#689).
+  void runPollCycle()
+    .catch((err) => {
+      logger.error("Initial poll cycle failed", {
+        error: formatError(err),
+      });
+    })
+    .then(() => {
+      if (pollerRunning) {
+        pollerTimeout = setTimeout(pollLoop, currentPollIntervalMs);
+      }
+    });
 }
 
 export function stopPoller() {

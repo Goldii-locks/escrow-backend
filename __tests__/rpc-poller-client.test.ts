@@ -1,4 +1,12 @@
-import { computeBackoffMs, withRetry } from "../src/indexer/rpc-poller-client.js";
+import {
+  computeBackoffMs,
+  withRetry,
+  parseRetryAfterMs,
+  getRetryAfterMs,
+  getErrorStatusCode,
+  isRetryableError,
+  RpcPollerClient,
+} from "../src/indexer/rpc-poller-client.js";
 import { jest } from "@jest/globals";
 import Database from "better-sqlite3";
 import {
@@ -176,6 +184,69 @@ describe("RpcPollerClient – exponential backoff retry", () => {
         withRetry(fn, { maxRetries: 3, initialBackoffMs: 10 }, "test")
       ).rejects.toThrow("string error");
       expect(calls).toBe(1);
+    });
+
+    it("retries 429 and 503 status errors (#688)", async () => {
+      for (const status of [429, 503]) {
+        let calls = 0;
+        const fn = async () => {
+          calls++;
+          if (calls === 1) {
+            const err = new Error(`Request failed with status code ${status}`) as any;
+            err.status = status;
+            throw err;
+          }
+          return "recovered";
+        };
+        const result = await withRetry(
+          fn,
+          { maxRetries: 3, initialBackoffMs: 1, maxBackoffMs: 5 },
+          "test"
+        );
+        expect(result).toBe("recovered");
+        expect(calls).toBe(2);
+      }
+    });
+
+    it("honours Retry-After without exceeding maxBackoffMs (#688)", () => {
+      expect(parseRetryAfterMs("2")).toBe(2000);
+      expect(parseRetryAfterMs(0)).toBe(0);
+      expect(parseRetryAfterMs("not-a-date")).toBeNull();
+      expect(
+        getRetryAfterMs({ response: { headers: { "Retry-After": "3" } } })
+      ).toBe(3000);
+      expect(
+        getRetryAfterMs({ response: { headers: { "retry-after": "1" } } })
+      ).toBe(1000);
+      expect(getErrorStatusCode({ status: 429 })).toBe(429);
+      expect(isRetryableError(new Error("Request failed with status code 429"))).toBe(true);
+      expect(isRetryableError(new Error("Request failed with status code 503"))).toBe(true);
+    });
+
+    it("recovers through RpcPollerClient.getEvents after two 429s (#688)", async () => {
+      let calls = 0;
+      const server = {
+        getLatestLedger: async () => ({ sequence: 1 }),
+        getEvents: async () => {
+          calls++;
+          if (calls <= 2) {
+            const err = new Error("Request failed with status code 429") as any;
+            err.status = 429;
+            err.response = { status: 429, headers: { "Retry-After": "0" } };
+            throw err;
+          }
+          return { events: [], cursor: undefined };
+        },
+      };
+      const client = new RpcPollerClient("http://localhost", {
+        server: server as any,
+        maxRetries: 5,
+        initialBackoffMs: 1,
+        maxBackoffMs: 5,
+      });
+      const result = await client.getEvents({ startLedger: 1, limit: 10 });
+      expect(result.events).toEqual([]);
+      expect(calls).toBe(3);
     });
   });
 });

@@ -51,46 +51,78 @@ describe("email_sender_service signature checks (#522)", () => {
     jest.clearAllMocks();
   });
 
-  it("signs outgoing webhooks with sha256 HMAC hex digests", () => {
+  it("signs outgoing webhooks with timestamp-bound sha256 HMAC hex digests (#694)", () => {
     const signed = signOutgoingWebhook(PAYLOAD, SECRET);
 
     const expected = createHmac("sha256", SECRET)
-      .update(JSON.stringify(PAYLOAD), "utf8")
+      .update(`${signed.timestamp}.${JSON.stringify(PAYLOAD)}`, "utf8")
       .digest("hex");
 
     expect(signed.signatureHex).toBe(expected);
     expect(signed.signatureHeader).toBe(`${SIGNATURE_SCHEME}=${expected}`);
     expect(signed.body).toBe(JSON.stringify(PAYLOAD));
+    expect(signed.timestamp).toMatch(/^\d+$/);
+    expect(signed.timestampHeader).toBe(signed.timestamp);
   });
 
   it("accepts client-side verification of the produced signature header", () => {
     const signed = signOutgoingWebhook(PAYLOAD, SECRET);
 
     expect(
-      verifyWebhookSignature(signed.body, signed.signatureHeader, SECRET)
+      verifyWebhookSignature(signed.body, signed.signatureHeader, SECRET, signed.timestamp)
     ).toBe(true);
     expect(
-      verifyWebhookSignature(signed.body, signed.signatureHex, SECRET)
+      verifyWebhookSignature(signed.body, signed.signatureHex, SECRET, signed.timestamp)
     ).toBe(true);
   });
 
-  it("rejects tampered bodies and wrong secrets", () => {
+  it("rejects tampered bodies, timestamps, and wrong secrets (#694)", () => {
     const signed = signOutgoingWebhook(PAYLOAD, SECRET);
 
     expect(
       verifyWebhookSignature(
         JSON.stringify({ ...PAYLOAD, body: "tampered" }),
         signed.signatureHeader,
-        SECRET
+        SECRET,
+        signed.timestamp
+      )
+    ).toBe(false);
+
+    // Changing the timestamp header without re-signing fails verification.
+    expect(
+      verifyWebhookSignature(
+        signed.body,
+        signed.signatureHeader,
+        SECRET,
+        String(Number(signed.timestamp) + 60_000)
       )
     ).toBe(false);
 
     expect(
-      verifyWebhookSignature(signed.body, signed.signatureHeader, "wrong-secret")
+      verifyWebhookSignature(signed.body, signed.signatureHeader, "wrong-secret", signed.timestamp)
     ).toBe(false);
 
-    expect(verifyWebhookSignature(signed.body, "not-a-hex", SECRET)).toBe(false);
-    expect(verifyWebhookSignature(signed.body, "", SECRET)).toBe(false);
+    expect(verifyWebhookSignature(signed.body, "not-a-hex", SECRET, signed.timestamp)).toBe(false);
+    expect(verifyWebhookSignature(signed.body, "", SECRET, signed.timestamp)).toBe(false);
+  });
+
+  it("rejects signatures older than the tolerance (#694)", () => {
+    const oldTimestamp = String(Date.now() - 10 * 60 * 1000);
+    const signed = signOutgoingWebhook(PAYLOAD, SECRET, oldTimestamp);
+
+    expect(
+      verifyWebhookSignature(signed.body, signed.signatureHeader, SECRET, signed.timestamp)
+    ).toBe(false);
+    // A generous tolerance still accepts the same signature.
+    expect(
+      verifyWebhookSignature(
+        signed.body,
+        signed.signatureHeader,
+        SECRET,
+        signed.timestamp,
+        15 * 60 * 1000
+      )
+    ).toBe(true);
   });
 
   it("requires a non-empty signing secret", () => {
@@ -99,10 +131,14 @@ describe("email_sender_service signature checks (#522)", () => {
     expect(() => signOutgoingWebhook(PAYLOAD, "")).toThrow(EmailSenderConfigError);
   });
 
-  it("attaches the signature header when sending an alert", async () => {
+  it("attaches the signature and timestamp headers when sending an alert", async () => {
     const mockFetch = jest.fn<(...args: any[]) => any>();
     mockFetch.mockResolvedValue({ ok: true, status: 202 });
     (global as any).fetch = mockFetch;
+
+    const { WEBHOOK_TIMESTAMP_HEADER } = await import(
+      "../src/utils/email_sender_service.js"
+    );
 
     const result = await sendEmailAlert({
       webhookUrl: "https://hooks.example.com/email",
@@ -119,10 +155,16 @@ describe("email_sender_service signature checks (#522)", () => {
     const [url, init] = mockFetch.mock.calls[0];
     expect(url).toBe("https://hooks.example.com/email");
     expect(init.headers[WEBHOOK_SIGNATURE_HEADER]).toBe(result.signatureHeader);
+    expect(init.headers[WEBHOOK_TIMESTAMP_HEADER]).toBe(result.timestampHeader);
     expect(init.headers["Content-Type"]).toBe("application/json");
 
     expect(
-      verifyWebhookSignature(init.body, init.headers[WEBHOOK_SIGNATURE_HEADER], SECRET)
+      verifyWebhookSignature(
+        init.body,
+        init.headers[WEBHOOK_SIGNATURE_HEADER],
+        SECRET,
+        init.headers[WEBHOOK_TIMESTAMP_HEADER]
+      )
     ).toBe(true);
 
     delete (global as any).fetch;

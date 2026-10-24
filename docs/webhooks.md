@@ -194,3 +194,21 @@ Split-refund calculators (`splitref`, `epspltref`, `cxlspref`) and the
 arbitration split (`arbsplit`) carry `client_refund` / `freelancer_payout`
 fields whose sum equals the settled split. See `docs` on reconciliation
 for how inflow/outflow event types map to on-chain balances.
+
+## Outgoing webhook signature verification (#694)
+
+Email-alert webhooks are signed with HMAC-SHA256 over
+`${timestamp}.${body}` (Stripe/Slack-style) so captured deliveries cannot
+be replayed. Each delivery sends:
+
+- `X-Webhook-Signature: sha256=<hex>`
+- `X-Milesto-Timestamp: <millis-since-epoch>`
+
+Receivers must:
+
+1. Read the raw body bytes, both headers, and reject when any is missing.
+2. Reject when `timestamp` is not an integer within 5 minutes of now
+   (tolerance is configurable; see
+   `DEFAULT_WEBHOOK_TIMESTAMP_TOLERANCE_MS`).
+3. Recompute `HMAC-SHA256(secret, timestamp + "." + body)` as hex and
+   compare with the signature header in constant time.
