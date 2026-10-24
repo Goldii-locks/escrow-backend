@@ -237,6 +237,11 @@ router.post(
       }
     }
 
+    // Bulk form ({ addresses | tokens }) is not executed on-chain: Soroban
+    // allows only one host function call per transaction, so there is no
+    // single signed transaction that applies a whole list. Reject it and
+    // point the caller at the single-token form instead of replying
+    // `updated: true` for work that was never done (#613).
     try {
       const contract = new Contract(contractId);
       const account = simulationSource();
@@ -271,8 +276,12 @@ router.post(
       }
 
       whitelistCache.del(contractId);
-      logger.info("Whitelist updated successfully", { contractId, count: targetAddresses.length });
-      sendSuccess(res, { contractId, addresses: targetAddresses, updated: true });
+      logger.warn("Bulk whitelist update rejected", { contractId, count: targetAddresses.length });
+      sendError(
+        res,
+        400,
+        "Bulk whitelist update is not supported: submit one { token, action, adminAddress } request per address to receive a signable transaction",
+      );
     } catch (err: any) {
       const message = err?.message ?? String(err);
       if (/unauthorized|invalid authentication/i.test(message)) {

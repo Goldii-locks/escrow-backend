@@ -284,6 +284,29 @@ const MIGRATIONS: Migration[] = [
       ALTER TABLE monitored_contracts ADD COLUMN start_ledger INTEGER NOT NULL DEFAULT 0;
     `,
   },
+  {
+    version: 12,
+    description: "webhook delivery outbox with retry state (#611)",
+    up: `
+      CREATE TABLE IF NOT EXISTS webhook_deliveries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        subscription_id INTEGER NOT NULL,
+        event_id INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        attempts INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        next_attempt_at INTEGER,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(subscription_id, event_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_retry
+        ON webhook_deliveries (status, next_attempt_at);
+
+      CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_event
+        ON webhook_deliveries (event_id);
+    `,
+  },
 ];
 
 /** Index names created by the SQLite schema manager lookup-index migration (#259). */

@@ -866,7 +866,8 @@ describe("POST /api/jobs/submit – trace logging", () => {
   // -------------------------------------------------------------------------
 
   it("logs 'Submit result served from cache' with traceId and source='cache' on cache hit", async () => {
-    mockSendTransaction.mockResolvedValue({ id: "cached" });
+    // Only successful (PENDING / DUPLICATE) submissions are cached (#614).
+    mockSendTransaction.mockResolvedValue({ id: "cached", status: "PENDING" });
     const app = buildApp();
 
     // Prime the cache
