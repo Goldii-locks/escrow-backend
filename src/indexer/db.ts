@@ -354,6 +354,24 @@ const MIGRATIONS: Migration[] = [
         ON events (contract_id, event_type);
     `,
   },
+  {
+    version: 14,
+    description: "create job_drafts table (#667)",
+    up: `
+      CREATE TABLE IF NOT EXISTS job_drafts (
+        id TEXT PRIMARY KEY,
+        creator_address TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        expires_at DATETIME
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_job_drafts_creator
+        ON job_drafts (creator_address);
+      CREATE INDEX IF NOT EXISTS idx_job_drafts_expires_at
+        ON job_drafts (expires_at);
+    `,
+  },
 ];
 
 /** Index names created by the SQLite schema manager lookup-index migration (#259). */
@@ -1949,4 +1967,68 @@ export function getHistoricalEventCounts(
   }
 
   return { totalEvents: totalRow.count, eventsByType };
+}
+
+export interface JobDraftRecord {
+  id: string;
+  creatorAddress: string;
+  payload: any;
+  createdAt: string;
+  expiresAt: string | null;
+}
+
+/**
+ * Persist an off-chain job draft payload into job_drafts.
+ */
+export function saveJobDraft(
+  id: string,
+  creatorAddress: string,
+  payload: unknown,
+  expiresInDays: number = 30
+): void {
+  const db = getDb();
+  const payloadJson = JSON.stringify(payload);
+  const expiresAt = new Date(Date.now() + expiresInDays * 24 * 60 * 60 * 1000).toISOString();
+
+  db.prepare(`
+    INSERT INTO job_drafts (id, creator_address, payload_json, expires_at)
+    VALUES (?, ?, ?, ?)
+  `).run(id, creatorAddress, payloadJson, expiresAt);
+}
+
+/**
+ * Fetch a job draft by its ID. Returns null if not found or expired.
+ */
+export function getJobDraftById(id: string): JobDraftRecord | null {
+  const db = getDb();
+  const row = db.prepare(`
+    SELECT id, creator_address, payload_json, created_at, expires_at
+    FROM job_drafts
+    WHERE id = ?
+  `).get(id) as {
+    id: string;
+    creator_address: string;
+    payload_json: string;
+    created_at: string;
+    expires_at: string | null;
+  } | undefined;
+
+  if (!row) return null;
+
+  if (row.expires_at && new Date(row.expires_at).getTime() < Date.now()) {
+    return null;
+  }
+
+  try {
+    const payload = JSON.parse(row.payload_json);
+    return {
+      id: row.id,
+      creatorAddress: row.creator_address,
+      payload,
+      createdAt: row.created_at,
+      expiresAt: row.expires_at,
+    };
+  } catch {
+    return null;
+  }
 }

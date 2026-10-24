@@ -57,6 +57,7 @@ const RETRYABLE_PATTERNS = [
   "ratelimit",
   "request timeout",
   "connect timeout",
+  "aborterror",
 ];
 
 /**
@@ -135,9 +136,42 @@ export function getRetryAfterMs(err: unknown): number | null {
   return parseRetryAfterMs(record["retry_after"]);
 }
 
+/** Errors that retrying cannot fix: malformed requests (#674). */
+const NON_RETRYABLE_PATTERNS = [
+  "status 400",
+  "-32602",
+  "invalid params",
+  "invalid parameters",
+];
+
+const RETRYABLE_ERROR_CODES = new Set(["ECONNRESET", "ETIMEDOUT", "ECONNREFUSED"]);
+
 export function isRetryableError(err: unknown): boolean {
+  if (!err) return false;
+  const record = (typeof err === "object" ? err : {}) as {
+    name?: unknown;
+    code?: unknown;
+    error?: { code?: unknown };
+  };
+
+  // Aborted requests and dropped connections are transient.
+  if (
+    record.name === "AbortError" ||
+    (typeof record.code === "string" && RETRYABLE_ERROR_CODES.has(record.code))
+  ) {
+    return true;
+  }
+
+  // An HTTP status decides on its own: 429/5xx retry, any other 4xx does not.
   const status = getErrorStatusCode(err);
-  if (status !== null && RETRYABLE_STATUS_CODES.has(status)) return true;
+  if (status !== null) {
+    if (RETRYABLE_STATUS_CODES.has(status)) return true;
+    if (status >= 400 && status < 500) return false;
+  }
+
+  // JSON-RPC invalid params (-32602) is a malformed request, never transient.
+  if (record.code === -32602 || record.error?.code === -32602) return false;
+
   const msg =
     err instanceof Error
       ? err.message
@@ -146,6 +180,7 @@ export function isRetryableError(err: unknown): boolean {
         : String(err ?? "");
   if (!msg) return false;
   const lower = msg.toLowerCase();
+  if (NON_RETRYABLE_PATTERNS.some((p) => lower.includes(p))) return false;
   return RETRYABLE_PATTERNS.some((p) => lower.includes(p.toLowerCase()));
 }
 

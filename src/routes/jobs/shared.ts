@@ -10,7 +10,12 @@ import {
   Address,
 } from "@stellar/stellar-sdk";
 import { Server } from "@stellar/stellar-sdk/rpc";
-import { getJobsByWallet, getEventsByContract } from "../../indexer/db.js";
+import {
+  getJobsByWallet,
+  getEventsByContract,
+  saveJobDraft,
+  getJobDraftById,
+} from "../../indexer/db.js";
 import {
   jobContractRateLimit,
   jobWhitelistRateLimit,
@@ -208,7 +213,7 @@ export function convertScValToNativeStrings(value: unknown): unknown {
 
 export {
   Contract, Networks, TransactionBuilder, BASE_FEE, nativeToScVal, scValToNative, Address,
-  getJobsByWallet, getEventsByContract,
+  getJobsByWallet, getEventsByContract, saveJobDraft, getJobDraftById,
   jobContractRateLimit, jobWhitelistRateLimit, whitelistUpdateRateLimit, partialReleaseRateLimit,
   buildTxRateLimit, timeRemainingRateLimit, createJobDraftRateLimit, claimAutoReleaseRateLimit,
   submitRateLimit,
