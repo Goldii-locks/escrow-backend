@@ -203,6 +203,8 @@ function toEventRow(event: any, fallbackContractId: string): EventRow {
         : typeof event.pagingToken === "string" && event.pagingToken
           ? event.pagingToken
           : undefined,
+    // The transaction hash lets the UI link the event to a block explorer (#700).
+    txHash: typeof event.txHash === "string" ? event.txHash : null,
   };
 }
 

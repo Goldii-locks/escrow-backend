@@ -9,6 +9,11 @@
 
 import { divRound } from "./rounding.js";
 import { isAmountWithinRange } from "./digit-limit-validator.js";
+import {
+  DEFAULT_TOKEN_DECIMALS,
+  resolveTokenMetadata,
+  type TokenMetadataOptions,
+} from "./token-metadata.js";
 
 /** Max decimal digits allowed for a single cents amount (below Number.MAX_SAFE_INTEGER). */
 export const MAX_SAFE_DIGITS = 15;
@@ -444,73 +449,66 @@ export const applyCentsMultiplier = applyStablecoinCentsMultiplier;
 export const multiplyStablecoinCents = applyStablecoinCentsMultiplier;
 
 // ---------------------------------------------------------------------------
-// Per-ticker precision configuration (#479)
+// Token precision configuration (#699)
 // ---------------------------------------------------------------------------
+// The precision of an asset is no longer hard-coded per ticker. It is read
+// from the token contract itself (SEP-41 `decimals()`) through the
+// centralized `token-metadata.ts` registry, so a whitelisted token with a
+// non-standard precision is formatted correctly.
 
 export interface StablecoinConfig {
-  /** Number of decimal places used by the asset. */
+  /** Number of decimal places used by the asset (from the token contract). */
   decimals: number;
-  /** Multiplier applied to convert whole units into integer cents. */
+  /** Multiplier applied to convert whole units into integer base units. */
   centsMultiplier: number;
 }
 
 /**
- * Default configuration applied when a ticker key is missing or unknown.
- * Mirrors the most common stablecoin layout (2 decimals / 100 cents).
+ * Default configuration applied when a token's precision cannot be resolved.
+ * Mirrors the Stellar-native precision (7 decimals).
  */
 export const DEFAULT_STABLECOIN_CONFIG: StablecoinConfig = {
-  decimals: CENTS_DECIMALS,
-  centsMultiplier: CENTS_PER_UNIT,
+  decimals: DEFAULT_TOKEN_DECIMALS,
+  centsMultiplier: 10 ** DEFAULT_TOKEN_DECIMALS,
 };
 
 /**
- * Known Stellar stablecoin ticker keys mapped to their precision config.
- * Keys are upper-case; lookups are case-insensitive.
+ * Resolve the precision configuration for a token contract address from the
+ * token's own `decimals()` value.
  */
-export const STABLECOIN_CONFIGS: Record<string, StablecoinConfig> = {
-  USDC: { decimals: 2, centsMultiplier: 100 },
-  USDT: { decimals: 2, centsMultiplier: 100 },
-  USD: { decimals: 2, centsMultiplier: 100 },
-  DAI: { decimals: 2, centsMultiplier: 100 },
-  EURC: { decimals: 2, centsMultiplier: 100 },
-};
-
-function normalizeTicker(ticker?: string | null): string {
-  return typeof ticker === "string" ? ticker.trim().toUpperCase() : "";
-}
-
-/**
- * Resolve the precision configuration for a ticker key. Unknown, empty or
- * missing tickers return DEFAULT_STABLECOIN_CONFIG instead of failing.
- */
-export function getStablecoinConfig(ticker?: string | null): StablecoinConfig {
-  const key = normalizeTicker(ticker);
-  if (!key || !Object.prototype.hasOwnProperty.call(STABLECOIN_CONFIGS, key)) {
-    return DEFAULT_STABLECOIN_CONFIG;
-  }
-  return STABLECOIN_CONFIGS[key];
-}
-
-/**
- * Cents multiplier for a ticker key, falling back to the default
- * configuration when the ticker is missing or unknown.
- */
-export function stablecoin_cents_multiplier(ticker?: string | null): number {
-  return getStablecoinConfig(ticker).centsMultiplier;
+export async function getStablecoinConfig(
+  tokenAddress: string,
+  options?: TokenMetadataOptions
+): Promise<StablecoinConfig> {
+  const metadata = await resolveTokenMetadata(tokenAddress, options);
+  return {
+    decimals: metadata.decimals,
+    centsMultiplier: 10 ** metadata.decimals,
+  };
 }
 
 /**
  * Convert a human-readable amount into integer base units using the precision
- * resolved for `ticker`. Uses exact decimal-string arithmetic and applies the
- * same rules as `dollarsToCents`: negative amounts, non-numeric input,
- * sub-unit precision beyond the asset's decimals and digit overflow are
+ * resolved from the token contract. Uses exact decimal-string arithmetic and
+ * applies the same rules as `dollarsToCents`: negative amounts, non-numeric
+ * input, sub-unit precision beyond the asset's decimals and digit overflow are
  * rejected with typed errors.
  */
-export function toCents(
+export async function toCents(
   amount: string | number,
-  ticker?: string | null
-): ConversionResult {
-  const { decimals } = getStablecoinConfig(ticker);
+  tokenAddress: string,
+  options?: TokenMetadataOptions
+): Promise<ConversionResult> {
+  let decimals: number;
+  try {
+    decimals = (await resolveTokenMetadata(tokenAddress, options)).decimals;
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+      code: ERROR_CODES.INVALID_AMOUNT,
+    };
+  }
 
   if (typeof amount === "number" && !Number.isFinite(amount)) {
     return {

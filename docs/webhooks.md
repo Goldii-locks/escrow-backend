@@ -42,6 +42,9 @@ received (current: `1`).
   "contract_id": "CABC...XYZ",
   "ledger_sequence": 12345678,
   "timestamp": 1735689600,
+  "tx_hash": "9f2c...aa71",
+  "txHash": "9f2c...aa71",
+  "event_id": "00000000...-0000",
   "data": { /* per-event shape, see below */ }
 }
 ```
@@ -54,6 +57,9 @@ received (current: `1`).
 | `contract_id`     | string | Soroban contract address (`C...`) that emitted the event. |
 | `ledger_sequence` | number | Ledger the event was ingested from.                     |
 | `timestamp`       | number | Ledger close time (unix seconds) recorded at ingestion. |
+| `tx_hash`         | string\|null | Hash of the transaction that emitted the event. Link it to a block explorer. `null` for events indexed before the column existed. |
+| `txHash`          | string\|null | Camel-case alias of `tx_hash`.                           |
+| `event_id`        | string\|null | RPC event id (`ledger-transaction-index`). `null` for events indexed before the column existed. |
 | `data`            | object | Event-specific payload (native JSON form of the Soroban struct). |
 
 Amounts are stroop-scale integers (`i128` on-chain). Addresses are
@@ -83,6 +89,21 @@ Recommended receiver contract:
   processed on your side.
 - Return `2xx` only once the event is durably handled. Any other status (or
   no response) is retried up to the attempt limit.
+
+## Automatic disabling of dead subscriptions
+
+A subscription whose endpoint is permanently dead (expired domain, removed
+route) would otherwise be retried for every matching event, forever, and
+delay every healthy subscriber behind it in the sequential delivery loop.
+
+Each subscription therefore tracks its consecutive delivery failures. After
+`WEBHOOK_DISABLE_AFTER` consecutive failed deliveries (default `50`) the
+subscription is disabled: it is skipped by the delivery loop and shows up in
+`GET /api/admin/webhook-subscriptions` under `disabled`.
+
+A successful delivery resets the counter, and calling `POST
+/api/webhooks/subscribe` again for the same `(contract_id, webhook_url)` pair
+re-enables the subscription and clears the failure history.
 
 ## Event `data` shapes
 

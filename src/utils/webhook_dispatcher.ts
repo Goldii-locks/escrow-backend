@@ -9,7 +9,7 @@ import { randomUUID } from "crypto";
 import {
   addSubscription,
   removeSubscription,
-  getSubscriptions,
+  getActiveSubscriptions,
   type WebhookSubscription,
 } from "../indexer/db.js";
 import { deliverWebhooks } from "../indexer/webhook-delivery.js";
@@ -254,7 +254,9 @@ export async function dispatchLedgerRange(
   subscriptionCount: number;
 }> {
   const traceId = randomUUID();
-  const subscriptions = getSubscriptions();
+  // Auto-disabled subscriptions are skipped by the delivery loop (#701), so
+  // only the active ones are counted here.
+  const subscriptions = getActiveSubscriptions();
 
   logger.debug("webhook_dispatcher delivery pipeline started", {
     traceId,

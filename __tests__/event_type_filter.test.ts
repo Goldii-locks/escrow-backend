@@ -171,8 +171,10 @@ describe("event_type_filter – Transaction Isolation", () => {
       let callCount = 0;
       const mockPrepare = jest.fn((sql: string) => {
         callCount += 1;
+        // The SELECT that reads the row back runs after the INSERT (and,
+        // since #701, after the re-enable UPDATE).
         if (
-          callCount === 2 &&
+          callCount > 1 &&
           sql.includes("SELECT * FROM webhook_subscriptions")
         ) {
           throw new Error("Simulated SELECT failure after INSERT");

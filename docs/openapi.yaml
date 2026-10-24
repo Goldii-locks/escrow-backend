@@ -628,6 +628,40 @@ paths:
         '401':
           description: Unauthorized (missing or invalid admin API key)
 
+  /api/admin/webhook-subscriptions:
+    get:
+      summary: List webhook subscriptions, including auto-disabled ones
+      description: >
+        Every webhook subscription, split into `active` and `disabled`. A
+        subscription is disabled after WEBHOOK_DISABLE_AFTER consecutive
+        failed deliveries and re-enabled by subscribing again (#701).
+      security:
+        - AdminApiKeyAuth: []
+      responses:
+        '200':
+          description: Subscriptions grouped by state
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  subscriptions:
+                    type: array
+                    items:
+                      type: object
+                  active:
+                    type: array
+                    items:
+                      type: object
+                  disabled:
+                    type: array
+                    items:
+                      type: object
+        '401':
+          description: Unauthorized (missing or invalid admin API key)
+
   /api/admin/backfill:
     post:
       summary: Start a historical ledger backfill

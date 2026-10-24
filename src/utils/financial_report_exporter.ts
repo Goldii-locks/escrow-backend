@@ -16,6 +16,14 @@ import { digitCount, MAX_SAFE_DIGITS, parseIntegerInput,
   isAmountWithinRange, MAX_AMOUNT, MIN_AMOUNT,
 } from "./digit-limit-validator.js";
 import { divideHalfEven } from "./financial_report_math.js";
+import {
+  DEFAULT_TOKEN_DECIMALS,
+  DEFAULT_TOKEN_LABEL,
+  getTokenLabel,
+  isKnownTokenSymbol,
+  resolveTokenMetadata,
+  type TokenMetadataOptions,
+} from "./token-metadata.js";
 
 export const FINANCIAL_REPORT_EXPORTER_ERRORS = {
   EMPTY_ROWS: "FRE_EMPTY_ROWS",
@@ -497,14 +505,6 @@ export interface ReportAssetConfig {
   label: string;
 }
 
-const KNOWN_REPORT_ASSETS: Record<string, ReportAssetConfig> = {
-  XLM: { ticker: "XLM", decimals: 7, label: "Stellar Lumens" },
-  USDC: { ticker: "USDC", decimals: 7, label: "USD Coin (Stellar)" },
-  USDT: { ticker: "USDT", decimals: 7, label: "Tether (Stellar)" },
-  BTC: { ticker: "BTC", decimals: 7, label: "Bitcoin (Stellar)" },
-  ETH: { ticker: "ETH", decimals: 7, label: "Ether (Stellar)" },
-};
-
 export type ReportTickerResolution =
   | { known: true; ticker: string; config: ReportAssetConfig }
   | { known: false; ticker: string; config: ReportAssetConfig; fallback: true };
@@ -515,8 +515,8 @@ export type ReportTickerResolution =
  */
 export const DEFAULT_REPORT_ASSET_FALLBACK: ReportAssetConfig = {
   ticker: "UNKNOWN",
-  decimals: 7,
-  label: "Unknown Stellar Token",
+  decimals: DEFAULT_TOKEN_DECIMALS,
+  label: DEFAULT_TOKEN_LABEL,
 };
 
 export const REPORT_EXPORTER_ERRORS = {
@@ -535,6 +535,9 @@ export type ReportExporterErrorCode =
  * Never throws: unrecognised tickers yield `{ known: false, fallback: true }`
  * carrying the default configuration, so exports continue with a marked
  * fallback instead of crashing on novel token types.
+ *
+ * @deprecated Prefer `resolveReportToken`, which reads the symbol and the
+ * precision from the token contract itself.
  */
 export function resolveReportTicker(rawTicker: unknown): ReportTickerResolution {
   if (typeof rawTicker !== "string" || rawTicker.trim() === "") {
@@ -546,15 +549,43 @@ export function resolveReportTicker(rawTicker: unknown): ReportTickerResolution 
     };
   }
   const ticker = rawTicker.trim().toUpperCase();
-  const config = KNOWN_REPORT_ASSETS[ticker];
-  if (config !== undefined) {
-    return { known: true, ticker, config };
+  if (isKnownTokenSymbol(ticker)) {
+    return {
+      known: true,
+      ticker,
+      config: {
+        ticker,
+        decimals: DEFAULT_TOKEN_DECIMALS,
+        label: getTokenLabel(ticker),
+      },
+    };
   }
   return {
     known: false,
     ticker: rawTicker.trim(),
     config: { ...DEFAULT_REPORT_ASSET_FALLBACK, ticker: rawTicker.trim() },
     fallback: true,
+  };
+}
+
+/**
+ * Resolve the report configuration of a token contract address, reading the
+ * symbol and the precision from the contract itself (#699).
+ */
+export async function resolveReportToken(
+  tokenAddress: string,
+  options?: TokenMetadataOptions
+): Promise<ReportTickerResolution> {
+  const metadata = await resolveTokenMetadata(tokenAddress, options);
+  const ticker = metadata.symbol || DEFAULT_REPORT_ASSET_FALLBACK.ticker;
+  return {
+    known: true,
+    ticker,
+    config: {
+      ticker,
+      decimals: metadata.decimals,
+      label: metadata.name || getTokenLabel(ticker),
+    },
   };
 }
 
@@ -605,6 +636,9 @@ function parseReportAmount(
  * Resolve one transaction row: amount is validated and the ticker is
  * resolved (with fallback for unknown tickers). Unknown tickers are NOT an
  * error — the row carries `fallback: true` so the report can flag it.
+ *
+ * @deprecated Prefer `resolveReportRowForToken`, which resolves the asset from
+ * the token contract.
  */
 export function resolveReportRow(row: ReportTransactionRow): ResolveReportRowResult {
   if (row === null || typeof row !== "object") {
@@ -631,6 +665,54 @@ export function resolveReportRow(row: ReportTransactionRow): ResolveReportRowRes
       decimals: resolution.config.decimals,
       known: resolution.known,
       fallback: resolution.known ? false : true,
+      ...(row.txHash !== undefined ? { txHash: row.txHash } : {}),
+    },
+  };
+}
+
+/**
+ * Resolve one transaction row for a token contract: the amount is validated
+ * and the symbol/precision are read from the contract itself (#699).
+ */
+export async function resolveReportRowForToken(
+  row: ReportTransactionRow & { tokenAddress: string },
+  options?: TokenMetadataOptions
+): Promise<ResolveReportRowResult> {
+  if (row === null || typeof row !== "object") {
+    return {
+      ok: false,
+      error: "row must be a non-null object",
+      code: REPORT_EXPORTER_ERRORS.INVALID_ROW,
+    };
+  }
+  const parsed = parseReportAmount(row.amount);
+  if (!parsed.ok) {
+    return {
+      ok: false,
+      error: `amount: ${parsed.error}`,
+      code: REPORT_EXPORTER_ERRORS.INVALID_AMOUNT,
+    };
+  }
+
+  let resolution: ReportTickerResolution;
+  try {
+    resolution = await resolveReportToken(row.tokenAddress, options);
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+      code: REPORT_EXPORTER_ERRORS.INVALID_TICKER,
+    };
+  }
+
+  return {
+    ok: true,
+    row: {
+      ticker: resolution.ticker,
+      amount: parsed.value,
+      decimals: resolution.config.decimals,
+      known: true,
+      fallback: false,
       ...(row.txHash !== undefined ? { txHash: row.txHash } : {}),
     },
   };
@@ -726,7 +808,32 @@ export function formatReportRowForDb(row: ReportTransactionRow): FormatReportRow
   if (!resolved.ok) {
     return resolved;
   }
-  const { ticker, amount, decimals, fallback, txHash } = resolved.row;
+  return buildFormattedReportRow(resolved.row);
+}
+
+/**
+ * Format one transaction row for database storage using the precision read
+ * from the token contract (#699).
+ */
+export async function formatReportRowForDbForToken(
+  row: ReportTransactionRow & { tokenAddress: string },
+  options?: TokenMetadataOptions
+): Promise<FormatReportRowResult> {
+  const resolved = await resolveReportRowForToken(row, options);
+  if (!resolved.ok) {
+    return resolved;
+  }
+  return buildFormattedReportRow(resolved.row);
+}
+
+/**
+ * Render a resolved report row at the resolved precision and verify that no
+ * precision was lost on the way.
+ */
+function buildFormattedReportRow(
+  resolved: ResolvedReportRow
+): FormatReportRowResult {
+  const { ticker, amount, decimals, fallback, txHash } = resolved;
   const formatted = formatReportValueForDb(amount, decimals);
   if (!reportFormatPreservesPrecision(amount, formatted, decimals)) {
     return {

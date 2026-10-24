@@ -35,6 +35,7 @@ Express + TypeScript backend for the Soroban milestone escrow platform.
     - [POST /api/jobs/submit](#post-apijobssubmit)
   - [Admin API](#admin-api)
     - [GET /api/admin/indexer-status](#get-apiadminindexer-status)
+    - [GET /api/admin/webhook-subscriptions](#get-apiadminwebhook-subscriptions)
     - [POST /api/admin/backfill](#post-apiadminbackfill)
     - [GET /api/admin/backfill](#get-apiadminbackfill)
     - [GET /api/admin/contracts](#get-apiadmincontracts)
@@ -216,6 +217,12 @@ Submit a signed transaction to the Stellar network and return execution status.
 Retrieve indexer health, current ledger, event counters, uptime, and reconciliation status.
 - **Auth**: Admin API Key (`x-api-key: <ADMIN_API_KEY>` or `Bearer`)
 - **Response**: `{ success: true, lastIndexedLedger, totalEvents, uptimeSeconds, lastEventAt, eventsByType, reconciliation }`
+
+#### GET /api/admin/webhook-subscriptions
+
+Every webhook subscription, plus the `active` and `disabled` subsets. A subscription is auto-disabled after `WEBHOOK_DISABLE_AFTER` consecutive failed deliveries (#701); subscribing again re-enables it.
+- **Auth**: Admin API Key
+- **Response**: `{ success: true, subscriptions, active, disabled }`
 
 #### POST /api/admin/backfill
 
