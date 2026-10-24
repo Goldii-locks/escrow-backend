@@ -22,7 +22,9 @@ const { enqueueWebhookDelivery, resetWebhookDeliveryQueueForTests } = await impo
 const { default: logger } = await import("../src/utils/logger.js");
 
 const CONTRACT = "CA3D5K7UXYZ123456789012345678901234567890123456789012345678901";
-const HOOK = "https://subscriber.test/hook";
+// A public IP literal: the #605 delivery guard accepts it without a DNS
+// lookup, so the timing assertions below never wait on a real resolver.
+const HOOK = "https://93.184.215.14/hook";
 
 let testDb: Database.Database;
 /** Ledger of each event in the order the subscriber received it. */
