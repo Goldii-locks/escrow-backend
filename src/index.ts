@@ -1,4 +1,6 @@
-import dotenv from "dotenv";
+// #602: must be the first import. ES imports are evaluated before this
+// module's body, and several modules read process.env at top level.
+import "dotenv/config";
 import { createApp, assertProductionEnv } from "./app.js";
 import { validateConfigAtStartup } from "./config.js";
 import { runMigrations } from "./indexer/db.js";
@@ -24,8 +26,6 @@ process.on("uncaughtException", (err) => {
     error: formatError(err),
   });
 });
-
-dotenv.config();
 
 // Fail fast on malformed numeric env vars (RATE_LIMIT_MAX=100r, empty values,
 // NaN TTLs). Names the offending variable instead of booting into a hot
