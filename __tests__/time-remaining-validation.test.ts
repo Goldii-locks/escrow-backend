@@ -54,7 +54,8 @@ describe("GET /api/jobs/:contractId/milestones/:index/time-remaining", () => {
       .expect(200);
 
     expect(res.body).toEqual({ success: true, data: { secondsRemaining: 120 } });
-    expect(mockGetAccount).toHaveBeenCalled();
+    // Read-only simulation uses a local account: no getAccount RPC (#616).
+    expect(mockGetAccount).not.toHaveBeenCalled();
     expect(mockSimulateTransaction).toHaveBeenCalled();
   });
 

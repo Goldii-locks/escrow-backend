@@ -1,6 +1,7 @@
 import { Router } from "express";
 import type { Request, Response, NextFunction } from "express";
 import {
+  Account,
   Contract,
   Networks,
   TransactionBuilder,
@@ -87,6 +88,20 @@ const NETWORK_PASSPHRASE =
 // a 504 rather than hanging indefinitely. Default 10 s; override via env.
 const RPC_TIMEOUT_MS = parseInt(process.env.RPC_TIMEOUT_MS || "10000", 10);
 const server = new Server(RPC_URL, { timeout: RPC_TIMEOUT_MS });
+
+/**
+ * Source account for read-only simulations (#616). Simulation never checks
+ * the source sequence number, so a local Account needs no RPC getAccount
+ * lookup — and removes the hidden DEPLOYER_ADDRESS requirement that turned
+ * every read endpoint into a 500 when it was unset.
+ */
+export function simulationSource(): Account {
+  return new Account(
+    process.env.SIMULATION_SOURCE ||
+      "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+    "0",
+  );
+}
 
 /**
  * #692: Validate that the configured SOROBAN_NETWORK_PASSPHRASE matches the
@@ -596,7 +611,7 @@ async function handleReadOnlyQuery(req: Request, res: Response): Promise<void> {
 
   try {
     const contract = new Contract(contractId);
-    const account = await server.getAccount(process.env.DEPLOYER_ADDRESS || "");
+    const account = simulationSource();
     const tx = new TransactionBuilder(account, {
       fee: BASE_FEE,
       networkPassphrase: NETWORK_PASSPHRASE,
@@ -717,9 +732,7 @@ router.get(
     if (!requestPromise) {
       requestPromise = (async (): Promise<Record<string, unknown>> => {
         const contract = new Contract(contractId);
-        const account = await server.getAccount(
-          process.env.DEPLOYER_ADDRESS || "",
-        );
+        const account = simulationSource();
         const tx = new TransactionBuilder(account, {
           fee: BASE_FEE,
           networkPassphrase: NETWORK_PASSPHRASE,
@@ -802,7 +815,7 @@ router.get(
 
     try {
       const contract = new Contract(contractId);
-      const account = await server.getAccount(process.env.DEPLOYER_ADDRESS || "");
+      const account = simulationSource();
       const tx = new TransactionBuilder(account, {
         fee: BASE_FEE,
         networkPassphrase: NETWORK_PASSPHRASE,
@@ -894,7 +907,7 @@ router.get(
       // Fetch whitelisted tokens from contract
       const requestPromise = (async (): Promise<string[]> => {
         const contract = new Contract(contractId as string);
-        const account = await server.getAccount(process.env.DEPLOYER_ADDRESS || "");
+        const account = simulationSource();
         const tx = new TransactionBuilder(account, {
           fee: BASE_FEE,
           networkPassphrase: NETWORK_PASSPHRASE,
@@ -1073,7 +1086,7 @@ router.post(
 
     try {
       const contract = new Contract(contractId);
-      const account = await server.getAccount(process.env.DEPLOYER_ADDRESS || "");
+      const account = simulationSource();
       const tx = new TransactionBuilder(account, {
         fee: BASE_FEE,
         networkPassphrase: NETWORK_PASSPHRASE,
@@ -1253,23 +1266,18 @@ router.post(
             ...pathVars,
           });
 
-          const scArgs = (args || []).map((a: any) => {
+          const toScVal = (a: any): any => {
             if (a.type === "address") return Address.fromString(a.value).toScVal();
             if (a.type === "i128") return nativeToScVal(BigInt(a.value), { type: "i128" });
             if (a.type === "u32") return nativeToScVal(a.value, { type: "u32" });
             if (a.type === "u64") return nativeToScVal(BigInt(a.value), { type: "u64" });
             if (a.type === "bool") return nativeToScVal(a.value, { type: "bool" });
             if (a.type === "vec") {
-              const vecElements = a.value.map((item: any) => {
-                if (item.type === "i128") return nativeToScVal(BigInt(item.value), { type: "i128" });
-                if (item.type === "u32") return nativeToScVal(item.value, { type: "u32" });
-                if (item.type === "u64") return nativeToScVal(BigInt(item.value), { type: "u64" });
-                return nativeToScVal(item.value);
-              });
-              return nativeToScVal(vecElements);
+              return nativeToScVal(a.value.map((item: any) => toScVal(item)));
             }
             return nativeToScVal(a.value);
-          });
+          };
+          const scArgs = (args || []).map((a: any) => toScVal(a));
 
           const tx = new TransactionBuilder(account, {
             fee: BASE_FEE,
@@ -1598,7 +1606,7 @@ router.get(
       if (!requestPromise) {
         requestPromise = (async (): Promise<number> => {
           const contract = new Contract(contractId);
-          const account = await server.getAccount(process.env.DEPLOYER_ADDRESS || "");
+          const account = simulationSource();
           const tx = new TransactionBuilder(account, {
             fee: BASE_FEE,
             networkPassphrase: NETWORK_PASSPHRASE,
@@ -1674,6 +1682,8 @@ router.options("/:contractId/milestones/:index/claim-auto-release", claimAutoRel
 
 router.post(
   "/:contractId/milestones/:index/claim-auto-release",
+  claimAutoReleaseCors,
+  claimAutoReleaseSecurityHeaders,
   claimAutoReleaseRateLimit,
   validate(contractMilestoneParamsSchema, "params", (req) =>
     logger.warn("Invalid params for claim-auto-release", { params: req.params }),
