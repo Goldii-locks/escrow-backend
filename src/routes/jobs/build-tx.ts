@@ -3,7 +3,6 @@ import type { Request, Response } from "express";
 import {
   Contract,
   TransactionBuilder,
-  BASE_FEE,
   nativeToScVal,
   Address,
   buildTxRateLimit,
@@ -17,6 +16,8 @@ import {
   NETWORK_PASSPHRASE,
   server,
 } from "./shared.js";
+import { rejectedRequestLogMeta } from "../../utils/log-redaction.js";
+import { getInclusionFee } from "../../utils/fee-helper.js";
 
 import {
   buildTxCache,
@@ -41,8 +42,8 @@ router.post(
   // buildTxRateLimit supersedes the generic strictLimiter for this route.
   buildTxRateLimit,
   // Schema validation for POST /api/jobs/build-tx payload
-  validateWithFields(buildTxBodySchema, "body", (req) =>
-    logger.warn("Invalid build-tx request body", { body: req.body }),
+  validateWithFields(buildTxBodySchema, "body", (req, error) =>
+    logger.warn("Invalid build-tx request body", rejectedRequestLogMeta(req, error)),
   ),
   async (req: Request, res: Response) => {
     const { contractId, method, args, sourceAddress } = req.body;
@@ -141,11 +142,12 @@ router.post(
             ...pathVars,
           });
 
+          const fee = await getInclusionFee(server);
           logger.debug("Building Stellar transaction for build-tx", {
             traceId,
             ...pathVars,
             method,
-            fee: BASE_FEE,
+            fee,
             timeout: UNSIGNED_TX_TIMEOUT_S,
           });
           const contract = new Contract(contractId as string);
@@ -173,7 +175,7 @@ router.post(
           const scArgs = (args || []).map((a: any) => toScVal(a));
 
           const tx = new TransactionBuilder(account, {
-            fee: BASE_FEE,
+            fee,
             networkPassphrase: NETWORK_PASSPHRASE,
           })
             .addOperation(contract.call(method, ...scArgs))

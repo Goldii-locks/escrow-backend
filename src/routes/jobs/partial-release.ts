@@ -3,7 +3,6 @@ import type { Request, Response } from "express";
 import {
   Contract,
   TransactionBuilder,
-  BASE_FEE,
   nativeToScVal,
   Address,
   partialReleaseRateLimit,
@@ -18,6 +17,8 @@ import {
   NETWORK_PASSPHRASE,
   server,
 } from "./shared.js";
+import { rejectedRequestLogMeta } from "../../utils/log-redaction.js";
+import { getInclusionFee } from "../../utils/fee-helper.js";
 
 import {
   partialReleaseCache,
@@ -51,8 +52,8 @@ router.post(
   validateWithFields(contractMilestoneParamsSchema, "params", (req) =>
     logger.warn("Invalid params for partial-release", { params: req.params }),
   ),
-  validateWithFields(partialReleaseBodySchema, "body", (req) =>
-    logger.warn("Invalid body for partial-release", { body: req.body }),
+  validateWithFields(partialReleaseBodySchema, "body", (req, error) =>
+    logger.warn("Invalid body for partial-release", rejectedRequestLogMeta(req, error)),
   ),
   async (req: Request, res: Response) => {
     const traceId = randomUUID();
@@ -129,7 +130,7 @@ router.post(
           const amountNum = BigInt(amount);
 
           const tx = new TransactionBuilder(account, {
-            fee: BASE_FEE,
+            fee: await getInclusionFee(server),
             networkPassphrase: NETWORK_PASSPHRASE,
           })
             .addOperation(contract.call(

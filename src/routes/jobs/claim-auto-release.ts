@@ -3,7 +3,6 @@ import type { Request, Response } from "express";
 import {
   Contract,
   TransactionBuilder,
-  BASE_FEE,
   nativeToScVal,
   Address,
   claimAutoReleaseRateLimit,
@@ -17,6 +16,8 @@ import {
   NETWORK_PASSPHRASE,
   server,
 } from "./shared.js";
+import { rejectedRequestLogMeta } from "../../utils/log-redaction.js";
+import { getInclusionFee } from "../../utils/fee-helper.js";
 
 import {
   claimAutoReleaseCache,
@@ -43,8 +44,8 @@ router.post(
   validate(contractMilestoneParamsSchema, "params", (req) =>
     logger.warn("Invalid params for claim-auto-release", { params: req.params }),
   ),
-  validate(claimAutoReleaseBodySchema, "body", (req) =>
-    logger.warn("Invalid body for claim-auto-release", { body: req.body }),
+  validate(claimAutoReleaseBodySchema, "body", (req, error) =>
+    logger.warn("Invalid body for claim-auto-release", rejectedRequestLogMeta(req, error)),
   ),
   async (req: Request, res: Response) => {
     const contractId = req.params.contractId as string;
@@ -131,10 +132,11 @@ router.post(
       });
 
       const requestPromise = (async (): Promise<string> => {
+        const fee = await getInclusionFee(server);
         logger.debug("Building Stellar transaction for claim auto-release", {
           traceId,
           ...pathVars,
-          fee: BASE_FEE,
+          fee,
           timeout: UNSIGNED_TX_TIMEOUT_S,
         });
         const contract = new Contract(contractId);
@@ -143,7 +145,7 @@ router.post(
         logger.debug("Stellar account fetched", { traceId, ...pathVars });
 
         const tx = new TransactionBuilder(account, {
-          fee: BASE_FEE,
+          fee,
           networkPassphrase: NETWORK_PASSPHRASE,
         })
           .addOperation(

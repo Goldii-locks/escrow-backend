@@ -1,12 +1,26 @@
 import { Router } from "express";
 import type { Request, Response } from "express";
 import {
-  Contract, TransactionBuilder, BASE_FEE, Address, jobWhitelistRateLimit,
-  whitelistUpdateRateLimit, jobContractCors, jobContractSecurityHeaders, sendError,
-  sendSuccess, validate, contractIdParamsSchema, whitelistParamsSchema,
-  whitelistUpdateRequestSchema, logger, NETWORK_PASSPHRASE, server,
-  simulationSource
+  Contract,
+  TransactionBuilder,
+  Address,
+  jobWhitelistRateLimit,
+  whitelistUpdateRateLimit,
+  jobContractCors,
+  jobContractSecurityHeaders,
+  sendError,
+  sendSuccess,
+  validate,
+  contractIdParamsSchema,
+  whitelistParamsSchema,
+  whitelistUpdateRequestSchema,
+  logger,
+  NETWORK_PASSPHRASE,
+  server,
+  simulationSource,
 } from "./shared.js";
+import { rejectedRequestLogMeta } from "../../utils/log-redaction.js";
+import { getInclusionFee } from "../../utils/fee-helper.js";
 import type {
   NextFunction, UpdateWhitelistBody, WhitelistUpdateBody, WhitelistUpdateRequestBody,
 } from "./shared.js";
@@ -64,7 +78,7 @@ router.get(
         const contract = new Contract(contractId as string);
         const account = simulationSource();
         const tx = new TransactionBuilder(account, {
-          fee: BASE_FEE,
+          fee: await getInclusionFee(server),
           networkPassphrase: NETWORK_PASSPHRASE,
         })
           .addOperation(contract.call("get_whitelisted_tokens"))
@@ -163,8 +177,8 @@ router.post(
   validate(contractIdParamsSchema, "params", (req) =>
     logger.warn("Invalid contractId provided for whitelist update", { contractId: req.params.contractId }),
   ),
-  validate(whitelistUpdateRequestSchema, "body", (req) =>
-    logger.warn("Invalid body provided for whitelist update", { body: req.body }),
+  validate(whitelistUpdateRequestSchema, "body", (req, error) =>
+    logger.warn("Invalid body provided for whitelist update", rejectedRequestLogMeta(req, error)),
   ),
   async (req: Request, res: Response) => {
     const contractId = req.params.contractId as string;
@@ -200,7 +214,7 @@ router.post(
             : "add_whitelisted_token";
 
         const tx = new TransactionBuilder(account, {
-          fee: BASE_FEE,
+          fee: await getInclusionFee(server),
           networkPassphrase: NETWORK_PASSPHRASE,
         })
           .addOperation(
@@ -247,7 +261,7 @@ router.post(
       const contract = new Contract(contractId);
       const account = simulationSource();
       const tx = new TransactionBuilder(account, {
-        fee: BASE_FEE,
+        fee: await getInclusionFee(server),
         networkPassphrase: NETWORK_PASSPHRASE,
       })
         .addOperation(contract.call("get_whitelisted_tokens"))

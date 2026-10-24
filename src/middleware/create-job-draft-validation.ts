@@ -5,6 +5,7 @@ import {
 } from "../schemas/jobs.js";
 import { validate } from "./validate.js";
 import logger from "../utils/logger.js";
+import { rejectedRequestLogMeta } from "../utils/log-redaction.js";
 
 /**
  * Field names used by the legacy `*Address` naming variant of the
@@ -49,7 +50,8 @@ export function createJobDraftValidation(
     ? createJobDraftLegacyBodySchema
     : createJobDraftBodySchema;
 
-  validate(schema, "body", (r) =>
-    logger.warn("Invalid create-job-draft request body", { body: r.body }),
+  // Log the body's shape only, never its values (#680).
+  validate(schema, "body", (r, error) =>
+    logger.warn("Invalid create-job-draft request body", rejectedRequestLogMeta(r, error)),
   )(req, res, next);
 }

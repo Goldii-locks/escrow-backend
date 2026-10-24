@@ -13,6 +13,7 @@ import {
   NETWORK_PASSPHRASE,
   server,
 } from "./shared.js";
+import { rejectedRequestLogMeta, xdrLogMeta } from "../../utils/log-redaction.js";
 
 import {
   submitCache,
@@ -35,10 +36,12 @@ router.post(
   submitCors,
   submitSecurityHeaders,
   submitRateLimit,
-  validate(submitBodySchema, "body", (req) =>
+  // A signed XDR is a replayable transaction: log its length and a hash
+  // prefix only, never the envelope or the rest of the body (#680).
+  validate(submitBodySchema, "body", (req, error) =>
     logger.warn("Invalid submit request body", {
-      body: req.body,
-      xdrLength: typeof req.body?.signedXdr === "string" ? req.body.signedXdr.length : undefined,
+      ...rejectedRequestLogMeta(req, error),
+      ...xdrLogMeta(req.body?.signedXdr),
     }),
   ),
   async (req: Request, res: Response) => {
@@ -48,7 +51,7 @@ router.post(
 
     logger.info("Submit transaction request received", {
       traceId,
-      xdrLength: signedXdr.length,
+      ...xdrLogMeta(signedXdr),
       ...(sourceAddress && { sourceAddress }),
     });
 
