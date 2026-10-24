@@ -2,8 +2,14 @@ import { jest } from "@jest/globals";
 import request from "supertest";
 import express from "express";
 import { autoAuth, TEST_API_KEY } from "./helpers/api-key-helper.js";
+import { testAddress, tokenVecScVal } from "./helpers/scval-fixtures.js";
 import { resetJobWhitelistRateLimitBuckets } from "../src/middleware/job-contract-rate-limit.js";
 
+const TOKEN1 = testAddress(11);
+const TOKEN2 = testAddress(12);
+const TOKEN_A = testAddress(17);
+const TOKEN_B = testAddress(18);
+const TOKEN_C = testAddress(19);
 const VALID_CONTRACT =
   "CDD5WKK3WT3QVKXMXTJNDIXE4T73FK6GGXDSD6UTJAH6YYZU52SQ4MUH";
 
@@ -67,12 +73,7 @@ describe("GET /api/jobs/:contractId/whitelist – Robust Error Handling (Issue #
 
   describe("Happy path: valid contractId returns whitelist with 200", () => {
     it("returns 200 with successful token list", async () => {
-      const vec = {
-        forEach: (fn: (item: unknown) => void) => {
-          fn({ toString: () => "TOKEN1" });
-          fn({ toString: () => "TOKEN2" });
-        },
-      };
+      const vec = tokenVecScVal(TOKEN1, TOKEN2);
       mockSimulateTransaction.mockResolvedValue({
         result: { retval: vec },
       });
@@ -83,18 +84,12 @@ describe("GET /api/jobs/:contractId/whitelist – Robust Error Handling (Issue #
 
       expect(res.body).toEqual({
         success: true,
-        data: { tokens: ["TOKEN1", "TOKEN2"] },
+        data: { tokens: [TOKEN1, TOKEN2] },
       });
     });
 
     it("logs success with correct tokenCount", async () => {
-      const vec = {
-        forEach: (fn: (item: unknown) => void) => {
-          fn({ toString: () => "A" });
-          fn({ toString: () => "B" });
-          fn({ toString: () => "C" });
-        },
-      };
+      const vec = tokenVecScVal(TOKEN_A, TOKEN_B, TOKEN_C);
       mockSimulateTransaction.mockResolvedValue({
         result: { retval: vec },
       });
@@ -582,7 +577,7 @@ describe("GET /api/jobs/:contractId/whitelist – Robust Error Handling (Issue #
 
       // Second request should not hang or reuse the failed promise
       mockSimulateTransaction.mockResolvedValue({
-        result: { retval: { forEach: () => {} } },
+        result: { retval: tokenVecScVal() },
       });
 
       const res2 = await request(buildApp())
@@ -651,9 +646,7 @@ describe("GET /api/jobs/:contractId/whitelist – Robust Error Handling (Issue #
   // The whitelist is a public on-chain list and the browser cannot hold a
   // secret, so the route deliberately takes no API key (#693).
   describe("API key not required (#693)", () => {
-    const tokens = {
-      forEach: (fn: (item: unknown) => void) => fn({ toString: () => "TOKEN1" }),
-    };
+    const tokens = tokenVecScVal(TOKEN1);
 
     it("returns 200 when API_KEY is configured but no key is sent", async () => {
       process.env.API_KEY = "secret-key";
@@ -663,7 +656,7 @@ describe("GET /api/jobs/:contractId/whitelist – Robust Error Handling (Issue #
         .get(`/api/jobs/${VALID_CONTRACT}/whitelist`)
         .expect(200);
 
-      expect(res.body).toEqual({ success: true, data: { tokens: ["TOKEN1"] } });
+      expect(res.body).toEqual({ success: true, data: { tokens: [TOKEN1] } });
     });
 
     it("ignores a wrong x-api-key header instead of rejecting it", async () => {
