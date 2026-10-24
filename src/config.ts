@@ -3,7 +3,7 @@ import { z } from "zod";
 // ---------------------------------------------------------------------------
 // Centralized numeric environment-variable parsing (#624)
 // ---------------------------------------------------------------------------
-// Bare `parseInt(process.env.X || "default", 10)` silently turns typos such as
+// Bare `parseInt(process.env.<NAME> || "default", 10)` silently turns typos such as
 // RATE_LIMIT_MAX=100r (or an empty-but-set value) into NaN or a truncated
 // number. NodeCache({ stdTTL: NaN }) and setTimeout(fn, NaN) then misbehave
 // in hard-to-diagnose ways (a NaN poll interval hot-loops against the RPC).

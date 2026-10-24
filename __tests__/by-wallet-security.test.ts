@@ -1,6 +1,6 @@
 import request from "supertest";
 import express from "express";
-import { autoAuth, TEST_API_KEY } from "./helpers/api-key-helper.js";
+import { autoAuth } from "./helpers/api-key-helper.js";
 import { jest } from "@jest/globals";
 
 // Mock the indexer DB so we don't need a real SQLite connection for security tests

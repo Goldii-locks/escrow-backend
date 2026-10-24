@@ -12,8 +12,6 @@ import {
   getHistoricalEventCounts,
   getLastIndexedLedger,
   HistoricalRangeError,
-  getShippedMigrationVersions,
-  SCHEMA_MANAGER_INDEXES,
   type EventRow,
 } from "../src/indexer/db.js";
 import { jest } from "@jest/globals";

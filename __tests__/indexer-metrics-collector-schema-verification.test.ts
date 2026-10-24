@@ -2,7 +2,6 @@ import Database from "better-sqlite3";
 import {
   setDb,
   runMigrations,
-  closeDb,
 } from "../src/indexer/db.js";
 import {
   validateIndexerMetricsSchema,

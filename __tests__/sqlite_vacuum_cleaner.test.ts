@@ -8,13 +8,7 @@ import {
   runVacuumCleanup,
   ERROR_CODES,
   DEFAULT_RETENTION_DAYS,
-  isVacuumRetryableError,
-  computeVacuumBackoffMs,
-  withVacuumRetrySync,
-  withVacuumRetry,
-  runVacuumWithRetry,
   runVacuumCleanupWithRetry,
-  DEFAULT_VACUUM_RETRY_CONFIG,
 } from "../src/indexer/sqlite_vacuum_cleaner.js";
 import logger from "../src/utils/logger.js";
 
