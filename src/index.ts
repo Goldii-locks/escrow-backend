@@ -1,13 +1,20 @@
 import dotenv from "dotenv";
 import { createApp, assertProductionEnv } from "./app.js";
+import { validateConfigAtStartup } from "./config.js";
 import { runMigrations } from "./indexer/db.js";
 import { startPoller } from "./indexer/poller.js";
 import { startReconciliationJob } from "./indexer/reconciliation.js";
 import { markIndexerStarted } from "./indexer/status.js";
 import { assertRpcNetworkMatches } from "./routes/jobs.js";
+import { registerShutdownHandlers } from "./shutdown.js";
 import logger from "./utils/logger.js";
 
 dotenv.config();
+
+// Fail fast on malformed numeric env vars (RATE_LIMIT_MAX=100r, empty values,
+// NaN TTLs). Names the offending variable instead of booting into a hot
+// poll loop or a broken rate limiter.
+validateConfigAtStartup();
 
 // Fail fast when required production env vars are missing.
 assertProductionEnv();
@@ -35,8 +42,12 @@ assertRpcNetworkMatches()
     process.exit(1);
   });
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   logger.info("Escrow backend started", { port: PORT });
 });
+
+// #623: drain in-flight work (poller, HTTP, SQLite) on SIGTERM/SIGINT
+// instead of exiting mid-transaction.
+registerShutdownHandlers(server);
 
 export default app;

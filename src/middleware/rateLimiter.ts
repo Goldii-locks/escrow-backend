@@ -1,5 +1,6 @@
 import type { NextFunction, Request, Response } from "express";
 import rateLimit from "express-rate-limit";
+import { config } from "../config.js";
 import logger from "../utils/logger.js";
 
 type RateBucket = {
@@ -7,25 +8,24 @@ type RateBucket = {
   resetAt: number;
 };
 
-const windowMs = parseInt(process.env.RATE_LIMIT_WINDOW_MS || "60000", 10);
+const windowMs = config.rateLimitWindowMs;
 
 const generalMax =
-  process.env.NODE_ENV === "test"
-    ? 0
-    : parseInt(process.env.RATE_LIMIT_MAX || "100", 10);
+  process.env.NODE_ENV === "test" ? 0 : config.rateLimitMax;
 
 const strictMax =
-  process.env.NODE_ENV === "test"
-    ? 0
-    : parseInt(process.env.RATE_LIMIT_MAX_STRICT || "10", 10);
+  process.env.NODE_ENV === "test" ? 0 : config.rateLimitMaxStrict;
 
 const walletLookupBuckets = new Map<string, RateBucket>();
 
 const rateLimitMessage = { success: false, error: "Too many requests, please try again later" };
 
 function resolveWalletLookupMax(): number {
-  const configured = Number(process.env.BY_WALLET_RATE_LIMIT_MAX ?? "30");
-  return Number.isFinite(configured) && configured > 0 ? configured : 30;
+  try {
+    return config.byWalletRateLimitMax;
+  } catch {
+    return 30;
+  }
 }
 
 export function resetByWalletRateLimitBuckets(): void {

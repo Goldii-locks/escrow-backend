@@ -23,6 +23,7 @@ import {
 import { deliverWebhooks } from "./webhook-delivery.js";
 import { fetchEventsWithRetry } from "./event_type_filter.js";
 import { formatError } from "../utils/format-error.js";
+import { config } from "../config.js";
 import logger from "../utils/logger.js";
 
 const RPC_URL =
@@ -40,19 +41,10 @@ const RPC_URL =
 const IS_TEST_ENV = process.env.NODE_ENV === "test";
 
 const rpcClient = new RpcPollerClient(RPC_URL, {
-  maxRetries: parseInt(process.env.INDEXER_RPC_MAX_RETRIES || "5", 10),
-  initialBackoffMs: parseInt(
-    process.env.INDEXER_RPC_INITIAL_BACKOFF_MS || (IS_TEST_ENV ? "1" : "1000"),
-    10,
-  ),
-  backoffMultiplier: parseInt(
-    process.env.INDEXER_RPC_BACKOFF_MULTIPLIER || "2",
-    10,
-  ),
-  maxBackoffMs: parseInt(
-    process.env.INDEXER_RPC_MAX_BACKOFF_MS || (IS_TEST_ENV ? "5" : "30000"),
-    10,
-  ),
+  maxRetries: config.indexerRpcMaxRetries,
+  initialBackoffMs: config.indexerRpcInitialBackoffMs,
+  backoffMultiplier: config.indexerRpcBackoffMultiplier,
+  maxBackoffMs: config.indexerRpcMaxBackoffMs,
 });
 
 // ---------------------------------------------------------------------------
@@ -64,18 +56,8 @@ const rpcClient = new RpcPollerClient(RPC_URL, {
 
 const failureMonitor = new IndexerRunnerFailureMonitor({
   name: "indexer_runner",
-  failureThreshold: parseInt(
-    process.env.INDEXER_RUNNER_FAILURE_THRESHOLD ||
-      process.env.POLLER_FAILURE_THRESHOLD ||
-      "3",
-    10,
-  ),
-  stallThresholdMs: parseInt(
-    process.env.INDEXER_RUNNER_STALL_THRESHOLD_MS ||
-      process.env.POLLER_STALL_THRESHOLD_MS ||
-      "120000",
-    10,
-  ),
+  failureThreshold: config.indexerRunnerFailureThreshold,
+  stallThresholdMs: config.indexerRunnerStallThresholdMs,
 });
 
 export function getConsecutiveFailures(): number {
@@ -95,11 +77,8 @@ export function resetFailureState(): void {
 // Dynamic poll interval (#265)
 // ---------------------------------------------------------------------------
 
-const POLL_INTERVAL_MIN_MS = parseInt(process.env.POLL_INTERVAL_MS || "15000", 10);
-const POLL_INTERVAL_MAX_MS = parseInt(
-  process.env.POLL_INTERVAL_MAX_MS || "120000",
-  10,
-);
+const POLL_INTERVAL_MIN_MS = config.pollIntervalMs;
+const POLL_INTERVAL_MAX_MS = config.pollIntervalMaxMs;
 const POLL_INTERVAL_BACKOFF = 2;
 
 /**
@@ -161,10 +140,8 @@ function toEventRow(event: any, fallbackContractId: string): EventRow {
 // Poll diagnostics (#270)
 // ---------------------------------------------------------------------------
 
-const POLL_DIAGNOSTIC_LOG_MIN_INTERVAL_MS = parseInt(
-  process.env.POLL_DIAGNOSTIC_LOG_MIN_INTERVAL_MS || "60000",
-  10,
-);
+const POLL_DIAGNOSTIC_LOG_MIN_INTERVAL_MS =
+  config.pollDiagnosticLogMinIntervalMs;
 let lastPollDiagnosticAt = 0;
 let stallWindowReported = false;
 
@@ -242,10 +219,7 @@ function logPollDiagnostics(
 // ---------------------------------------------------------------------------
 
 /** Upper bound on how many ledgers a single backfill may cover. */
-export const MAX_LEDGERS_PER_IMPORT = parseInt(
-  process.env.MAX_LEDGERS_PER_IMPORT || "10000",
-  10,
-);
+export const MAX_LEDGERS_PER_IMPORT = config.maxLedgersPerImport;
 
 const HISTORICAL_PAGE_SIZE = 100;
 
@@ -444,12 +418,13 @@ export async function pollEvents(): Promise<boolean> {
 
   if (lastSuccessAt) {
     const elapsedMsSinceLastSuccess = Date.now() - lastSuccessAt;
-    const stallThresholdMs = parseInt(
+    // Prefer an explicitly configured stall threshold; otherwise follow the
+    // failure monitor's own (possibly test-injected) threshold.
+    const stallThresholdMs =
       process.env.INDEXER_RUNNER_STALL_THRESHOLD_MS ||
-        process.env.POLLER_STALL_THRESHOLD_MS ||
-        String(failureMonitor.stallThresholdMs),
-      10,
-    );
+      process.env.POLLER_STALL_THRESHOLD_MS
+        ? config.indexerRunnerStallThresholdMs
+        : failureMonitor.stallThresholdMs;
     stallWindow = { elapsedMsSinceLastSuccess, stallThresholdMs };
 
     if (elapsedMsSinceLastSuccess > stallThresholdMs) {
