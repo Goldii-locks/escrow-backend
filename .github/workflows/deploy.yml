@@ -31,7 +31,7 @@ jobs:
     outputs:
       image_tag: ${{ steps.meta.outputs.tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - id: meta
         run: echo "tag=${GITHUB_SHA::12}-${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
