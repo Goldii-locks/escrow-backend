@@ -14,6 +14,7 @@ import {
 } from "../indexer/db.js";
 import { deliverWebhooks } from "../indexer/webhook-delivery.js";
 import logger from "./logger.js";
+import { validateWebhookUrl } from "./webhook-url-guard.js";
 
 export const WEBHOOK_DISPATCHER_ROUTE_PREFIX = "/api/webhooks";
 
@@ -94,6 +95,21 @@ export function dispatchSubscribe(input: SubscribeInput): SubscribeResult {
       error,
     });
     return { ok: false, status: 400, error, traceId };
+  }
+
+  // Reject non-https schemes, private/loopback/link-local/metadata IP
+  // literals and localhost before the URL is ever stored (#605). Delivery
+  // re-checks the resolved address, because DNS can be re-pointed later.
+  const urlCheck = validateWebhookUrl(input.webhook_url);
+  if (!urlCheck.ok) {
+    logger.debug("webhook_dispatcher subscribe response sent", {
+      traceId,
+      route,
+      status: 400,
+      success: false,
+      error: urlCheck.error,
+    });
+    return { ok: false, status: 400, error: urlCheck.error, traceId };
   }
 
   const normalized = normalizeEventTypes(input.event_types);

@@ -33,6 +33,9 @@ let captured: Captured[];
 let responses: number[];
 
 beforeAll(async () => {
+  // The receiver below listens on loopback, which the #605 URL guard rejects
+  // unless this test-only override is set (honoured only under NODE_ENV=test).
+  process.env.WEBHOOK_ALLOW_PRIVATE_HOSTS = "1";
   testDb = new Database(":memory:");
   setDb(testDb);
   initSchema();
@@ -51,6 +54,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  delete process.env.WEBHOOK_ALLOW_PRIVATE_HOSTS;
   await new Promise<void>((resolve) => server.close(() => resolve()));
   testDb.close();
 });
