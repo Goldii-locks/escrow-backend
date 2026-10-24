@@ -76,6 +76,23 @@ import logger from "../../utils/logger.js";
 import { isValidStellarContractId } from "../../utils/stellar.js";
 import { randomUUID } from "crypto";
 
+/**
+ * Truncate a Stellar address to `GABC…WXYZ` for info-level logs.
+ *
+ * Full addresses must never appear at `info` (the production log level)
+ * because the HTTP request logger records the caller's IP on every request,
+ * so logging the full address alongside it builds a durable IP↔wallet map.
+ * Four leading + four trailing characters are enough for same-session
+ * correlation without exposing the complete key.
+ *
+ * Pass the raw value to `logger.debug` wherever the full address is needed
+ * for post-incident debugging.
+ */
+export function maskAddress(address: string | undefined | null): string {
+  if (!address || address.length < 10) return address ?? "";
+  return `${address.slice(0, 4)}\u2026${address.slice(-4)}`;
+}
+
 export const CONTRACT_ID = process.env.CONTRACT_ID || "";
 const RPC_URL =
   process.env.SOROBAN_RPC_URL || "https://soroban-testnet.stellar.org";

@@ -26,7 +26,7 @@ router.use(timeRemainingRouter);
 router.use(claimAutoReleaseRouter);
 router.use(submitRouter);
 
-export { assertRpcNetworkMatches } from "./jobs/shared.js";
+export { assertRpcNetworkMatches, maskAddress } from "./jobs/shared.js";
 export {
   whitelistCache,
   resetWhitelistCache,

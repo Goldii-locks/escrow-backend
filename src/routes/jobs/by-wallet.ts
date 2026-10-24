@@ -10,6 +10,7 @@ import {
   byWalletParamsSchema,
   byWalletQuerySchema,
   logger,
+  maskAddress,
 } from "./shared.js";
 import type {
   RequestWithValidatedQuery,
@@ -55,9 +56,11 @@ router.get(
       const { page, limit } = (req as RequestWithValidatedQuery)
         .validatedQuery as ByWalletQuery;
 
-      logger.info("Fetching jobs by wallet", { address, page, limit });
+      logger.info("Fetching jobs by wallet", { address: maskAddress(address), page, limit });
+      logger.debug("Fetching jobs by wallet (full address)", { address, page, limit });
       const result = await getJobsByWallet(address, page, limit);
-      logger.info("Jobs lookup completed", { address, page, limit, total: result.total });
+      logger.info("Jobs lookup completed", { address: maskAddress(address), page, limit, total: result.total });
+      logger.debug("Jobs lookup completed (full address)", { address, page, limit, total: result.total });
       sendSuccess(res, result);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);

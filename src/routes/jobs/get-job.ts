@@ -21,6 +21,7 @@ import {
   parseJobFromResult,
   convertScValToNativeStrings,
   simulationSource,
+  maskAddress,
 } from "./shared.js";
 import type {
   RequestWithValidatedQuery,
@@ -267,12 +268,19 @@ router.get(
 
       logger.info("Job fetched successfully", {
         contractId,
+        client: maskAddress(job.client),
+        freelancer: maskAddress(job.freelancer),
+        arbiter: maskAddress(job.arbiter),
+        token: maskAddress(job.token),
+        funded: job.funded,
+        milestoneCount: job.milestones.length,
+      });
+      logger.debug("Job fetched successfully (full addresses)", {
+        contractId,
         client: job.client,
         freelancer: job.freelancer,
         arbiter: job.arbiter,
         token: job.token,
-        funded: job.funded,
-        milestoneCount: job.milestones.length,
       });
       sendSuccess(res, job);
     } catch (err: any) {
