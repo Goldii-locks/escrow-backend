@@ -1,4 +1,4 @@
-import { getDb } from "./db.js";
+import { getDb, eventDedupeId } from "./db.js";
 import logger from "../utils/logger.js";
 import { FailureMonitor } from "./failure-monitor.js";
 
@@ -421,6 +421,8 @@ export interface DuplicatePreventionEventInput {
   ledgerSequence: number;
   timestamp: number;
   dataJson: string;
+  /** Stable RPC event id; dedupe key via UNIQUE(event_id) (#607). */
+  eventId?: string;
 }
 
 /** Simulated RPC notification shape for integration tests and ingest helpers (#293). */
@@ -506,8 +508,8 @@ function insertEventsWithDedupCore(
   const write = db.transaction(() => {
     const insertStmt = db.prepare(`
       INSERT OR IGNORE INTO events
-      (contract_id, event_type, ledger_sequence, timestamp, data_json)
-      VALUES (?, ?, ?, ?, ?)
+      (contract_id, event_type, ledger_sequence, timestamp, data_json, event_id)
+      VALUES (?, ?, ?, ?, ?, ?)
     `);
 
     for (const ev of events) {
@@ -517,6 +519,7 @@ function insertEventsWithDedupCore(
         ev.ledgerSequence,
         ev.timestamp,
         ev.dataJson,
+        eventDedupeId(ev),
       );
       if (result.changes > 0) {
         newEventsInserted++;

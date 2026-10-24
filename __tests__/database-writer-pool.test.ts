@@ -618,9 +618,9 @@ describe("DatabaseWriterPool – Concurrent Write Operations", () => {
       return createSqlOperation(
         `rpc-event-${contractId}-${ledgerSequence}`,
         `INSERT OR IGNORE INTO events
-           (contract_id, event_type, ledger_sequence, timestamp, data_json)
-         VALUES (?, ?, ?, ?, ?)`,
-        [contractId, eventType, ledgerSequence, timestamp, dataJson],
+           (contract_id, event_type, ledger_sequence, timestamp, data_json, event_id)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [contractId, eventType, ledgerSequence, timestamp, dataJson, `rpc-${contractId}-${ledgerSequence}-${eventType}`],
       );
     }
 

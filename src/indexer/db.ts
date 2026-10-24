@@ -307,6 +307,53 @@ const MIGRATIONS: Migration[] = [
         ON webhook_deliveries (event_id);
     `,
   },
+  {
+    version: 13,
+    description: "dedupe events by RPC event id (#607)",
+    up: `
+      CREATE TABLE events_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        contract_id TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        ledger_sequence INTEGER NOT NULL,
+        timestamp INTEGER,
+        data_json TEXT NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        event_id TEXT,
+        UNIQUE(event_id)
+      );
+      INSERT INTO events_new
+        (id, contract_id, event_type, ledger_sequence, timestamp, data_json, created_at, event_id)
+        SELECT id, contract_id, event_type, ledger_sequence, timestamp, data_json, created_at,
+          ('legacy-' || id)
+        FROM events;
+      DROP TABLE events;
+      ALTER TABLE events_new RENAME TO events;
+
+      CREATE INDEX IF NOT EXISTS idx_events_contract_id
+        ON events (contract_id);
+      CREATE INDEX IF NOT EXISTS idx_events_ledger_sequence
+        ON events (ledger_sequence);
+      CREATE INDEX IF NOT EXISTS idx_events_contract_ledger
+        ON events (contract_id, ledger_sequence);
+      CREATE INDEX IF NOT EXISTS idx_events_contract_type
+        ON events (contract_id, event_type);
+      CREATE INDEX IF NOT EXISTS idx_events_ledger_event_type
+        ON events (ledger_sequence, event_type);
+      CREATE INDEX IF NOT EXISTS idx_events_created_at
+        ON events (created_at);
+      CREATE INDEX IF NOT EXISTS idx_events_contract_type_ledger
+        ON events (contract_id, event_type, ledger_sequence);
+      CREATE INDEX IF NOT EXISTS idx_events_created_at_ledger
+        ON events (created_at, ledger_sequence);
+      CREATE INDEX IF NOT EXISTS idx_events_ledger_created_at
+        ON events (ledger_sequence, created_at);
+      CREATE INDEX IF NOT EXISTS idx_events_event_type
+        ON events (event_type);
+      CREATE INDEX IF NOT EXISTS idx_events_contract_event_type
+        ON events (contract_id, event_type);
+    `,
+  },
 ];
 
 /** Index names created by the SQLite schema manager lookup-index migration (#259). */
@@ -651,6 +698,7 @@ const EXPECTED_TABLES: Record<string, string[]> = {
     "timestamp",
     "data_json",
     "created_at",
+    "event_id",
   ],
   indexer_state: ["key", "value"],
   monitored_contracts: [
@@ -883,6 +931,47 @@ export function setLastIndexedLedger(seq: number) {
   updateTransaction();
 }
 
+export interface SkippedLedgerRange {
+  from: number;
+  to: number;
+  clampedTo: number;
+  recordedAt: string;
+}
+
+/**
+ * Record a ledger window skipped because the RPC no longer retains it (#609).
+ * Stored in indexer_state so an operator can backfill from an archive RPC.
+ */
+export function recordSkippedLedgerRange(from: number, to: number): SkippedLedgerRange {
+  const clampedTo = to + 1;
+  const entry: SkippedLedgerRange = {
+    from,
+    to,
+    clampedTo,
+    recordedAt: new Date().toISOString(),
+  };
+  const db = getDb();
+  db.prepare(
+    `INSERT INTO indexer_state (key, value) VALUES ('skipped_ledger_range', ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value`
+  ).run(JSON.stringify(entry));
+  return entry;
+}
+
+/** Last retention-gap window recorded by the poller, if any (#609). */
+export function getSkippedLedgerRange(): SkippedLedgerRange | null {
+  try {
+    const db = getDb();
+    const row = db
+      .prepare("SELECT value FROM indexer_state WHERE key = 'skipped_ledger_range'")
+      .get() as { value: string } | undefined;
+    if (!row) return null;
+    return JSON.parse(row.value) as SkippedLedgerRange;
+  } catch {
+    return null;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Monitored contracts (#85)
 // ---------------------------------------------------------------------------
@@ -1015,15 +1104,9 @@ export function updateContractPointer(
 
 /**
  * Checks whether an event with the given (contract_id, ledger_sequence,
- * event_type) already exists - the exact composite key the
- * UNIQUE(contract_id, ledger_sequence, event_type) constraint on `events`
- * enforces (see MIGRATIONS v1). insertEvent()/insertEventBatch() rely on
- * INSERT OR IGNORE for the actual write path (unchanged), so this constraint
- * check normally happens implicitly inside SQLite and isn't independently
- * observable. This lookup is exposed as its own query so the duplicate-check
- * path can be measured and EXPLAIN QUERY PLAN'd directly - it reuses the
- * existing sqlite_autoindex_events_1 index that comes from the UNIQUE
- * constraint; no new index is introduced.
+ * event_type) already exists. Since migration v12 the write path dedupes on
+ * UNIQUE(event_id), so this triple lookup is only a compatibility helper;
+ * prefer isDuplicateEventId() for the actual dedupe check.
  */
 export function isDuplicateEvent(
   contractId: string,
@@ -1042,6 +1125,24 @@ export function isDuplicateEvent(
 }
 
 /**
+ * Stable dedupe key for an event row: the RPC event id when known,
+ * otherwise the legacy (contract, ledger, type) triple (#607).
+ */
+export function eventDedupeId(ev: Pick<EventRow, "contractId" | "ledgerSequence" | "eventType"> & { eventId?: string }): string {
+  if (ev.eventId) return ev.eventId;
+  return `${ev.contractId}:${ev.ledgerSequence}:${ev.eventType}`;
+}
+
+/** True when an event with this RPC event id is already stored (#607). */
+export function isDuplicateEventId(eventId: string): boolean {
+  const db = getDb();
+  const row = db
+    .prepare(`SELECT 1 FROM events WHERE event_id = ? LIMIT 1`)
+    .get(eventId);
+  return row !== undefined;
+}
+
+/**
  * Insert a single event row.  For atomic batch inserts use insertEventBatch().
  * Wrapped in a transaction so concurrent writes never leave partial state.
  */
@@ -1050,21 +1151,23 @@ export function insertEvent(
   eventType: string,
   ledgerSequence: number,
   timestamp: number | null,
-  dataJson: string
+  dataJson: string,
+  eventId?: string
 ): boolean {
   const db = getDb();
   const tx = db.transaction(() => {
     const stmt = db.prepare(`
-      INSERT OR IGNORE INTO events 
-      (contract_id, event_type, ledger_sequence, timestamp, data_json)
-      VALUES (?, ?, ?, ?, ?)
+      INSERT OR IGNORE INTO events
+      (contract_id, event_type, ledger_sequence, timestamp, data_json, event_id)
+      VALUES (?, ?, ?, ?, ?, ?)
     `);
     const result = stmt.run(
       contractId,
       eventType,
       ledgerSequence,
       timestamp,
-      dataJson
+      dataJson,
+      eventId ?? `${contractId}:${ledgerSequence}:${eventType}`
     );
     return result.changes > 0;
   });
@@ -1078,6 +1181,8 @@ export interface EventRow {
   /** Ledger close time (epoch secs), or null when the RPC gave none. */
   timestamp: number | null;
   dataJson: string;
+  /** Stable RPC event id (event.id); dedupe key via UNIQUE(event_id) (#607). */
+  eventId?: string;
 }
 
 /**
@@ -1107,8 +1212,8 @@ export function insertEventBatch(events: EventRow[], newLedger: number): void {
 
   const insertStmt = db.prepare(`
     INSERT OR IGNORE INTO events
-    (contract_id, event_type, ledger_sequence, timestamp, data_json)
-    VALUES (?, ?, ?, ?, ?)
+    (contract_id, event_type, ledger_sequence, timestamp, data_json, event_id)
+    VALUES (?, ?, ?, ?, ?, ?)
   `);
 
   const updateLedger = db.prepare(
@@ -1122,7 +1227,8 @@ export function insertEventBatch(events: EventRow[], newLedger: number): void {
         ev.eventType,
         ev.ledgerSequence,
         ev.timestamp,
-        ev.dataJson
+        ev.dataJson,
+        eventDedupeId(ev)
       );
     }
     updateLedger.run(newLedger.toString());
@@ -1269,7 +1375,9 @@ export async function insertEventBatchLocked(
   const keys = [
     ...new Set(
       events.map((ev) =>
-        eventInsertLockKey(ev.contractId, ev.ledgerSequence, ev.eventType)
+        ev.eventId
+          ? `id:${ev.eventId}`
+          : eventInsertLockKey(ev.contractId, ev.ledgerSequence, ev.eventType)
       )
     ),
   ].sort();
@@ -1336,13 +1444,21 @@ export interface PaginatedJobs {
  * returned from the database engine.
  *
  * The query:
- *   1. Filters rows where json_extract finds the address in client / freelancer
- *      / arbiter fields (exact match – no false-positive LIKE hits).
+ *   1. Finds the contracts a wallet belongs to by matching $.client /
+ *      $.freelancer / $.arbiter on each contract's INIT event (the earliest
+ *      row per contract) – later events such as fund/deliver never carry
+ *      those fields, so matching the latest event drops jobs after any
+ *      activity (#610).
  *   2. Keeps exactly one row per contract_id: the most-recent event by
- *      (ledger_sequence DESC, id DESC) via ROW_NUMBER, so contracts with
- *      several events in their latest ledger never duplicate a job.
- *   3. Determines role with a CASE expression in SQL.
- *   4. Applies LIMIT / OFFSET inside the engine, so memory footprint is O(page).
+ *      (ledger_sequence DESC, id DESC) for latest_event_type/latest_ledger/
+ *      latest_timestamp, so contracts with several events in their latest
+ *      ledger never duplicate a job.
+ *   3. Determines role from the init event with a CASE expression in SQL.
+ *      Precedence when a wallet holds several roles on one job:
+ *      client > freelancer > arbiter.
+ *   4. Reads milestone_count from the init event's $.milestone_count
+ *      (falling back to a $.milestones array length for older fixtures).
+ *   5. Applies LIMIT / OFFSET inside the engine, so memory footprint is O(page).
  */
 export async function getJobsByWallet(
   address: string,
@@ -1372,10 +1488,18 @@ export async function getJobsByWallet(
         `SELECT COUNT(*) AS cnt
          FROM (
            SELECT contract_id
-           FROM events
-           WHERE json_extract(data_json, '$.client')     = ?
-              OR json_extract(data_json, '$.freelancer') = ?
-              OR json_extract(data_json, '$.arbiter')    = ?
+           FROM (
+             SELECT contract_id, data_json,
+               ROW_NUMBER() OVER (
+                 PARTITION BY contract_id
+                 ORDER BY ledger_sequence ASC, id ASC
+               ) AS rn
+             FROM events
+           )
+           WHERE rn = 1
+             AND (json_extract(data_json, '$.client')     = ?
+               OR json_extract(data_json, '$.freelancer') = ?
+               OR json_extract(data_json, '$.arbiter')    = ?)
            GROUP BY contract_id
          )`
       )
@@ -1386,30 +1510,42 @@ export async function getJobsByWallet(
     const rows = db
       .prepare(
         `SELECT
-           e.contract_id,
-           e.event_type                                     AS latest_event_type,
-           e.ledger_sequence                                AS latest_ledger,
-           e.timestamp                                      AS latest_timestamp,
+           l.contract_id,
+           l.event_type                                     AS latest_event_type,
+           l.ledger_sequence                                AS latest_ledger,
+           l.timestamp                                      AS latest_timestamp,
            CASE
-             WHEN json_extract(e.data_json, '$.client')     = ? THEN 'client'
-             WHEN json_extract(e.data_json, '$.freelancer') = ? THEN 'freelancer'
-             WHEN json_extract(e.data_json, '$.arbiter')    = ? THEN 'arbiter'
+             WHEN json_extract(i.data_json, '$.client')     = ? THEN 'client'
+             WHEN json_extract(i.data_json, '$.freelancer') = ? THEN 'freelancer'
+             WHEN json_extract(i.data_json, '$.arbiter')    = ? THEN 'arbiter'
              ELSE 'unknown'
            END                                              AS role,
-           e.data_json
+           i.data_json                                      AS init_data
          FROM (
            SELECT e.*,
              ROW_NUMBER() OVER (
                PARTITION BY e.contract_id
                ORDER BY e.ledger_sequence DESC, e.id DESC
-             ) AS rn
+             ) AS rn_desc,
+             ROW_NUMBER() OVER (
+               PARTITION BY e.contract_id
+               ORDER BY e.ledger_sequence ASC, e.id ASC
+             ) AS rn_asc
            FROM events e
-           WHERE json_extract(e.data_json, '$.client')     = ?
-              OR json_extract(e.data_json, '$.freelancer') = ?
-              OR json_extract(e.data_json, '$.arbiter')    = ?
-         ) e
-         WHERE e.rn = 1
-         ORDER BY e.ledger_sequence DESC, e.contract_id ASC
+         ) l
+         JOIN (
+           SELECT e.*,
+             ROW_NUMBER() OVER (
+               PARTITION BY e.contract_id
+               ORDER BY e.ledger_sequence ASC, e.id ASC
+             ) AS rn_asc
+           FROM events e
+         ) i ON i.contract_id = l.contract_id AND i.rn_asc = 1
+         WHERE l.rn_desc = 1
+           AND (json_extract(i.data_json, '$.client')     = ?
+             OR json_extract(i.data_json, '$.freelancer') = ?
+             OR json_extract(i.data_json, '$.arbiter')    = ?)
+         ORDER BY l.ledger_sequence DESC, l.contract_id ASC
          LIMIT ? OFFSET ?`
       )
       .all(
@@ -1422,16 +1558,23 @@ export async function getJobsByWallet(
         latest_ledger: number;
         latest_timestamp: number;
         role: "client" | "freelancer" | "arbiter" | "unknown";
-        data_json: string;
+        init_data: string;
       }>;
 
     const jobs: JobSummary[] = rows.map((row) => {
       let milestoneCount = 0;
       try {
-        const parsed = JSON.parse(row.data_json) as Record<string, unknown>;
-        milestoneCount = Array.isArray(parsed["milestones"])
-          ? (parsed["milestones"] as unknown[]).length
-          : 0;
+        const parsed = JSON.parse(row.init_data) as Record<string, unknown>;
+        const direct = parsed["milestone_count"];
+        if (typeof direct === "number" && Number.isFinite(direct)) {
+          milestoneCount = Math.max(0, Math.floor(direct));
+        } else if (typeof direct === "string" && /^\d+$/.test(direct.trim())) {
+          milestoneCount = parseInt(direct.trim(), 10);
+        } else {
+          milestoneCount = Array.isArray(parsed["milestones"])
+            ? (parsed["milestones"] as unknown[]).length
+            : 0;
+        }
       } catch {
         // unparseable – leave milestone_count as 0
       }
@@ -1468,6 +1611,7 @@ export interface EventDbRow {
   timestamp: number | null;
   data_json: string;
   created_at: string;
+  event_id?: string | null;
 }
 
 export interface PaginatedEvents {
@@ -1513,6 +1657,7 @@ export interface IndexerStatusData {
   totalEvents: number;
   lastEventAt: string | null;
   eventsByType: Record<string, number>;
+  skippedLedgerRange?: SkippedLedgerRange | null;
 }
 
 export interface WebhookSubscription {
@@ -1625,6 +1770,7 @@ export function getIndexerStatusData(): IndexerStatusData {
     totalEvents: totalRow.count,
     lastEventAt: lastEventRow.last_at,
     eventsByType,
+    skippedLedgerRange: getSkippedLedgerRange(),
   };
 }
 
@@ -1721,8 +1867,8 @@ export function insertHistoricalEventBatch(
   const db = getDb();
   const insertStmt = db.prepare(`
     INSERT OR IGNORE INTO events
-    (contract_id, event_type, ledger_sequence, timestamp, data_json)
-    VALUES (?, ?, ?, ?, ?)
+    (contract_id, event_type, ledger_sequence, timestamp, data_json, event_id)
+    VALUES (?, ?, ?, ?, ?, ?)
   `);
 
   const importTransaction = db.transaction(() => {
@@ -1734,6 +1880,7 @@ export function insertHistoricalEventBatch(
         ev.ledgerSequence,
         ev.timestamp,
         ev.dataJson,
+        eventDedupeId(ev),
       );
       if (result.changes > 0) inserted += 1;
     }
