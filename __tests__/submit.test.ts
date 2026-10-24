@@ -39,6 +39,7 @@ jest.unstable_mockModule("../src/utils/logger.js", () => ({
 
 
 jest.unstable_mockModule("@stellar/stellar-sdk", () => ({
+  Account: class {},
   TransactionBuilder: {
     fromXDR: jest.fn(() => mockTx),
   },

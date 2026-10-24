@@ -137,6 +137,67 @@ export const contractMilestoneParamsSchema = z.object({
   index: milestoneIndexSchema,
 });
 
+const BUILD_TX_I128_MIN = -(1n << 127n);
+const BUILD_TX_I128_MAX = (1n << 127n) - 1n;
+const BUILD_TX_U64_MAX = (1n << 64n) - 1n;
+const BUILD_TX_U32_MAX = 4294967295;
+
+/** True when v is an integer-valued string/number within [min, max] (#618). */
+function isBigIntInRange(v: string | number, min: bigint, max: bigint): boolean {
+  try {
+    if (typeof v === "number" && !Number.isInteger(v)) return false;
+    const n = BigInt(v);
+    return n >= min && n <= max;
+  } catch {
+    return false;
+  }
+}
+
+const buildTxI128ValueSchema = z.union([z.string(), z.number()]).refine(
+  (v) => isBigIntInRange(v, BUILD_TX_I128_MIN, BUILD_TX_I128_MAX),
+  { message: "value must be a decimal string within the i128 range" },
+);
+
+const buildTxU64ValueSchema = z.union([z.string(), z.number()]).refine(
+  (v) => isBigIntInRange(v, 0n, BUILD_TX_U64_MAX),
+  { message: "value must be a decimal string between 0 and 2^64-1" },
+);
+
+const buildTxU32ValueSchema = z
+  .union([z.string(), z.number()])
+  .refine(
+    (v) =>
+      typeof v === "number"
+        ? Number.isInteger(v) && v >= 0 && v <= BUILD_TX_U32_MAX
+        : /^\d+$/.test(v) && Number(v) <= BUILD_TX_U32_MAX,
+    { message: "value must be an integer between 0 and 4294967295" },
+  )
+  .transform((v) => (typeof v === "number" ? v : Number(v)));
+
+/**
+ * A single build-tx contract argument (#618). Unknown `type` values are
+ * rejected here so malformed input fails with a 400 ValidationError instead
+ * of throwing inside the RPC promise and surfacing as a 500.
+ */
+export const buildTxArgSchema: z.ZodTypeAny = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("address"),
+    value: z
+      .string()
+      .refine((v) => isValidStellarAddress(v) || isValidStellarContractId(v), {
+        message: "Invalid Stellar address",
+      }),
+  }),
+  z.object({ type: z.literal("i128"), value: buildTxI128ValueSchema }),
+  z.object({ type: z.literal("u32"), value: buildTxU32ValueSchema }),
+  z.object({ type: z.literal("u64"), value: buildTxU64ValueSchema }),
+  z.object({ type: z.literal("bool"), value: z.boolean() }),
+  z.object({
+    type: z.literal("vec"),
+    value: z.array(z.lazy(() => buildTxArgSchema)),
+  }),
+]);
+
 /** POST /build-tx body schema validation */
 export const buildTxBodySchema = z.object({
   // Must be a valid Soroban contract ID
@@ -154,7 +215,7 @@ export const buildTxBodySchema = z.object({
       message: `method must be one of: ${BUILD_TX_ALLOWED_METHODS.join(", ")}`,
     }),
   // Optional arguments for the method, defaults to an empty array
-  args: z.array(z.any()).optional().default([]),
+  args: z.array(buildTxArgSchema).optional().default([]),
   // The Stellar address of the transaction source account
   sourceAddress: stellarAccountField("sourceAddress"),
 });

@@ -12,6 +12,7 @@ jest.unstable_mockModule("@stellar/stellar-sdk/rpc", () => ({
 }));
 
 jest.unstable_mockModule("@stellar/stellar-sdk", () => ({
+  Account: class {},
   TransactionBuilder: { fromXDR: jest.fn(() => mockTx) },
   Contract: jest.fn(),
   Networks: {
