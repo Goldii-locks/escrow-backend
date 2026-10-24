@@ -220,13 +220,15 @@ describe("POST /:contractId/whitelist/update (bulk extras)", () => {
     const res = await request(buildApp())
       .post(`/api/jobs/${VALID_CONTRACT}/whitelist/update`)
       .send({ tokens: [TOKEN_CONTRACT] })
-      .expect(200);
+      .expect(400);
+    // The alias validates and the uninitialized contract is no error; the
+    // bulk form itself is then refused, since it is never executed on-chain
+    // (#613).
     expect(res.body).toEqual({
-      success: true,
-      data: { contractId: VALID_CONTRACT, addresses: [TOKEN_CONTRACT], updated: true },
+      success: false,
+      error:
+        "Bulk whitelist update is not supported: submit one { token, action, adminAddress } request per address to receive a signable transaction",
     });
-    // A successful update invalidates the cached list.
-    expect(whitelistCache.get(VALID_CONTRACT)).toBeUndefined();
   });
 
   it("returns a clean 500 for a non-Error rejection without caching", async () => {
@@ -401,16 +403,22 @@ describe("GET /:contractId/history", () => {
     db.close();
   });
 
+  // Paging is validated by the shared history query schema (#612), which
+  // reports the offending field in the standard ValidationError shape.
   it.each([
-    ["page=0", "page must be a positive integer"],
-    ["page=abc", "page must be a positive integer"],
-    ["limit=0", "limit must be between 1 and 100"],
-    ["limit=101", "limit must be between 1 and 100"],
-  ])("rejects %s with 400", async (query, error) => {
+    ["page=0", "page"],
+    ["page=abc", "page"],
+    ["limit=0", "limit"],
+    ["limit=101", "limit"],
+  ])("rejects %s with 400", async (query, field) => {
     const res = await request(buildApp())
       .get(`/api/jobs/${VALID_CONTRACT}/history?${query}`)
       .expect(400);
-    expect(res.body).toEqual({ success: false, error });
+    expect(res.body).toMatchObject({
+      success: false,
+      error: "ValidationError",
+      details: expect.arrayContaining([expect.objectContaining({ field })]),
+    });
   });
 
   it("returns a clean 500 when the database query fails", async () => {

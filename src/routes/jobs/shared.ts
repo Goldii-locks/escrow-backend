@@ -62,6 +62,7 @@ import {
   whitelistUpdateBodySchema,
   whitelistUpdateRequestSchema,
   feePreviewQuerySchema,
+  historyQuerySchema,
   type ByWalletQuery,
   type CreateJobDraftBody,
   type CreateJobDraftLegacyBody,
@@ -204,7 +205,7 @@ export {
   submitBodySchema, partialReleaseBodySchema, claimAutoReleaseBodySchema, byWalletParamsSchema,
   byWalletQuerySchema, createJobDraftBodySchema, createJobDraftLegacyBodySchema,
   whitelistUpdateBodySchema, whitelistUpdateRequestSchema, feePreviewQuerySchema,
-  logger, isValidStellarContractId, randomUUID,
+  historyQuerySchema, logger, isValidStellarContractId, randomUUID,
 };
 export type {
   Request, Response, NextFunction, RequestWithValidatedQuery, ByWalletQuery,

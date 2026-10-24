@@ -3,6 +3,10 @@ import { requireAdmin } from "../middleware/adminAuth.js";
 import { getIndexerStatusData } from "../indexer/db.js";
 import { getIndexerUptimeSeconds } from "../indexer/status.js";
 import { getLatestReconciliationResults } from "../indexer/reconciliation.js";
+import {
+  getDeadDeliveries,
+  getFailedDeliveryCount,
+} from "../indexer/webhook-delivery.js";
 
 const router = Router();
 
@@ -18,6 +22,8 @@ router.get("/indexer-status", (_req, res) => {
     lastEventAt: status.lastEventAt,
     eventsByType: status.eventsByType,
     reconciliation: getLatestReconciliationResults(),
+    failedDeliveries: getFailedDeliveryCount(),
+    deadDeliveries: getDeadDeliveries(),
   });
 });
 

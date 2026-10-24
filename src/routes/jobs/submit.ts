@@ -74,7 +74,14 @@ router.post(
         const { TransactionBuilder: TB } = await import("@stellar/stellar-sdk");
         const tx = TB.fromXDR(signedXdr, NETWORK_PASSPHRASE);
         const result = await server.sendTransaction(tx);
-        submitCache.set(cacheKey, result);
+        // Only cache successful submissions. ERROR and TRY_AGAIN_LATER must
+        // never be cached: the former would mask the failure as success on
+        // retry, the latter would serve stale advice instead of resubmitting
+        // (#614).
+        const txStatus = (result as { status?: string })?.status;
+        if (txStatus === "PENDING" || txStatus === "DUPLICATE") {
+          submitCache.set(cacheKey, result);
+        }
         return result;
       })();
 
@@ -90,6 +97,27 @@ router.post(
       }
 
       const txResult = result as Record<string, unknown>;
+      const txStatus = txResult?.status as string | undefined;
+
+      // The RPC resolves (does not throw) for rejected and overloaded
+      // states — classify them instead of reporting success (#614).
+      if (txStatus === "ERROR") {
+        const rawDetail =
+          typeof txResult?.errorResult === "string"
+            ? (txResult.errorResult as string)
+            : JSON.stringify(txResult?.errorResult ?? txResult);
+        logger.warn("Transaction rejected by network", { traceId, detail: rawDetail });
+        const { status, message } = classifySubmitError(rawDetail);
+        sendError(res, status === 500 ? 422 : status, message);
+        return;
+      }
+      if (txStatus === "TRY_AGAIN_LATER") {
+        logger.warn("RPC overloaded, client should retry", { traceId });
+        res.setHeader("Retry-After", "5");
+        sendError(res, 503, "Network busy, retry submission");
+        return;
+      }
+
       logger.info("Transaction submitted successfully", {
         traceId,
         status: txResult?.status,
