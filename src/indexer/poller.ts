@@ -240,6 +240,10 @@ export interface HistoricalImportResult {
   eventsImported: number;
 }
 
+export async function getLatestLedgerSequence(): Promise<number> {
+  return (await rpcClient.getLatestLedger()).sequence;
+}
+
 /**
  * Check a requested backfill window against the chain head and the per-import
  * ceiling. Pure, so callers can validate before opening any RPC connection.
@@ -291,6 +295,8 @@ export function validateHistoricalRange(
 export async function fetchHistoricalEvents(
   startLedger: number,
   endLedger: number,
+  contractId?: string,
+  onProgress?: (result: HistoricalImportResult) => void,
 ): Promise<HistoricalImportResult> {
   const chainHead = (await rpcClient.getLatestLedger()).sequence;
   const validation = validateHistoricalRange(startLedger, endLedger, chainHead);
@@ -298,7 +304,7 @@ export async function fetchHistoricalEvents(
     throw new Error(`Invalid historical range: ${validation.error}`);
   }
 
-  let contractIds: string[] = getActiveContractIds();
+  let contractIds: string[] = contractId ? [contractId] : getActiveContractIds();
   if (contractIds.length === 0 && process.env.CONTRACT_ID) {
     contractIds = [process.env.CONTRACT_ID];
   }
@@ -328,9 +334,10 @@ export async function fetchHistoricalEvents(
       );
 
     if (batch.length > 0) {
-      const result = insertHistoricalEventBatch(batch, { startLedger, endLedger });
+      const result = await enqueueHistoricalEventInsert(batch, { startLedger, endLedger });
       eventsImported += result.inserted;
     }
+    onProgress?.({ eventsFound, eventsImported });
 
     cursor = page?.cursor;
     if (pageEvents.length < HISTORICAL_PAGE_SIZE || !cursor) break;
@@ -373,9 +380,18 @@ export function enqueueEventInsert(
   events: EventRow[],
   newLedger: number,
 ): Promise<void> {
-  const run = eventInsertTail.then(() => {
-    insertEventBatch(events, newLedger);
-  });
+  return enqueueEventWrite(() => insertEventBatch(events, newLedger));
+}
+
+export function enqueueHistoricalEventInsert(
+  events: EventRow[],
+  range: { startLedger: number; endLedger: number },
+): Promise<{ inserted: number }> {
+  return enqueueEventWrite(() => insertHistoricalEventBatch(events, range));
+}
+
+function enqueueEventWrite<T>(write: () => T): Promise<T> {
+  const run = eventInsertTail.then(write);
   // Keep the queue alive even if an insert rejects so later enqueues proceed.
   eventInsertTail = run.then(
     () => undefined,
@@ -479,27 +495,6 @@ export async function pollEvents(): Promise<boolean> {
     // Validate the schema before matching events against EVENT_TYPES – a stale
     // schema must not silently pass through the topic filter (#282).
     verifySchemaUpToDate();
-
-    // --- Dynamic historical sync ranges (#254) ---
-    // With LEDGER_RANGE_START/END set the poller imports that inclusive window
-    // instead of following the chain head, and leaves the live ledger pointer
-    // untouched so a backfill cannot disturb live indexing.
-    const rangeStartRaw = process.env.LEDGER_RANGE_START;
-    const rangeEndRaw = process.env.LEDGER_RANGE_END;
-    if (rangeStartRaw || rangeEndRaw) {
-      const rangeStart = parseInt(rangeStartRaw ?? rangeEndRaw ?? "0", 10);
-      const rangeEnd = parseInt(rangeEndRaw ?? rangeStartRaw ?? "0", 10);
-
-      const imported = await fetchHistoricalEvents(rangeStart, rangeEnd);
-      failureMonitor.recordSuccess();
-
-      logger.info("Historical range import cycle complete", {
-        startLedger: rangeStart,
-        endLedger: rangeEnd,
-        ...imported,
-      });
-      return true;
-    }
 
     const currentLedger = (await rpcClient.getLatestLedger()).sequence;
 

@@ -40,7 +40,9 @@ jest.unstable_mockModule("@stellar/stellar-sdk", () => ({
   scValToNative: (val: unknown) => val,
 }));
 
-const { pollEvents, resetFailureState } = await import("../src/indexer/poller.js");
+const { pollEvents, resetFailureState, fetchHistoricalEvents } = await import(
+  "../src/indexer/poller.js"
+);
 const { resetLedgerRangeTrackerState, getLedgerRangeMetadata } = await import(
   "../src/indexer/ledger-range-tracker.js"
 );
@@ -55,6 +57,9 @@ function rpcEvent(ledger: number, eventType = "initialized", contractId = "C1") 
   };
 }
 
+// Historical ranges are imported by fetchHistoricalEvents, which the admin
+// backfill endpoint drives (#703); the LEDGER_RANGE_START/END env vars no
+// longer switch the live poller into import mode.
 describe("indexer_runner dynamic historical sync ranges (#254)", () => {
   let testDb: Database.Database;
   const envKeys = [
@@ -101,8 +106,6 @@ describe("indexer_runner dynamic historical sync ranges (#254)", () => {
   });
 
   it("indexes the configured start/end range with correct event counts", async () => {
-    process.env.LEDGER_RANGE_START = "10";
-    process.env.LEDGER_RANGE_END = "14";
 
     mockGetEvents.mockImplementation(async (opts: any) => {
       const start = opts.startLedger as number;
@@ -113,9 +116,9 @@ describe("indexer_runner dynamic historical sync ranges (#254)", () => {
       return { events };
     });
 
-    const advanced = await pollEvents();
+    const result = await fetchHistoricalEvents(10, 14);
 
-    expect(advanced).toBe(true);
+    expect(result).toEqual({ eventsFound: 5, eventsImported: 5 });
     expect(getLedgerRangeMetadata(10, 14).totalEvents).toBe(5);
     expect(getEventsByContract("C1", 1, 100).total).toBe(5);
     // Historical import must not advance the live pointer
@@ -123,8 +126,6 @@ describe("indexer_runner dynamic historical sync ranges (#254)", () => {
   });
 
   it("uses inclusive boundaries and ignores events past endLedger", async () => {
-    process.env.LEDGER_RANGE_START = "20";
-    process.env.LEDGER_RANGE_END = "22";
 
     mockGetEvents.mockResolvedValue({
       events: [
@@ -136,7 +137,7 @@ describe("indexer_runner dynamic historical sync ranges (#254)", () => {
       ],
     });
 
-    await pollEvents();
+    await fetchHistoricalEvents(20, 22);
 
     expect(getLedgerRangeMetadata(20, 22).totalEvents).toBe(3);
     expect(getLedgerRangeMetadata(19, 19).totalEvents).toBe(0);
@@ -144,7 +145,7 @@ describe("indexer_runner dynamic historical sync ranges (#254)", () => {
     expect(getLastIndexedLedger()).toBe(100);
   });
 
-  it("falls back to live polling when no historical range env is set", async () => {
+  it("live polling follows the chain head from the live pointer", async () => {
     mockGetEvents.mockResolvedValue({
       events: [rpcEvent(101)],
     });

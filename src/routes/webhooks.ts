@@ -1,11 +1,51 @@
 import { Router } from "express";
 import { sendSuccess, sendError } from "../utils/api-response.js";
+import { requireApiKey } from "../middleware/apiKeyAuth.js";
+import { getSubscriptionsForContract } from "../indexer/db.js";
 import {
   dispatchSubscribe,
   dispatchUnsubscribe,
 } from "../utils/webhook_dispatcher.js";
 
 const router = Router();
+
+function maskWebhookUrlQuery(webhookUrl: string): string {
+  try {
+    const url = new URL(webhookUrl);
+    url.search = "";
+    return url.toString();
+  } catch {
+    const queryIndex = webhookUrl.indexOf("?");
+    return queryIndex === -1 ? webhookUrl : webhookUrl.slice(0, queryIndex);
+  }
+}
+
+function parseEventTypes(eventTypes: string): unknown[] {
+  if (eventTypes === "*") return ["*"];
+
+  try {
+    const parsed: unknown = JSON.parse(eventTypes);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+router.get("/subscriptions", requireApiKey, (req, res) => {
+  const contractId = req.query.contract_id;
+  if (typeof contractId !== "string" || contractId.trim().length === 0) {
+    return sendError(res, 400, "contract_id is required");
+  }
+
+  const subscriptions = getSubscriptionsForContract(contractId).map((subscription) => ({
+    id: subscription.id,
+    webhook_url: maskWebhookUrlQuery(subscription.webhook_url),
+    event_types: parseEventTypes(subscription.event_types),
+    created_at: subscription.created_at,
+  }));
+
+  sendSuccess(res, { subscriptions });
+});
 
 router.post("/subscribe", (req, res) => {
   const result = dispatchSubscribe({
