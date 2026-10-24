@@ -15,6 +15,8 @@ const mockLogger = {
 jest.unstable_mockModule("../src/indexer/db.js", () => ({
   getJobsByWallet: mockGetJobsByWallet,
   getEventsByContract: jest.fn(),
+  saveJobDraft: jest.fn(),
+  getJobDraftById: jest.fn(),
 }));
 
 jest.unstable_mockModule("../src/utils/logger.js", () => ({
