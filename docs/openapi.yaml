@@ -12,7 +12,7 @@ servers:
   - url: /api/v1
     description: Modern versioned base path
   - url: /api
-    description: Legacy compatibility base path (returns Deprecation: true)
+    description: "Legacy compatibility base path (returns Deprecation: true)"
 
 components:
   securitySchemes:
@@ -628,6 +628,102 @@ paths:
         '401':
           description: Unauthorized (missing or invalid admin API key)
 
+  /api/admin/backfill:
+    post:
+      summary: Start a historical ledger backfill
+      description: Imports an inclusive ledger range in the background (#703). One backfill runs at a time.
+      security:
+        - AdminApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [startLedger, endLedger]
+              properties:
+                startLedger:
+                  type: integer
+                endLedger:
+                  type: integer
+                contractId:
+                  type: string
+                  description: Limit the import to one contract
+      responses:
+        '202':
+          description: Backfill started; the body carries the job ID
+        '400':
+          description: Invalid ledger range
+        '401':
+          description: Unauthorized (missing or invalid admin API key)
+        '409':
+          description: A backfill is already running
+    get:
+      summary: Get backfill status
+      description: Status of the current or last backfill (running, done or failed, with event counts), or idle.
+      security:
+        - AdminApiKeyAuth: []
+      responses:
+        '200':
+          description: Backfill status
+        '401':
+          description: Unauthorized (missing or invalid admin API key)
+
+  /api/admin/contracts:
+    get:
+      summary: List monitored contracts
+      description: Contracts the indexer monitors (#659).
+      security:
+        - AdminApiKeyAuth: []
+      responses:
+        '200':
+          description: Monitored contracts
+        '401':
+          description: Unauthorized (missing or invalid admin API key)
+    post:
+      summary: Register a contract for indexing
+      security:
+        - AdminApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [contractId]
+              properties:
+                contractId:
+                  type: string
+                label:
+                  type: string
+                startLedger:
+                  type: integer
+                  minimum: 0
+      responses:
+        '201':
+          description: Contract registered
+        '400':
+          description: Validation error
+        '401':
+          description: Unauthorized (missing or invalid admin API key)
+
+  /api/admin/contracts/{contractId}:
+    delete:
+      summary: Deregister a monitored contract
+      security:
+        - AdminApiKeyAuth: []
+      parameters:
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Contract deregistered
+        '401':
+          description: Unauthorized (missing or invalid admin API key)
+
   /api/webhooks/subscribe:
     post:
       summary: Subscribe to escrow contract webhook notifications
@@ -679,3 +775,23 @@ paths:
           description: Unsubscribed successfully
         '400':
           description: Validation error
+
+  /api/webhooks/subscriptions:
+    get:
+      summary: List webhook subscriptions for a contract
+      description: Webhook URL query strings are masked in the response (#705).
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: contract_id
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Subscriptions for the contract
+        '400':
+          description: contract_id is missing
+        '401':
+          description: Unauthorized (missing or invalid API key)

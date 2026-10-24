@@ -7,9 +7,6 @@ import {
   runMigrations,
   closeDb,
   getActiveContractIds,
-  getAllContracts,
-  deregisterContract,
-  registerContract,
 } from "../src/indexer/db.js";
 
 const app = express();

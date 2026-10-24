@@ -3,9 +3,7 @@ import { runMigrations, setDb, insertEvent, setLastIndexedLedger, registerContra
 import {
   collectIndexerMetrics,
   metricsPayloadSizeBytes,
-  logIndexerMetricsDiagnostics,
   resetIndexerMetricsCollectorState,
-  getIndexerMetricsMonitor,
   IndexerMetricsFailureMonitor,
   DEFAULT_METRICS_FAILURE_THRESHOLD,
   DEFAULT_METRICS_STALL_THRESHOLD_MS,

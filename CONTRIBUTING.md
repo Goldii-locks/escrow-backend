@@ -74,7 +74,7 @@ Follow the project's existing code style and use ESLint to check:
 npm run lint
 ```
 
-CI enforces an ESLint warning ratchet (`--max-warnings=151`). New warnings or unused variables will fail the build. As debt and unused variables are cleaned up across the codebase, this limit is ratcheted downward toward zero.
+CI enforces an ESLint warning ratchet (`--max-warnings=113`). New warnings or unused variables will fail the build. As debt and unused variables are cleaned up across the codebase, this limit is ratcheted downward toward zero.
 
 ## Submitting Changes
 

@@ -21,7 +21,6 @@
 import { Router, Request, Response, NextFunction } from "express";
 import {
   allocatePayment,
-  type PaymentAllocation,
 } from "../utils/partial-payment-allocator.js";
 import { partialPaymentAllocatorRateLimitMiddleware } from "../middleware/partial-payment-allocator-rate-limit.js";
 

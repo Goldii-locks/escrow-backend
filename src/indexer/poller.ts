@@ -1,5 +1,5 @@
-import { Server } from "@stellar/stellar-sdk/rpc";
-import type { Api } from "@stellar/stellar-sdk/rpc";
+
+
 import { scValToNative } from "@stellar/stellar-sdk";
 import {
   insertEventBatch,
@@ -10,7 +10,6 @@ import {
   registerContract,
   recordSkippedLedgerRange,
   adjustPollerInterval,
-  getCurrentPollIntervalMs as getDbPollIntervalMs,
   resetPollerThrottleState,
   verifySchemaUpToDate,
   assertSchemaValid,

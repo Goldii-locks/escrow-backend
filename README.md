@@ -21,6 +21,7 @@ Express + TypeScript backend for the Soroban milestone escrow platform.
     - [GET /api/jobs/:contractId](#get-apijobscontractid)
     - [GET /api/jobs/by-wallet/:address](#get-apijobsby-walletaddress)
     - [POST /api/jobs/create-job-draft](#post-apijobscreate-job-draft)
+    - [GET /api/jobs/drafts/:id](#get-apijobsdraftsid)
     - [GET /api/jobs/query](#get-apijobsquery-and-post-apijobsquery)
     - [GET /api/jobs/whitelisted-tokens](#get-apijobswhitelisted-tokens)
     - [GET /api/jobs/:contractId/history](#get-apijobscontractidhistory)
@@ -34,9 +35,15 @@ Express + TypeScript backend for the Soroban milestone escrow platform.
     - [POST /api/jobs/submit](#post-apijobssubmit)
   - [Admin API](#admin-api)
     - [GET /api/admin/indexer-status](#get-apiadminindexer-status)
+    - [POST /api/admin/backfill](#post-apiadminbackfill)
+    - [GET /api/admin/backfill](#get-apiadminbackfill)
+    - [GET /api/admin/contracts](#get-apiadmincontracts)
+    - [POST /api/admin/contracts](#post-apiadmincontracts)
+    - [DELETE /api/admin/contracts/:contractId](#delete-apiadmincontractscontractid)
   - [Webhooks API](#webhooks-api)
     - [POST /api/webhooks/subscribe](#post-apiwebhookssubscribe)
     - [POST /api/webhooks/unsubscribe](#post-apiwebhooksunsubscribe)
+    - [GET /api/webhooks/subscriptions](#get-apiwebhookssubscriptions)
 - [Error Responses](#error-responses)
 - [Related Repos](#related-repos)
 
@@ -107,6 +114,12 @@ Validate and persist an off-chain job escrow draft before deploying on-chain.
 - **Auth**: None (Public)
 - **Rate Limit**: 5 requests / minute (`CREATE_JOB_DRAFT_RATE_MAX`)
 - **Body**: `{ client, freelancer, arbiter, token, autoReleaseDays?, milestones: [{ amount, description? }] }`
+
+#### GET /api/jobs/drafts/:id
+
+Fetch a job draft saved by `create-job-draft` (#667).
+- **Auth**: None (Public)
+- **Response**: the stored draft, or `404` when no draft has that ID
 
 #### GET /api/jobs/query and POST /api/jobs/query
 
@@ -193,6 +206,35 @@ Retrieve indexer health, current ledger, event counters, uptime, and reconciliat
 - **Auth**: Admin API Key (`x-api-key: <ADMIN_API_KEY>` or `Bearer`)
 - **Response**: `{ success: true, lastIndexedLedger, totalEvents, uptimeSeconds, lastEventAt, eventsByType, reconciliation }`
 
+#### POST /api/admin/backfill
+
+Import a historical ledger range in the background (#703). One backfill runs at a time.
+- **Auth**: Admin API Key
+- **Body**: `{ startLedger, endLedger, contractId? }` (inclusive range; `contractId` limits the import to one contract)
+- **Response**: `202` with the job ID; `409` while another backfill is running; `400` for an invalid range
+
+#### GET /api/admin/backfill
+
+Status of the current or last backfill: `running`, `done` or `failed`, with `eventsFound` / `eventsImported`, or `{ status: "idle" }`.
+- **Auth**: Admin API Key
+
+#### GET /api/admin/contracts
+
+List the contracts the indexer monitors, with label, active flag, ledger pointer and start ledger (#659).
+- **Auth**: Admin API Key
+
+#### POST /api/admin/contracts
+
+Register a contract for indexing (#659).
+- **Auth**: Admin API Key
+- **Body**: `{ contractId, label?, startLedger? }`
+- **Response**: `201` with the registered contract
+
+#### DELETE /api/admin/contracts/:contractId
+
+Stop indexing a contract (#659).
+- **Auth**: Admin API Key
+
 ---
 
 ### Webhooks API
@@ -208,6 +250,13 @@ Register a webhook URL to receive real-time notifications for contract events.
 Unsubscribe an existing webhook registration.
 - **Auth**: None (Public)
 - **Body**: `{ contract_id, webhook_url }`
+
+#### GET /api/webhooks/subscriptions
+
+List the webhook subscriptions for a contract (#705). Query strings in webhook URLs are masked.
+- **Auth**: API Key
+- **Query**: `?contract_id=C...`
+- **Response**: `{ success: true, data: { subscriptions: [{ id, webhook_url, event_types, created_at }] } }`
 
 ---
 

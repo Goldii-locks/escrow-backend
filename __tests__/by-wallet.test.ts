@@ -1,17 +1,15 @@
 import Database from "better-sqlite3";
 import request from "supertest";
 import express from "express";
-import { autoAuth, TEST_API_KEY } from "./helpers/api-key-helper.js";
-import type { Request, Response } from "express";
+import { autoAuth } from "./helpers/api-key-helper.js";
+
 import { resetByWalletRateLimitBuckets } from "../src/middleware/rateLimiter.js";
 import {
   initSchema,
-  insertEvent,
   insertEventBatch,
   setDb,
   getJobsByWallet,
   resetJobsByWalletCache,
-  invalidateJobsByWalletCache,
 } from "../src/indexer/db.js";
 
 // ---------------------------------------------------------------------------

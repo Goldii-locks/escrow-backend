@@ -23,7 +23,6 @@ import {
   getAssetFormatConfig,
   DEFAULT_ASSET_FALLBACK,
   DEFAULT_ASSET_FORMAT_CONFIG,
-  KNOWN_ASSETS,
 } from "../src/utils/audit_ledger_sum_checker.js";
 
 // Smallest amount outside the contract's i128 range (i128 max + 1).

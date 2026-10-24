@@ -23,7 +23,9 @@ jobs:
         run: npm ci
 
       - name: Security audit
-        run: npm audit --omit=dev --audit-level=high
+        # High/critical advisories in production dependencies fail the build,
+        # except those listed with a reason in .audit-allowlist.json.
+        run: node scripts/audit-gate.mjs
 
       - name: Lint
         run: npm run lint

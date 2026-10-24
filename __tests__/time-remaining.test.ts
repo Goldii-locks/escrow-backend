@@ -3,7 +3,7 @@ import express from "express";
 import Database from "better-sqlite3";
 import { initSchema, setDb } from "../src/indexer/db.js";
 import { resetTimeRemainingRateLimitBuckets } from "../src/middleware/job-contract-rate-limit.js";
-import { getAllowedOrigins } from "../src/middleware/job-contract-security.js";
+
 
 const VALID_CONTRACT =
   "CDD5WKK3WT3QVKXMXTJNDIXE4T73FK6GGXDSD6UTJAH6YYZU52SQ4MUH";
