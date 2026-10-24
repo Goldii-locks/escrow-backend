@@ -21,6 +21,7 @@ router.get("/indexer-status", (_req, res) => {
     uptimeSeconds: getIndexerUptimeSeconds(),
     lastEventAt: status.lastEventAt,
     eventsByType: status.eventsByType,
+    skippedLedgerRange: status.skippedLedgerRange ?? null,
     reconciliation: getLatestReconciliationResults(),
     failedDeliveries: getFailedDeliveryCount(),
     deadDeliveries: getDeadDeliveries(),
