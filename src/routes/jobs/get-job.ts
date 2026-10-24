@@ -3,7 +3,6 @@ import type { Request, Response } from "express";
 import {
   Contract,
   TransactionBuilder,
-  BASE_FEE,
   nativeToScVal,
   scValToNative,
   jobContractRateLimit,
@@ -23,6 +22,8 @@ import {
   simulationSource,
   maskAddress,
 } from "./shared.js";
+import { getInclusionFee } from "../../utils/fee-helper.js";
+import { getCachedJobState } from "../../indexer/job-state-cache.js";
 import type {
   RequestWithValidatedQuery,
   FeePreviewQuery,
@@ -68,7 +69,7 @@ async function handleReadOnlyQuery(req: Request, res: Response): Promise<void> {
     const contract = new Contract(contractId);
     const account = simulationSource();
     const tx = new TransactionBuilder(account, {
-      fee: BASE_FEE,
+      fee: await getInclusionFee(server),
       networkPassphrase: NETWORK_PASSPHRASE,
     })
       .addOperation(contract.call(method))
@@ -155,7 +156,7 @@ router.get(
         const contract = new Contract(contractId);
         const account = simulationSource();
         const tx = new TransactionBuilder(account, {
-          fee: BASE_FEE,
+          fee: await getInclusionFee(server),
           networkPassphrase: NETWORK_PASSPHRASE,
         })
           .addOperation(
@@ -235,31 +236,36 @@ router.get(
     // zone=api_public_read rather than by a key the browser would have to ship.
 
     try {
-      const contract = new Contract(contractId);
-      const account = simulationSource();
-      const tx = new TransactionBuilder(account, {
-        fee: BASE_FEE,
-        networkPassphrase: NETWORK_PASSPHRASE,
-      })
-        .addOperation(contract.call("get_job"))
-        .setTimeout(30)
-        .build();
+      // Cached for JOB_STATE_CACHE_TTL_S with concurrent misses sharing one
+      // simulation; the poller invalidates the entry when it indexes a new
+      // event for this contract (#679).
+      const { value: job, source } = await getCachedJobState(contractId, async () => {
+        const contract = new Contract(contractId);
+        const account = simulationSource();
+        const tx = new TransactionBuilder(account, {
+          fee: await getInclusionFee(server),
+          networkPassphrase: NETWORK_PASSPHRASE,
+        })
+          .addOperation(contract.call("get_job"))
+          .setTimeout(30)
+          .build();
 
-      const result = await server.simulateTransaction(tx);
+        const result = await server.simulateTransaction(tx);
 
-      if ("error" in result) {
-        const { status } = classifySimError(String(result.error));
-        if (status === 404) {
-          logger.warn("Job not found", { contractId });
-          sendError(res, 404, "Job not found");
-          return;
+        if ("error" in result) {
+          const { status } = classifySimError(String(result.error));
+          if (status === 404) return null;
+          logger.error("Failed to fetch job", { contractId, error: String(result.error) });
+          throw new SimError(500, "Internal server error");
         }
-        logger.error("Failed to fetch job", { contractId, error: String(result.error) });
-        sendError(res, 500, "Internal server error");
-        return;
+
+        return parseJobFromResult(result, contractId);
+      });
+
+      if (source !== "rpc") {
+        logger.info("Job state served from cache", { contractId, source });
       }
 
-      const job = parseJobFromResult(result, contractId);
       if (!job) {
         logger.warn("Job not found", { contractId });
         sendError(res, 404, "Job not found");
@@ -284,7 +290,9 @@ router.get(
       });
       sendSuccess(res, job);
     } catch (err: any) {
-      logger.error("Failed to fetch job", { contractId, error: err?.message });
+      if (!(err instanceof SimError)) {
+        logger.error("Failed to fetch job", { contractId, error: err?.message });
+      }
       sendError(res, 500, "Internal server error");
     }
   },

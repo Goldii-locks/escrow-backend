@@ -3,7 +3,6 @@ import type { Request, Response } from "express";
 import {
   Contract,
   TransactionBuilder,
-  BASE_FEE,
   nativeToScVal,
   timeRemainingRateLimit,
   timeRemainingCors,
@@ -17,6 +16,7 @@ import {
   server,
   simulationSource,
 } from "./shared.js";
+import { getInclusionFee } from "../../utils/fee-helper.js";
 
 import {
   timeRemainingCache,
@@ -77,7 +77,7 @@ router.get(
           const contract = new Contract(contractId);
           const account = simulationSource();
           const tx = new TransactionBuilder(account, {
-            fee: BASE_FEE,
+            fee: await getInclusionFee(server),
             networkPassphrase: NETWORK_PASSPHRASE,
           })
             .addOperation(

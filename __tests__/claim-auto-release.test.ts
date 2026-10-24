@@ -739,7 +739,7 @@ describe("POST /api/jobs/:contractId/milestones/:index/claim-auto-release – tr
     expect((meta.params as Record<string, unknown>).contractId).toBe("not-a-valid-contract");
   });
 
-  it("warn validation log contains invalid body on bad sourceAddress", async () => {
+  it("warn validation log describes the invalid body without its values (#680)", async () => {
     const badBody = { sourceAddress: "bad" };
     await request(buildApp()).post(ENDPOINT).send(badBody).expect(400);
 
@@ -748,7 +748,9 @@ describe("POST /api/jobs/:contractId/milestones/:index/claim-auto-release – tr
     );
     expect(warnCalls).toHaveLength(1);
     const [, meta] = warnCalls[0] as [string, Record<string, unknown>];
-    expect(meta.body).toEqual(badBody);
+    expect(meta.body).toBeUndefined();
+    expect(meta.bodyKeys).toEqual(["sourceAddress"]);
+    expect(meta.issuePaths).toEqual(["sourceAddress"]);
   });
 
   it("trace: logs handler entered with path vars and params", async () => {
