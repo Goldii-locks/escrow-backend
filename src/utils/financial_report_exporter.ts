@@ -13,9 +13,17 @@
 import { writeFile } from "node:fs/promises";
 import { escapeCSVField } from "./csv-serializer.js";
 import { digitCount, MAX_SAFE_DIGITS, parseIntegerInput,
-  isAmountWithinRange,
+  isAmountWithinRange, MAX_AMOUNT, MIN_AMOUNT,
 } from "./digit-limit-validator.js";
 import { divideHalfEven } from "./financial_report_math.js";
+import {
+  DEFAULT_TOKEN_DECIMALS,
+  DEFAULT_TOKEN_LABEL,
+  getTokenLabel,
+  isKnownTokenSymbol,
+  resolveTokenMetadata,
+  type TokenMetadataOptions,
+} from "./token-metadata.js";
 
 export const FINANCIAL_REPORT_EXPORTER_ERRORS = {
   EMPTY_ROWS: "FRE_EMPTY_ROWS",
@@ -497,14 +505,6 @@ export interface ReportAssetConfig {
   label: string;
 }
 
-const KNOWN_REPORT_ASSETS: Record<string, ReportAssetConfig> = {
-  XLM: { ticker: "XLM", decimals: 7, label: "Stellar Lumens" },
-  USDC: { ticker: "USDC", decimals: 7, label: "USD Coin (Stellar)" },
-  USDT: { ticker: "USDT", decimals: 7, label: "Tether (Stellar)" },
-  BTC: { ticker: "BTC", decimals: 7, label: "Bitcoin (Stellar)" },
-  ETH: { ticker: "ETH", decimals: 7, label: "Ether (Stellar)" },
-};
-
 export type ReportTickerResolution =
   | { known: true; ticker: string; config: ReportAssetConfig }
   | { known: false; ticker: string; config: ReportAssetConfig; fallback: true };
@@ -515,8 +515,8 @@ export type ReportTickerResolution =
  */
 export const DEFAULT_REPORT_ASSET_FALLBACK: ReportAssetConfig = {
   ticker: "UNKNOWN",
-  decimals: 7,
-  label: "Unknown Stellar Token",
+  decimals: DEFAULT_TOKEN_DECIMALS,
+  label: DEFAULT_TOKEN_LABEL,
 };
 
 export const REPORT_EXPORTER_ERRORS = {
@@ -535,6 +535,9 @@ export type ReportExporterErrorCode =
  * Never throws: unrecognised tickers yield `{ known: false, fallback: true }`
  * carrying the default configuration, so exports continue with a marked
  * fallback instead of crashing on novel token types.
+ *
+ * @deprecated Prefer `resolveReportToken`, which reads the symbol and the
+ * precision from the token contract itself.
  */
 export function resolveReportTicker(rawTicker: unknown): ReportTickerResolution {
   if (typeof rawTicker !== "string" || rawTicker.trim() === "") {
@@ -546,15 +549,43 @@ export function resolveReportTicker(rawTicker: unknown): ReportTickerResolution 
     };
   }
   const ticker = rawTicker.trim().toUpperCase();
-  const config = KNOWN_REPORT_ASSETS[ticker];
-  if (config !== undefined) {
-    return { known: true, ticker, config };
+  if (isKnownTokenSymbol(ticker)) {
+    return {
+      known: true,
+      ticker,
+      config: {
+        ticker,
+        decimals: DEFAULT_TOKEN_DECIMALS,
+        label: getTokenLabel(ticker),
+      },
+    };
   }
   return {
     known: false,
     ticker: rawTicker.trim(),
     config: { ...DEFAULT_REPORT_ASSET_FALLBACK, ticker: rawTicker.trim() },
     fallback: true,
+  };
+}
+
+/**
+ * Resolve the report configuration of a token contract address, reading the
+ * symbol and the precision from the contract itself (#699).
+ */
+export async function resolveReportToken(
+  tokenAddress: string,
+  options?: TokenMetadataOptions
+): Promise<ReportTickerResolution> {
+  const metadata = await resolveTokenMetadata(tokenAddress, options);
+  const ticker = metadata.symbol || DEFAULT_REPORT_ASSET_FALLBACK.ticker;
+  return {
+    known: true,
+    ticker,
+    config: {
+      ticker,
+      decimals: metadata.decimals,
+      label: metadata.name || getTokenLabel(ticker),
+    },
   };
 }
 
@@ -605,6 +636,9 @@ function parseReportAmount(
  * Resolve one transaction row: amount is validated and the ticker is
  * resolved (with fallback for unknown tickers). Unknown tickers are NOT an
  * error — the row carries `fallback: true` so the report can flag it.
+ *
+ * @deprecated Prefer `resolveReportRowForToken`, which resolves the asset from
+ * the token contract.
  */
 export function resolveReportRow(row: ReportTransactionRow): ResolveReportRowResult {
   if (row === null || typeof row !== "object") {
@@ -631,6 +665,54 @@ export function resolveReportRow(row: ReportTransactionRow): ResolveReportRowRes
       decimals: resolution.config.decimals,
       known: resolution.known,
       fallback: resolution.known ? false : true,
+      ...(row.txHash !== undefined ? { txHash: row.txHash } : {}),
+    },
+  };
+}
+
+/**
+ * Resolve one transaction row for a token contract: the amount is validated
+ * and the symbol/precision are read from the contract itself (#699).
+ */
+export async function resolveReportRowForToken(
+  row: ReportTransactionRow & { tokenAddress: string },
+  options?: TokenMetadataOptions
+): Promise<ResolveReportRowResult> {
+  if (row === null || typeof row !== "object") {
+    return {
+      ok: false,
+      error: "row must be a non-null object",
+      code: REPORT_EXPORTER_ERRORS.INVALID_ROW,
+    };
+  }
+  const parsed = parseReportAmount(row.amount);
+  if (!parsed.ok) {
+    return {
+      ok: false,
+      error: `amount: ${parsed.error}`,
+      code: REPORT_EXPORTER_ERRORS.INVALID_AMOUNT,
+    };
+  }
+
+  let resolution: ReportTickerResolution;
+  try {
+    resolution = await resolveReportToken(row.tokenAddress, options);
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+      code: REPORT_EXPORTER_ERRORS.INVALID_TICKER,
+    };
+  }
+
+  return {
+    ok: true,
+    row: {
+      ticker: resolution.ticker,
+      amount: parsed.value,
+      decimals: resolution.config.decimals,
+      known: true,
+      fallback: false,
       ...(row.txHash !== undefined ? { txHash: row.txHash } : {}),
     },
   };
@@ -726,7 +808,32 @@ export function formatReportRowForDb(row: ReportTransactionRow): FormatReportRow
   if (!resolved.ok) {
     return resolved;
   }
-  const { ticker, amount, decimals, fallback, txHash } = resolved.row;
+  return buildFormattedReportRow(resolved.row);
+}
+
+/**
+ * Format one transaction row for database storage using the precision read
+ * from the token contract (#699).
+ */
+export async function formatReportRowForDbForToken(
+  row: ReportTransactionRow & { tokenAddress: string },
+  options?: TokenMetadataOptions
+): Promise<FormatReportRowResult> {
+  const resolved = await resolveReportRowForToken(row, options);
+  if (!resolved.ok) {
+    return resolved;
+  }
+  return buildFormattedReportRow(resolved.row);
+}
+
+/**
+ * Render a resolved report row at the resolved precision and verify that no
+ * precision was lost on the way.
+ */
+function buildFormattedReportRow(
+  resolved: ResolvedReportRow
+): FormatReportRowResult {
+  const { ticker, amount, decimals, fallback, txHash } = resolved;
   const formatted = formatReportValueForDb(amount, decimals);
   if (!reportFormatPreservesPrecision(amount, formatted, decimals)) {
     return {
@@ -798,6 +905,7 @@ export const ERROR_CODES = {
   EMPTY_DATA: "FINANCIAL_REPORT_EMPTY_DATA",
   SERIALIZATION_ERROR: "FINANCIAL_REPORT_SERIALIZATION_ERROR",
   SUM_MISMATCH: "FINANCIAL_REPORT_SUM_MISMATCH",
+  AMOUNT_OVERFLOW: "FINANCIAL_REPORT_AMOUNT_OVERFLOW",
 } as const;
 
 export type FinancialReportWarningCode =
@@ -871,6 +979,16 @@ export const FINANCIAL_REPORT_ERROR_DEFINITIONS: ErrorDefinition[] = [
       { name: "field", type: "string", required: true },
       { name: "value", type: "string", required: true },
     ],
+  },
+  {
+    code: ERROR_CODES.AMOUNT_OVERFLOW,
+    message: "Transaction amount exceeds the i128 numeric limits",
+    parameters: [
+      { name: "field", type: "string", required: true },
+      { name: "value", type: "string", required: true },
+      { name: "limit", type: "string", required: true },
+    ],
+    ordered: true,
   },
   {
     code: ERROR_CODES.INVALID_ROW,
@@ -1261,13 +1379,66 @@ export function reportCalculationException(
   };
 }
 
+/** Decimal digits in the largest i128 magnitude (2^127 ≈ 1.7e38). */
+export const MAX_TRANSACTION_LOG_AMOUNT_DIGITS = 39;
+
+/**
+ * Build an overflow failure for an amount (or running total) that falls
+ * outside the i128 range the escrow contract can represent.
+ */
+export function reportAmountOverflow(
+  field: string,
+  value: string,
+  reason: string
+): ParameterValidationFailure {
+  const limit = `${MIN_AMOUNT}..${MAX_AMOUNT}`;
+  const parameters = { field, value, limit };
+  return {
+    ok: false,
+    error: `${field} ${reason}`,
+    code: ERROR_CODES.AMOUNT_OVERFLOW,
+    details: {
+      expectedDefinition: FINANCIAL_REPORT_ERROR_DEFINITIONS.find(
+        (d) => d.code === ERROR_CODES.AMOUNT_OVERFLOW
+      ),
+      providedParams: parameters,
+      reason,
+    },
+  };
+}
+
+function checkAmountLimits(
+  value: bigint,
+  label: string
+): ParameterValidationFailure | null {
+  if (!isAmountWithinRange(value)) {
+    return reportAmountOverflow(
+      label,
+      value.toString(),
+      "exceeds the i128 amount range"
+    );
+  }
+  return null;
+}
+
 function parseAmount(value: unknown, label: string): ParameterValidationResult & { value?: bigint } {
   if (typeof value === "bigint") {
+    const overflow = checkAmountLimits(value, label);
+    if (overflow) return overflow;
     return { ok: true, validatedParams: { [label]: value }, value };
   }
   if (typeof value === "number") {
     if (!Number.isFinite(value) || !Number.isInteger(value)) {
       return reportCalculationException("parseAmount", `${label} must be a finite integer`);
+    }
+    // Beyond 2^53 the number has already lost precision; large amounts
+    // must arrive as strings or bigints.
+    if (!Number.isSafeInteger(value)) {
+      return reportAmountOverflow(
+        label,
+        String(value),
+        "exceeds Number.MAX_SAFE_INTEGER; pass large amounts as a string or bigint"
+      );
     }
     return { ok: true, validatedParams: { [label]: value }, value: BigInt(value) };
   }
@@ -1279,7 +1450,18 @@ function parseAmount(value: unknown, label: string): ParameterValidationResult &
         `${label} must be an integer numeric value`
       );
     }
-    return { ok: true, validatedParams: { [label]: trimmed }, value: BigInt(trimmed) };
+    // Reject oversized digit strings before converting them to bigint.
+    if (digitCount(trimmed) > MAX_TRANSACTION_LOG_AMOUNT_DIGITS) {
+      return reportAmountOverflow(
+        label,
+        trimmed,
+        `exceeds maximum of ${MAX_TRANSACTION_LOG_AMOUNT_DIGITS} digits`
+      );
+    }
+    const parsed = BigInt(trimmed);
+    const overflow = checkAmountLimits(parsed, label);
+    if (overflow) return overflow;
+    return { ok: true, validatedParams: { [label]: trimmed }, value: parsed };
   }
   return reportCalculationException(
     "parseAmount",
@@ -1414,6 +1596,17 @@ export function exportTransactionLogs(
     }
 
     total += parsed.value;
+    if (!isAmountWithinRange(total)) {
+      const overflow = reportAmountOverflow(
+        "total",
+        total.toString(),
+        `overflowed the i128 amount range at row ${i}`
+      );
+      return {
+        ...overflow,
+        details: { ...overflow.details, context: { rowIndex: i } },
+      };
+    }
     lines.push(
       [
         escapeCsvCell(row.transactionId),

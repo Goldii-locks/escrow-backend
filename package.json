@@ -5,7 +5,7 @@
   "main": "index.js",
   "scripts": {
     "test": "cross-env NODE_OPTIONS=--experimental-vm-modules jest",
-    "lint": "eslint .",
+    "lint": "eslint . --max-warnings=95",
     "dev": "nodemon --exec \"node --loader ts-node/esm\" src/index.ts",
     "build": "tsc -p tsconfig.build.json",
     "start": "node dist/index.js"

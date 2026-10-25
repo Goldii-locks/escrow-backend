@@ -1,5 +1,6 @@
 import type { NextFunction, Request, Response } from "express";
 import rateLimit from "express-rate-limit";
+import { config } from "../config.js";
 import logger from "../utils/logger.js";
 
 type RateBucket = {
@@ -7,25 +8,24 @@ type RateBucket = {
   resetAt: number;
 };
 
-const windowMs = parseInt(process.env.RATE_LIMIT_WINDOW_MS || "60000", 10);
+const windowMs = config.rateLimitWindowMs;
 
 const generalMax =
-  process.env.NODE_ENV === "test"
-    ? 0
-    : parseInt(process.env.RATE_LIMIT_MAX || "100", 10);
+  process.env.NODE_ENV === "test" ? 0 : config.rateLimitMax;
 
 const strictMax =
-  process.env.NODE_ENV === "test"
-    ? 0
-    : parseInt(process.env.RATE_LIMIT_MAX_STRICT || "10", 10);
+  process.env.NODE_ENV === "test" ? 0 : config.rateLimitMaxStrict;
 
 const walletLookupBuckets = new Map<string, RateBucket>();
 
 const rateLimitMessage = { success: false, error: "Too many requests, please try again later" };
 
 function resolveWalletLookupMax(): number {
-  const configured = Number(process.env.BY_WALLET_RATE_LIMIT_MAX ?? "30");
-  return Number.isFinite(configured) && configured > 0 ? configured : 30;
+  try {
+    return config.byWalletRateLimitMax;
+  } catch {
+    return 30;
+  }
 }
 
 export function resetByWalletRateLimitBuckets(): void {
@@ -46,6 +46,28 @@ export const strictLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   message: rateLimitMessage,
+});
+
+/**
+ * Dedicated limit for the webhook subscription mutations (#604). The shared
+ * general limiter is one bucket for every client, so a single caller could
+ * exhaust it and lock everyone else out; these two routes also mutate
+ * subscriptions, so they get their own budget on top of the general one.
+ */
+const webhookMax = parseInt(
+  process.env.WEBHOOK_RATE_LIMIT_MAX || "30",
+  10
+);
+
+export const webhookLimiter = rateLimit({
+  windowMs,
+  max: webhookMax,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: rateLimitMessage,
+  // Suite-wide requests come from one address, so the budget is skipped under
+  // test rather than set to zero (a zero max rejects every request).
+  skip: () => process.env.NODE_ENV === "test",
 });
 
 export function walletLookupLimiter(req: Request, res: Response, next: NextFunction): void {

@@ -1,7 +1,7 @@
 import { jest } from "@jest/globals";
 import request from "supertest";
 import express from "express";
-import { TransactionBuilder } from "@stellar/stellar-sdk";
+
 
 const mockSendTransaction = jest.fn<() => Promise<unknown>>();
 const mockTx = { toXDR: () => "mock-xdr" };
@@ -39,6 +39,7 @@ jest.unstable_mockModule("../src/utils/logger.js", () => ({
 
 
 jest.unstable_mockModule("@stellar/stellar-sdk", () => ({
+  Account: class {},
   TransactionBuilder: {
     fromXDR: jest.fn(() => mockTx),
   },
@@ -865,7 +866,8 @@ describe("POST /api/jobs/submit – trace logging", () => {
   // -------------------------------------------------------------------------
 
   it("logs 'Submit result served from cache' with traceId and source='cache' on cache hit", async () => {
-    mockSendTransaction.mockResolvedValue({ id: "cached" });
+    // Only successful (PENDING / DUPLICATE) submissions are cached (#614).
+    mockSendTransaction.mockResolvedValue({ id: "cached", status: "PENDING" });
     const app = buildApp();
 
     // Prime the cache

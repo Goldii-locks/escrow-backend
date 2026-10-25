@@ -1,7 +1,7 @@
 import { jest } from "@jest/globals";
 import request from "supertest";
 import express from "express";
-import { autoAuth, TEST_API_KEY } from "./helpers/api-key-helper.js";
+import { autoAuth } from "./helpers/api-key-helper.js";
 
 const VALID_CONTRACT = "CDD5WKK3WT3QVKXMXTJNDIXE4T73FK6GGXDSD6UTJAH6YYZU52SQ4MUH";
 const VALID_ADDRESS = "GAODBHVR63Z56MVQRBEJSYM2H5423LJ4WAPUUBOFG4JYY72S6ROKVZRX";
@@ -310,13 +310,13 @@ describe("POST /api/jobs/:contractId/milestones/:index/partial-release", () => {
     expect(res.body).toEqual({ success: true, xdr: "AAAAAQ==" });
   });
 
-  it("accepts amount provided as a JSON number", async () => {
-    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==" });
+  it("rejects amount provided as a JSON number (#678)", async () => {
     const res = await request(buildApp())
       .post(ENDPOINT)
       .send({ amount: 100, sourceAddress: VALID_ADDRESS })
-      .expect(200);
-    expect(res.body.success).toBe(true);
+      .expect(400);
+    expect(res.body.fields).toEqual({ amount: "amount must be a string of digits" });
+    expect(mockGetAccount).not.toHaveBeenCalled();
   });
 
   // ── error path ────────────────────────────────────────────────────────────

@@ -331,8 +331,17 @@ export const DEFAULT_EMAIL_SENDER_TIMEOUT_MS = 5_000;
 /** Header name carrying the HMAC-SHA256 hex signature. */
 export const WEBHOOK_SIGNATURE_HEADER = "X-Webhook-Signature";
 
+/** Header name carrying the signing timestamp (ms since epoch, as a string). */
+export const WEBHOOK_TIMESTAMP_HEADER = "X-Milesto-Timestamp";
+
 /** Prefix used in the signature header value (e.g. sha256=<hex>). */
 export const SIGNATURE_SCHEME = "sha256";
+
+/**
+ * Maximum age of a signed webhook before it is rejected as a potential
+ * replay (default 5 minutes, Stripe/Slack-style tolerance).
+ */
+export const DEFAULT_WEBHOOK_TIMESTAMP_TOLERANCE_MS = 5 * 60 * 1000;
 
 export class EmailSenderTimeoutError extends Error {
   readonly timeoutMs: number;
@@ -356,10 +365,14 @@ export class EmailSenderConfigError extends Error {
 export type SignedWebhookPayload = {
   /** Canonical JSON body that was signed. */
   body: string;
-  /** Hex-encoded HMAC-SHA256 digest. */
+  /** Millis-since-epoch timestamp that was signed, as a string. */
+  timestamp: string;
+  /** Hex-encoded HMAC-SHA256 digest over `${timestamp}.${body}`. */
   signatureHex: string;
   /** Full header value: `sha256=<hex>`. */
   signatureHeader: string;
+  /** Value to send in {@link WEBHOOK_TIMESTAMP_HEADER}. */
+  timestampHeader: string;
 };
 
 export type SendEmailAlertInput = {
@@ -377,6 +390,7 @@ export type SendEmailAlertResult = {
   ok: boolean;
   status?: number;
   signatureHeader: string;
+  timestampHeader: string;
   timedOut: boolean;
 };
 
@@ -409,12 +423,29 @@ export function resolveWebhookSigningSecret(explicit?: string): string {
 }
 
 /**
- * Sign a payload body with HMAC-SHA256 using the provided secret.
- * Clients verify with the same algorithm / header format.
+ * Sign a payload body with HMAC-SHA256 using the provided secret (#694).
+ *
+ * The signed material is `${timestamp}.${body}` (Stripe/Slack-style), so a
+ * captured payload cannot be replayed indefinitely: receivers reject any
+ * signature whose timestamp falls outside their tolerance window.
+ * Send {@link WEBHOOK_TIMESTAMP_HEADER} alongside
+ * {@link WEBHOOK_SIGNATURE_HEADER}.
+ *
+ * Receiver verification steps:
+ * 1. Read the raw request body bytes as `body`, the
+ *    `X-Webhook-Signature` header as `signature`, and the
+ *    `X-Milesto-Timestamp` header as `timestamp`.
+ * 2. Reject when any of the three is missing, or when `timestamp` is not
+ *    an integer millis value within `toleranceMs` (default 5 minutes) of
+ *    now — this is what defeats replays.
+ * 3. Recompute `HMAC-SHA256(secret, timestamp + "." + body)` as hex and
+ *    compare with the header digest in constant time
+ *    ({@link verifyWebhookSignature} does steps 2–3).
  */
 export function signOutgoingWebhook(
   payload: Record<string, unknown> | string,
-  secret: string
+  secret: string,
+  timestamp?: string | number
 ): SignedWebhookPayload {
   if (!secret) {
     throw new EmailSenderConfigError("Signing secret must be a non-empty string");
@@ -422,26 +453,42 @@ export function signOutgoingWebhook(
 
   const body =
     typeof payload === "string" ? payload : JSON.stringify(payload);
+  const timestampStr =
+    timestamp === undefined || timestamp === null || timestamp === ""
+      ? String(Date.now())
+      : String(timestamp);
   const signatureHex = createHmac("sha256", secret)
-    .update(body, "utf8")
+    .update(`${timestampStr}.${body}`, "utf8")
     .digest("hex");
 
   return {
     body,
+    timestamp: timestampStr,
     signatureHex,
     signatureHeader: `${SIGNATURE_SCHEME}=${signatureHex}`,
+    timestampHeader: timestampStr,
   };
 }
 
 /**
- * Verify a client-received signature against the raw body and secret.
+ * Verify a client-received signature against the raw body, secret, and
+ * signing timestamp (#694).
+ *
  * Accepts either a bare hex digest or a `sha256=<hex>` header value.
- * Uses timing-safe comparison to avoid leaking digest length mismatches.
+ * Uses timing-safe comparison to avoid leaking digest length mismatches,
+ * and rejects timestamps outside `toleranceMs` (default
+ * {@link DEFAULT_WEBHOOK_TIMESTAMP_TOLERANCE_MS}) to block replays.
+ *
+ * When `timestamp` is omitted, falls back to the legacy body-only check so
+ * previously signed payloads still verify; new callers must always pass
+ * the `X-Milesto-Timestamp` header value.
  */
 export function verifyWebhookSignature(
   body: string,
   signature: string,
-  secret: string
+  secret: string,
+  timestamp?: string | number | null,
+  toleranceMs: number = DEFAULT_WEBHOOK_TIMESTAMP_TOLERANCE_MS
 ): boolean {
   if (!secret || !signature || typeof body !== "string") {
     return false;
@@ -455,8 +502,31 @@ export function verifyWebhookSignature(
     return false;
   }
 
+  let signedMaterial: string;
+  if (timestamp === undefined || timestamp === null || timestamp === "") {
+    // Legacy payloads signed before timestamps existed (body-only HMAC).
+    signedMaterial = body;
+  } else {
+    const timestampStr = String(timestamp).trim();
+    if (!/^\d+$/.test(timestampStr)) {
+      return false;
+    }
+    const timestampMs = Number(timestampStr);
+    if (!Number.isSafeInteger(timestampMs)) {
+      return false;
+    }
+    const tolerance =
+      typeof toleranceMs === "number" && Number.isFinite(toleranceMs) && toleranceMs >= 0
+        ? toleranceMs
+        : DEFAULT_WEBHOOK_TIMESTAMP_TOLERANCE_MS;
+    if (Math.abs(Date.now() - timestampMs) > tolerance) {
+      return false;
+    }
+    signedMaterial = `${timestampStr}.${body}`;
+  }
+
   const expectedHex = createHmac("sha256", secret)
-    .update(body, "utf8")
+    .update(signedMaterial, "utf8")
     .digest("hex");
 
   try {
@@ -497,6 +567,7 @@ export async function sendEmailAlert(
       headers: {
         "Content-Type": "application/json",
         [WEBHOOK_SIGNATURE_HEADER]: signed.signatureHeader,
+        [WEBHOOK_TIMESTAMP_HEADER]: signed.timestampHeader,
       },
       body: signed.body,
       signal: controller.signal,
@@ -512,6 +583,7 @@ export async function sendEmailAlert(
       ok: response.ok,
       status: response.status,
       signatureHeader: signed.signatureHeader,
+      timestampHeader: signed.timestampHeader,
       timedOut: false,
     };
   } catch (err) {

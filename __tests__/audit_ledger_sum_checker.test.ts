@@ -23,7 +23,6 @@ import {
   getAssetFormatConfig,
   DEFAULT_ASSET_FALLBACK,
   DEFAULT_ASSET_FORMAT_CONFIG,
-  KNOWN_ASSETS,
 } from "../src/utils/audit_ledger_sum_checker.js";
 
 // Smallest amount outside the contract's i128 range (i128 max + 1).
@@ -376,7 +375,7 @@ describe("audit_ledger_sum_checker rounding policies", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Issue #498 – DB-column precision formatting
+// Issue #498 ï¿½ DB-column precision formatting
 // ---------------------------------------------------------------------------
 
 describe("audit_ledger_sum_checker DB-column formatting", () => {
@@ -513,7 +512,7 @@ describe("audit_ledger_sum_checker negative parameter rejection (#496)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Issue #501 – split-sum assertions
+// Issue #501 ï¿½ split-sum assertions
 // ---------------------------------------------------------------------------
 
 describe("audit_ledger_sum_checker split-sum assertions", () => {

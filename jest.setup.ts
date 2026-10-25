@@ -1,4 +1,5 @@
 import { closeDb } from "./src/indexer/db.js";
+import { resetJobStateCache } from "./src/indexer/job-state-cache.js";
 import { TEST_API_KEY } from "./__tests__/helpers/api-key-helper.js";
 
 // The job routes' API-key gate fails closed: an unset API_KEY rejects the
@@ -7,6 +8,9 @@ import { TEST_API_KEY } from "./__tests__/helpers/api-key-helper.js";
 // handlers; auth suites override this in their own beforeEach.
 beforeEach(() => {
   process.env.API_KEY = TEST_API_KEY;
+  // GET /api/jobs/:contractId caches job state (#679); suites reuse contract
+  // ids with different RPC mocks, so start every test with an empty cache.
+  resetJobStateCache();
 });
 
 // Release the SQLite handle after every suite. Without this, any test file

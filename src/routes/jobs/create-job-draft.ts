@@ -1,0 +1,170 @@
+import { Router } from "express";
+import type { Request, Response } from "express";
+import {
+  createJobDraftRateLimit,
+  createJobDraftCors,
+  createJobDraftSecurityHeaders,
+  sendError,
+  sendSuccess,
+  createJobDraftValidation,
+  logger,
+  randomUUID,
+  maskAddress,
+  saveJobDraft,
+  getJobDraftById,
+} from "./shared.js";
+import type {
+  CreateJobDraftBody,
+  CreateJobDraftLegacyBody,
+} from "./shared.js";
+
+const router = Router();
+
+// ---------------------------------------------------------------------------
+// POST /api/jobs/create-job-draft
+// Validates and stores a job draft payload (off-chain) before on-chain create.
+// ---------------------------------------------------------------------------
+router.options("/create-job-draft", createJobDraftCors);
+
+/**
+ * Two PRs implemented POST /create-job-draft independently and both were
+ * merged, leaving two `router.post("/create-job-draft", …)` registrations. Only
+ * the first could ever run, so the second PR's rate limiter was dead code and
+ * its tests failed. They are collapsed here into one route that honours both
+ * contracts: the body is validated against whichever schema matches the field
+ * naming used, and the response carries both shapes. The Zod request-shape
+ * validation itself lives in the reusable `createJobDraftValidation`
+ * middleware (see `middleware/create-job-draft-validation.ts`).
+ */
+
+router.post(
+  "/create-job-draft",
+  createJobDraftCors,
+  createJobDraftSecurityHeaders,
+  createJobDraftRateLimit,
+  createJobDraftValidation,
+  (req: Request, res: Response) => {
+    const traceId = randomUUID();
+    const pathVars = { route: "/api/jobs/create-job-draft" };
+
+    logger.debug("Create-job-draft handler entered", {
+      traceId,
+      ...pathVars,
+      bodyKeys: Object.keys((req.body as Record<string, unknown>) ?? {}),
+      ip: req.ip ?? req.socket?.remoteAddress,
+    });
+
+    try {
+      const body = req.body as Partial<CreateJobDraftBody> &
+        Partial<CreateJobDraftLegacyBody>;
+
+      const client = body.client ?? body.clientAddress;
+      const freelancer = body.freelancer ?? body.freelancerAddress;
+      const arbiter = body.arbiter ?? body.arbiterAddress;
+      const token = body.token ?? body.tokenAddress;
+
+      const draft = {
+        id: randomUUID(),
+        status: "draft" as const,
+        client,
+        freelancer,
+        arbiter,
+        token,
+        autoReleaseDays: body.autoReleaseDays,
+        milestones: body.milestones,
+        acceptedAssets: body.acceptedAssets,
+        requirements: body.requirements,
+        createdAt: new Date().toISOString(),
+        // `*Address` naming echoed back for the second PR's response contract.
+        draft: {
+          clientAddress: client,
+          freelancerAddress: freelancer,
+          arbiterAddress: arbiter,
+          tokenAddress: token,
+          milestones: body.milestones,
+        },
+      };
+
+      logger.debug("Create-job-draft draft built", {
+        traceId,
+        ...pathVars,
+        milestoneCount: body.milestones?.length ?? 0,
+      });
+
+      logger.info("Job draft created", {
+        traceId,
+        ...pathVars,
+        client: maskAddress(client),
+        freelancer: maskAddress(freelancer),
+        arbiter: maskAddress(arbiter),
+        token: maskAddress(token),
+        milestoneCount: body.milestones?.length ?? 0,
+      });
+      logger.debug("Job draft created (full addresses)", {
+        traceId,
+        client,
+        freelancer,
+        arbiter,
+        token,
+      });
+
+      const creatorAddress = (client || freelancer || "unknown") as string;
+      try {
+        saveJobDraft(draft.id, creatorAddress, draft);
+      } catch (dbErr: unknown) {
+        const dbErrorMessage = dbErr instanceof Error ? dbErr.message : String(dbErr);
+        logger.warn("Failed to persist job draft to database", {
+          draftId: draft.id,
+          error: dbErrorMessage,
+        });
+      }
+
+      sendSuccess(res, draft);
+
+      logger.debug("Create-job-draft response sent", {
+        traceId,
+        ...pathVars,
+        status: 200,
+        success: true,
+        draftId: draft.id,
+        milestoneCount: body.milestones?.length ?? 0,
+      });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      logger.error("Failed to create job draft", {
+        traceId,
+        ...pathVars,
+        error: message,
+        stack: err instanceof Error ? err.stack : undefined,
+      });
+      sendError(res, 500, "Internal server error");
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
+// GET /api/jobs/drafts/:id – fetch a persisted job draft by ID (#667)
+// ---------------------------------------------------------------------------
+router.options("/drafts/:id", createJobDraftCors);
+
+router.get(
+  "/drafts/:id",
+  createJobDraftCors,
+  createJobDraftSecurityHeaders,
+  (req: Request, res: Response) => {
+    const id = req.params.id as string;
+    try {
+      const draftRecord = getJobDraftById(id);
+      if (!draftRecord) {
+        sendError(res, 404, "Draft not found");
+        return;
+      }
+      sendSuccess(res, draftRecord.payload);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      logger.error("Failed to fetch job draft", { id, error: message });
+      sendError(res, 500, "Internal server error");
+    }
+  },
+);
+export default router;

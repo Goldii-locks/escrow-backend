@@ -1,6 +1,7 @@
 import { jest } from "@jest/globals";
 import request from "supertest";
 import express from "express";
+import { xdr as StellarXdr, scValToNative } from "@stellar/stellar-sdk";
 
 const mockGetAccount = jest.fn<() => Promise<unknown>>();
 const mockPrepareTransaction = jest.fn<() => Promise<unknown>>();
@@ -367,10 +368,88 @@ describe("POST /api/jobs/build-tx — contract argument type mapping", () => {
     expect(res.body).toEqual({ success: true, xdr: "AAAAAQ==" });
   });
 
-  it("builds a tx for an untyped/default argument", async () => {
+  it("rejects an unknown argument type with a 400 ValidationError (#618)", async () => {
     const body = { ...VALID_BODY, args: [{ type: "string", value: "hello" }] };
+    const res = await request(app).post("/api/jobs/build-tx").send(body).expect(400);
+    expect(res.body.error).toBe("ValidationError");
+    expect(
+      Object.keys(res.body.fields ?? {}).some((k) => k.startsWith("args.0")),
+    ).toBe(true);
+    expect(mockPrepareTransaction).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["i128 garbage", { type: "i128", value: "abc" }],
+    ["i128 float", { type: "i128", value: 1.5 }],
+    ["i128 above max", { type: "i128", value: ((1n << 127n).toString()) }],
+    ["u64 garbage", { type: "u64", value: "abc" }],
+    ["u64 float", { type: "u64", value: 1.5 }],
+    ["u64 negative", { type: "u64", value: "-1" }],
+    ["u32 float", { type: "u32", value: 1.5 }],
+    ["u32 negative", { type: "u32", value: -1 }],
+    ["u32 above max", { type: "u32", value: 4294967296 }],
+    ["address invalid", { type: "address", value: "not-an-address" }],
+    ["bool wrong type", { type: "bool", value: "true" }],
+    ["vec non-array", { type: "vec", value: "nope" }],
+  ])("rejects a malformed %s arg with a 400 ValidationError (#618)", async (_label, arg) => {
+    const body = { ...VALID_BODY, args: [arg] };
+    const res = await request(app).post("/api/jobs/build-tx").send(body).expect(400);
+    expect(res.body.error).toBe("ValidationError");
+    expect(res.body.fields?.["args.0.value"]).toEqual(expect.any(String));
+    expect(mockPrepareTransaction).not.toHaveBeenCalled();
+  });
+
+  it("encodes address elements inside a vec as scvAddress (#619)", async () => {
+    const body = {
+      ...VALID_BODY,
+      args: [{ type: "vec", value: [{ type: "address", value: VALID_ADDRESS }] }],
+    };
     const res = await request(app).post("/api/jobs/build-tx").send(body).expect(200);
     expect(res.body).toEqual({ success: true, xdr: "AAAAAQ==" });
+
+    const tx = (mockPrepareTransaction.mock.calls[0] as unknown[])[0] as { toXDR: () => string };
+    const envelope = StellarXdr.TransactionEnvelope.fromXDR(tx.toXDR(), "base64");
+    const hostFn = envelope
+      .v1()
+      .tx()
+      .operations()[0].body()
+      .invokeHostFunctionOp()
+      .hostFunction();
+    const vecArg = hostFn.invokeContract().args()[0];
+    expect(vecArg.switch().name).toBe("scvVec");
+    const elements = vecArg.vec() ?? [];
+    expect(elements).toHaveLength(1);
+    expect(elements[0].switch().name).toBe("scvAddress");
+  });
+
+  it("encodes a nested vec of i128 correctly (#619)", async () => {
+    const body = {
+      ...VALID_BODY,
+      args: [
+        {
+          type: "vec",
+          value: [{ type: "vec", value: [{ type: "i128", value: "100" }] }],
+        },
+      ],
+    };
+    const res = await request(app).post("/api/jobs/build-tx").send(body).expect(200);
+    expect(res.body).toEqual({ success: true, xdr: "AAAAAQ==" });
+
+    const tx = (mockPrepareTransaction.mock.calls[0] as unknown[])[0] as { toXDR: () => string };
+    const envelope = StellarXdr.TransactionEnvelope.fromXDR(tx.toXDR(), "base64");
+    const hostFn = envelope
+      .v1()
+      .tx()
+      .operations()[0].body()
+      .invokeHostFunctionOp()
+      .hostFunction();
+    const outer = hostFn.invokeContract().args()[0];
+    expect(outer.switch().name).toBe("scvVec");
+    const inner = (outer.vec() ?? [])[0];
+    expect(inner.switch().name).toBe("scvVec");
+    const leaves = inner.vec() ?? [];
+    expect(leaves).toHaveLength(1);
+    expect(scValToNative(leaves[0])).toBe(100n);
   });
 });
 

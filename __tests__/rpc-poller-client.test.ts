@@ -1,4 +1,14 @@
-import { computeBackoffMs, withRetry } from "../src/indexer/rpc-poller-client.js";
+import {
+  computeBackoffMs,
+  withRetry,
+  parseRetryAfterMs,
+  getRetryAfterMs,
+  getErrorStatusCode,
+  isRetryableError,
+  RpcPollerClient,
+  mapRpcEventToRow,
+  RpcEventQueue,
+} from "../src/indexer/rpc-poller-client.js";
 import { jest } from "@jest/globals";
 import Database from "better-sqlite3";
 import {
@@ -46,6 +56,15 @@ describe("RpcPollerClient – exponential backoff retry", () => {
       expect(computeBackoffMs(5, config)).toBe(30000);
       expect(computeBackoffMs(10, config)).toBe(30000);
       expect(computeBackoffMs(100, config)).toBe(30000);
+    });
+
+    it("asserts the backoff sequence never exceeds maxBackoffMs across a full sequence", () => {
+      const maxBackoffMs = 5000;
+      const testConfig = { initialBackoffMs: 200, backoffMultiplier: 2, maxBackoffMs };
+      for (let attempt = 0; attempt < 50; attempt++) {
+        const delay = computeBackoffMs(attempt, testConfig);
+        expect(delay).toBeLessThanOrEqual(maxBackoffMs);
+      }
     });
 
     it("respects custom multiplier", () => {
@@ -176,6 +195,270 @@ describe("RpcPollerClient – exponential backoff retry", () => {
         withRetry(fn, { maxRetries: 3, initialBackoffMs: 10 }, "test")
       ).rejects.toThrow("string error");
       expect(calls).toBe(1);
+    });
+
+    it("retries 429 and 503 status errors (#688)", async () => {
+      for (const status of [429, 503]) {
+        let calls = 0;
+        const fn = async () => {
+          calls++;
+          if (calls === 1) {
+            const err = new Error(`Request failed with status code ${status}`) as any;
+            err.status = status;
+            throw err;
+          }
+          return "recovered";
+        };
+        const result = await withRetry(
+          fn,
+          { maxRetries: 3, initialBackoffMs: 1, maxBackoffMs: 5 },
+          "test"
+        );
+        expect(result).toBe("recovered");
+        expect(calls).toBe(2);
+      }
+    });
+
+    it("honours Retry-After without exceeding maxBackoffMs (#688)", () => {
+      expect(parseRetryAfterMs("2")).toBe(2000);
+      expect(parseRetryAfterMs(0)).toBe(0);
+      expect(parseRetryAfterMs("not-a-date")).toBeNull();
+      expect(
+        getRetryAfterMs({ response: { headers: { "Retry-After": "3" } } })
+      ).toBe(3000);
+      expect(
+        getRetryAfterMs({ response: { headers: { "retry-after": "1" } } })
+      ).toBe(1000);
+      expect(getErrorStatusCode({ status: 429 })).toBe(429);
+      expect(isRetryableError(new Error("Request failed with status code 429"))).toBe(true);
+      expect(isRetryableError(new Error("Request failed with status code 503"))).toBe(true);
+    });
+
+    it("recovers through RpcPollerClient.getEvents after two 429s (#688)", async () => {
+      let calls = 0;
+      const server = {
+        getLatestLedger: async () => ({ sequence: 1 }),
+        getEvents: async () => {
+          calls++;
+          if (calls <= 2) {
+            const err = new Error("Request failed with status code 429") as any;
+            err.status = 429;
+            err.response = { status: 429, headers: { "Retry-After": "0" } };
+            throw err;
+          }
+          return { events: [], cursor: undefined };
+        },
+      };
+      const client = new RpcPollerClient("http://localhost", {
+        server: server as any,
+        maxRetries: 5,
+        initialBackoffMs: 1,
+        maxBackoffMs: 5,
+      });
+      const result = await client.getEvents({ startLedger: 1, limit: 10 });
+      expect(result.events).toEqual([]);
+      expect(calls).toBe(3);
+    });
+
+    it("resets backoff progression after a success", async () => {
+      // First operation fails once then succeeds
+      let firstOpCalls = 0;
+      await withRetry(
+        async () => {
+          firstOpCalls++;
+          if (firstOpCalls === 1) throw new Error("ETIMEDOUT");
+          return "ok1";
+        },
+        { maxRetries: 3, initialBackoffMs: 10 },
+        "test"
+      );
+      expect(firstOpCalls).toBe(2);
+
+      // Second operation should start fresh from attempt 0
+      let secondOpCalls = 0;
+      await withRetry(
+        async () => {
+          secondOpCalls++;
+          return "ok2";
+        },
+        { maxRetries: 3, initialBackoffMs: 10 },
+        "test"
+      );
+      expect(secondOpCalls).toBe(1);
+    });
+  });
+
+  describe("isRetryableError error classifier (#674)", () => {
+    it("returns false for falsy errors", () => {
+      expect(isRetryableError(null)).toBe(false);
+      expect(isRetryableError(undefined)).toBe(false);
+      expect(isRetryableError("")).toBe(false);
+    });
+
+    it("classifies network errors (ECONNRESET, ETIMEDOUT, ECONNREFUSED) as retryable", () => {
+      expect(isRetryableError(new Error("ECONNRESET"))).toBe(true);
+      expect(isRetryableError({ code: "ECONNRESET" })).toBe(true);
+      expect(isRetryableError(new Error("ETIMEDOUT"))).toBe(true);
+      expect(isRetryableError({ code: "ETIMEDOUT" })).toBe(true);
+      expect(isRetryableError(new Error("connect ECONNREFUSED 127.0.0.1:8000"))).toBe(true);
+      expect(isRetryableError({ code: "ECONNREFUSED" })).toBe(true);
+    });
+
+    it("classifies AbortError as retryable", () => {
+      const abortErr = new Error("The user aborted a request.");
+      abortErr.name = "AbortError";
+      expect(isRetryableError(abortErr)).toBe(true);
+      expect(isRetryableError({ name: "AbortError" })).toBe(true);
+    });
+
+    it("classifies HTTP 429, 500, 502, 503 as retryable", () => {
+      expect(isRetryableError(new Error("Request failed with status 429"))).toBe(true);
+      expect(isRetryableError({ status: 429 })).toBe(true);
+      expect(isRetryableError({ statusCode: 429 })).toBe(true);
+      expect(isRetryableError(new Error("Internal Server Error status 500"))).toBe(true);
+      expect(isRetryableError({ status: 500 })).toBe(true);
+      expect(isRetryableError({ statusCode: 502 })).toBe(true);
+      expect(isRetryableError(new Error("Service Unavailable status 503"))).toBe(true);
+      expect(isRetryableError({ status: 503 })).toBe(true);
+      expect(isRetryableError({ response: { status: 504 } })).toBe(true);
+    });
+
+    it("classifies HTTP 400 and other 4xx client errors as NOT retryable", () => {
+      expect(isRetryableError(new Error("Request failed with status 400"))).toBe(false);
+      expect(isRetryableError({ status: 400 })).toBe(false);
+      expect(isRetryableError({ statusCode: 404 })).toBe(false);
+      expect(isRetryableError({ status: 422 })).toBe(false);
+    });
+
+    it("does NOT retry JSON-RPC -32602 invalid params errors", () => {
+      expect(isRetryableError(new Error('JSON-RPC error -32602: "invalid params"'))).toBe(false);
+      expect(isRetryableError(new Error('Rpc error: invalid parameters ... illegal base64 data'))).toBe(false);
+      expect(isRetryableError({ code: -32602, message: "Invalid params" })).toBe(false);
+      expect(isRetryableError({ error: { code: -32602, message: "Invalid params" } })).toBe(false);
+    });
+  });
+
+  describe("RpcPollerClient branch coverage additions (#674)", () => {
+    it("readContractId handles contractId object throwing in contractId() method", () => {
+      const badContractObj = {
+        contractId: () => {
+          throw new Error("fail");
+        },
+      };
+      const row = mapRpcEventToRow({ contractId: badContractObj, ledger: 10 });
+      expect(row.contractId).toBe("");
+    });
+
+    it("readEventType handles undefined, null, and scValToNative errors", () => {
+      const rowUndefined = mapRpcEventToRow({ topic: [undefined], ledger: 10 });
+      expect(rowUndefined.eventType).toBe("unknown");
+
+      const rowNull = mapRpcEventToRow({ topic: [null], ledger: 10 });
+      expect(rowNull.eventType).toBe("unknown");
+
+      const rowInvalidScVal = mapRpcEventToRow({ topic: [{ invalid: "scval" }], ledger: 10 });
+      expect(rowInvalidScVal.eventType).toBe("unknown");
+    });
+
+    it("handles pagingToken and raw string topics in event key generation during fetchEventRange", async () => {
+      const server = {
+        calls: [],
+        getLatestLedger: async () => ({ sequence: 100 }),
+        getEvents: async () => ({
+          events: [
+            {
+              pagingToken: "token-abc",
+              contractId: "C1",
+              topic: ["funded"],
+              ledger: 10,
+              ledgerClosedAt: new Date().toISOString(),
+            },
+            {
+              // neither id nor pagingToken
+              contractId: "C1",
+              topic: ["funded"],
+              ledger: 10,
+              ledgerClosedAt: new Date().toISOString(),
+            },
+          ],
+          latestLedger: 100,
+        }),
+      };
+      const client = new RpcPollerClient("https://rpc.invalid", { server: server as any });
+      const res = await client.fetchEventRange({ startLedger: 10, endLedger: 10 });
+      expect(res.eventCount).toBe(2);
+    });
+
+    it("underlyingServer returns the wrapped RPC server", () => {
+      const stub = {
+        getLatestLedger: async () => ({ sequence: 100 }),
+        getEvents: async () => ({ events: [] }),
+      };
+      const client = new RpcPollerClient("https://rpc.invalid", { server: stub });
+      expect(client.underlyingServer).toBe(stub);
+      expect(client.rpcServer).toBe(stub);
+    });
+
+    it("delegates getLatestLedger and getEvents to the server with retry", async () => {
+      const stub = {
+        getLatestLedger: async () => ({ sequence: 12345 }),
+        getEvents: async (params: any) => ({ events: [], latestLedger: 12345, params }),
+      };
+      const client = new RpcPollerClient("https://rpc.invalid", { server: stub });
+      const ledgerRes = await client.getLatestLedger();
+      expect(ledgerRes.sequence).toBe(12345);
+
+      const eventsRes = await client.getEvents({ startLedger: 100 });
+      expect(eventsRes.latestLedger).toBe(12345);
+    });
+
+    it("covers previous lock rejection in withEventLock", async () => {
+      const queue = new RpcEventQueue({
+        persist: async () => true,
+      });
+
+      const row1 = {
+        contractId: "C1",
+        eventType: "funded",
+        ledgerSequence: 100,
+        timestamp: 1000,
+        dataJson: "{}",
+      };
+
+      // Run two parallel operations on the same event lock key where the first rejects
+      const key = "C1:funded:100";
+      const p1 = (queue as any).withEventLock(key, async () => {
+        throw new Error("first lock failed");
+      });
+      const p2 = (queue as any).withEventLock(key, async () => {
+        return "second lock succeeded";
+      });
+
+      await expect(p1).rejects.toThrow("first lock failed");
+      const res2 = await p2;
+      expect(res2).toBe("second lock succeeded");
+    });
+
+    it("RpcEventQueue flush handles already persisted keys and duplicates", async () => {
+      const queue = new RpcEventQueue({
+        persist: async () => true,
+      });
+
+      const row1 = {
+        contractId: "C1",
+        eventType: "funded",
+        ledgerSequence: 100,
+        timestamp: 1000,
+        dataJson: "{}",
+      };
+
+      // Enqueue and flush first time so it is in persistedKeys
+      await queue.submit([row1]);
+
+      // Manually add row1 into (queue as any).pending without deduplicating via enqueue
+      (queue as any).pending.push(row1);
+      const flushRes = await queue.flush();
+      expect(flushRes.duplicateCount).toBe(1);
     });
   });
 });

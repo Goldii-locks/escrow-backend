@@ -6,7 +6,7 @@ import { jest } from "@jest/globals";
  * This imports the real entry point rather than re-implementing the check,
  * so deleting the assertion — or moving it below a side effect — fails here.
  * ES module imports are evaluated before the module body, so the throw
- * happens after dotenv.config() but before runMigrations(), startPoller()
+ * happens after dotenv/config has loaded but before runMigrations(), startPoller()
  * and app.listen(); nothing binds a port and no database is touched.
  */
 describe("production startup assertion (src/index.ts)", () => {
@@ -27,7 +27,7 @@ describe("production startup assertion (src/index.ts)", () => {
     delete process.env.ALLOWED_ORIGINS;
     delete process.env.CONTRACT_ID;
 
-    // dotenv.config() may repopulate some of these from a local .env, so
+    // dotenv/config may repopulate some of these from a local .env, so
     // assert on the ones the repo's .env.example does not provide.
     await expect(import("../src/index.js")).rejects.toThrow(
       /Missing required production environment variables:.*API_KEY/,

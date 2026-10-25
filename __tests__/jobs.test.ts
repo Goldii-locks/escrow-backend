@@ -1,8 +1,10 @@
 import { jest } from "@jest/globals";
 import request from "supertest";
 import express from "express";
-import { autoAuth, TEST_API_KEY } from "./helpers/api-key-helper.js";
+import { autoAuth } from "./helpers/api-key-helper.js";
 import type { NextFunction, Request, Response } from "express";
+import { xdr } from "@stellar/stellar-sdk";
+import { jobScVal, CLIENT, FREELANCER, ARBITER, TOKEN } from "./helpers/scval-fixtures.js";
 
 const VALID_CONTRACT =
   "CDD5WKK3WT3QVKXMXTJNDIXE4T73FK6GGXDSD6UTJAH6YYZU52SQ4MUH";
@@ -106,5 +108,50 @@ describe("GET /api/jobs/:contractId – error interceptor", () => {
       .expect(500);
 
     expect(res.body).toEqual({ success: false, error: "Internal server error" });
+  });
+});
+
+describe("GET /api/jobs/:contractId – real ScVal decoding (#597)", () => {
+  beforeEach(() => {
+    mockGetAccount.mockReset();
+    mockSimulateTransaction.mockReset();
+    mockGetAccount.mockResolvedValue({
+      accountId: () => "GAODBHVR63Z56MVQRBEJSYM2H5423LJ4WAPUUBOFG4JYY72S6ROKVZRX",
+      sequenceNumber: () => "123456789",
+      incrementSequenceNumber: () => {},
+    });
+  });
+
+  it("decodes an scvMap retval into the job payload", async () => {
+    const big = 2n ** 100n + 7n; // well above Number.MAX_SAFE_INTEGER
+    mockSimulateTransaction.mockResolvedValue({
+      result: {
+        retval: jobScVal([
+          { amount: 500n, status: "Pending" },
+          { amount: big, status: "Released" },
+        ]),
+      },
+    });
+
+    const res = await request(buildApp()).get(`/api/jobs/${VALID_CONTRACT}`).expect(200);
+
+    expect(res.body.data).toEqual({
+      id: VALID_CONTRACT,
+      client: CLIENT,
+      freelancer: FREELANCER,
+      arbiter: ARBITER,
+      token: TOKEN,
+      funded: true,
+      milestones: [
+        { index: 0, amount: "500", status: "Pending" },
+        { index: 1, amount: big.toString(), status: "Released" },
+      ],
+    });
+  });
+
+  it("returns 500 for a retval that is not a job struct", async () => {
+    mockSimulateTransaction.mockResolvedValue({ result: { retval: xdr.ScVal.scvU32(1) } });
+
+    await request(buildApp()).get(`/api/jobs/${VALID_CONTRACT}`).expect(500);
   });
 });

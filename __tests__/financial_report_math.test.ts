@@ -54,6 +54,23 @@ describe("financial_report_math", () => {
       expect(divideHalfEven(149999n, 100000n)).toBe(1n); // 1.49999
       expect(divideHalfEven(150001n, 100000n)).toBe(2n); // 1.50001
     });
+
+    it("handles negative values and division by zero (#669)", () => {
+      expect(divideHalfEven(-7n, 2n)).toBe(-4n);
+      expect(divideHalfEven(-8n, 3n)).toBe(-3n);
+      expect(divideHalfEven(7n, -2n)).toBe(-4n);
+      expect(() => divideHalfEven(1n, 0n)).toThrow(RangeError);
+    });
+
+    it("satisfies odd-function symmetry property: divideHalfEven(-a, b) === -divideHalfEven(a, b)", () => {
+      for (let i = 0; i < 100; i++) {
+        const a = BigInt(Math.floor(Math.random() * 100000) + 1);
+        const b = BigInt(Math.floor(Math.random() * 1000) + 1);
+        expect(divideHalfEven(-a, b)).toBe(-divideHalfEven(a, b));
+        expect(divideHalfEven(a, -b)).toBe(-divideHalfEven(a, b));
+        expect(divideHalfEven(-a, -b)).toBe(divideHalfEven(a, b));
+      }
+    });
   });
 
   describe("sumAmounts", () => {
