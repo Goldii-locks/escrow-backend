@@ -12,7 +12,7 @@ import {
   initializeSyncRangesTable,
   isLedgerSynced,
   SYNC_RANGES_INDEXES,
-} from "../src/indexer/duplicate-prevention.js";
+} from "../src/indexer/db.js";
 import {
   explainQueryPlan,
   queryPlanUsesIndex,

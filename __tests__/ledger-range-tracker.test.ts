@@ -8,7 +8,7 @@ import {
   insertEventBatch,
   type EventRow,
 } from "../src/indexer/db.js";
-import { countEventsInRange } from "../src/indexer/duplicate-prevention.js";
+import { countEventsInRange } from "../src/indexer/db.js";
 import {
   getLedgerRangeSnapshot,
   advanceLedgerIfMatch,
