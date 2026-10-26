@@ -59,11 +59,12 @@ describe("Poller scheduled delay vs logged pollIntervalMs (#639)", () => {
     startPoller();
     await jest.advanceTimersByTimeAsync(0);
 
-    const pollLog = infoSpy.mock.calls.find(
-      (call) => call[0] === "Processed indexer poll"
-    );
+    // logger.info is typed with winston's overloads; read the calls loosely.
+    const calls = infoSpy.mock.calls as unknown as Array<[unknown, unknown]>;
+    const pollLog = calls.find((call) => call[0] === "Processed indexer poll");
     expect(pollLog).toBeDefined();
-    const loggedInterval = (pollLog?.[1] as { pollIntervalMs: number })?.pollIntervalMs;
+    const loggedInterval = (pollLog?.[1] as { pollIntervalMs: number } | undefined)
+      ?.pollIntervalMs;
     expect(typeof loggedInterval).toBe("number");
 
     const timerCall = setTimeoutSpy.mock.calls.find(

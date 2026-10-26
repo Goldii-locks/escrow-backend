@@ -664,6 +664,29 @@ paths:
         '401':
           description: Unauthorized (missing or invalid admin API key)
 
+  /api/admin/metrics:
+    get:
+      summary: Indexer metrics snapshot
+      description: Current indexer metrics from the indexer metrics collector.
+      security:
+        - AdminApiKeyAuth: []
+      responses:
+        '200':
+          description: Metrics snapshot
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  metrics:
+                    type: object
+        '401':
+          description: Unauthorized (missing or invalid admin API key)
+        '500':
+          description: Metrics could not be collected
+
   /api/admin/webhook-subscriptions:
     get:
       summary: List webhook subscriptions, including auto-disabled ones

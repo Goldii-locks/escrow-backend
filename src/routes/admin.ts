@@ -34,6 +34,7 @@ import {
 import { sendSuccess } from "../utils/api-response.js";
 import logger from "../utils/logger.js";
 import { formatError } from "../utils/format-error.js";
+import { collectIndexerMetrics } from "../indexer/indexer_metrics_collector.js";
 
 const router = Router();
 
@@ -245,5 +246,18 @@ router.get("/webhook-subscriptions", (_req, res) => {
   });
 });
 
-export default router;
+router.get("/metrics", (_req, res) => {
+  try {
+    const metrics = collectIndexerMetrics();
+    res.json({ success: true, metrics });
+  } catch (err) {
+    logger.error("admin metrics endpoint failed to collect metrics", {
+      error: formatError(err),
+    });
+    res
+      .status(500)
+      .json({ success: false, error: "Failed to collect indexer metrics" });
+  }
+});
 
+export default router;
