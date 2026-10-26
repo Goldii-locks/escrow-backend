@@ -31,6 +31,16 @@ import {
 } from "./caches.js";
 import { formatError } from "../../utils/format-error.js";
 
+
+/**
+ * build-tx answers with the standard `{ success, data: { xdr } }` envelope
+ * (#772). The top-level `xdr` is kept, deprecated, because the deployed
+ * frontend still reads it; drop it once escrow-frontend reads `data.xdr`.
+ */
+function sendBuildTxSuccess(res: Response, xdr: string): void {
+  res.status(200).json({ success: true, data: { xdr }, xdr });
+}
+
 const router = Router();
 
 // ---------------------------------------------------------------------------
@@ -123,7 +133,7 @@ router.post(
           cached: true,
           xdrLength: cached.length,
         });
-        res.json({ success: true, xdr: cached });
+        sendBuildTxSuccess(res, cached);
         return;
       }
 
@@ -168,6 +178,9 @@ router.post(
             if (a.type === "u32") return nativeToScVal(a.value, { type: "u32" });
             if (a.type === "u64") return nativeToScVal(BigInt(a.value), { type: "u64" });
             if (a.type === "bool") return nativeToScVal(a.value, { type: "bool" });
+            // Hex-encoded bytes, e.g. the BytesN<32> milestone spec hashes
+            // `initialize` takes.
+            if (a.type === "bytes") return nativeToScVal(Buffer.from(String(a.value), "hex"));
             if (a.type === "vec") {
               return nativeToScVal(a.value.map((item: any) => toScVal(item)));
             }
@@ -258,7 +271,7 @@ router.post(
         xdrLength: xdr.length,
       });
 
-      res.json({ success: true, xdr });
+      sendBuildTxSuccess(res, xdr);
     } catch (err: unknown) {
       const message = formatError(err);
       const stack = err instanceof Error ? err.stack : undefined;

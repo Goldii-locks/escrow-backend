@@ -228,6 +228,14 @@ export const buildTxArgSchema: z.ZodTypeAny = z.discriminatedUnion("type", [
   z.object({ type: z.literal("u32"), value: buildTxU32ValueSchema }),
   z.object({ type: z.literal("u64"), value: buildTxU64ValueSchema }),
   z.object({ type: z.literal("bool"), value: z.boolean() }),
+  // Hex-encoded bytes, e.g. the BytesN<32> milestone spec hashes `initialize`
+  // takes (#772).
+  z.object({
+    type: z.literal("bytes"),
+    value: z
+      .string()
+      .regex(/^(?:[0-9a-fA-F]{2})*$/, { message: "value must be an even-length hex string" }),
+  }),
   z.object({
     type: z.literal("vec"),
     value: z.array(z.lazy(() => buildTxArgSchema)),

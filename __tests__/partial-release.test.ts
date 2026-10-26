@@ -307,7 +307,7 @@ describe("POST /api/jobs/:contractId/milestones/:index/partial-release", () => {
       .post(ENDPOINT)
       .send(VALID_BODY)
       .expect(200);
-    expect(res.body).toEqual({ success: true, xdr: "AAAAAQ==" });
+    expect(res.body).toEqual({ success: true, data: { xdr: "AAAAAQ==" } });
   });
 
   it("rejects amount provided as a JSON number (#678)", async () => {
@@ -412,7 +412,7 @@ describe("POST /api/jobs/:contractId/milestones/:index/partial-release", () => {
         .post(ENDPOINT)
         .send(VALID_BODY)
         .expect(200);
-      expect(res.body).toEqual({ success: true, xdr: "AAAAAQ==" });
+      expect(res.body).toEqual({ success: true, data: { xdr: "AAAAAQ==" } });
     });
 
     it("ignores a wrong x-api-key header instead of rejecting it", async () => {
@@ -421,7 +421,7 @@ describe("POST /api/jobs/:contractId/milestones/:index/partial-release", () => {
         .set("x-api-key", "wrong-key")
         .send(VALID_BODY)
         .expect(200);
-      expect(res.body).toEqual({ success: true, xdr: "AAAAAQ==" });
+      expect(res.body).toEqual({ success: true, data: { xdr: "AAAAAQ==" } });
     });
 
     it("returns 200 when API_KEY is set and correct key is provided", async () => {
@@ -439,7 +439,7 @@ describe("POST /api/jobs/:contractId/milestones/:index/partial-release", () => {
         .post(ENDPOINT)
         .send(VALID_BODY)
         .expect(200);
-      expect(res.body).toEqual({ success: true, xdr: "AAAAAQ==" });
+      expect(res.body).toEqual({ success: true, data: { xdr: "AAAAAQ==" } });
     });
   });
 
@@ -527,8 +527,8 @@ describe("POST /api/jobs/:contractId/milestones/:index/partial-release", () => {
 
       expect(res1.status).toBe(200);
       expect(res2.status).toBe(200);
-      expect(res1.body).toEqual({ success: true, xdr: "AAAAAQ==" });
-      expect(res2.body).toEqual({ success: true, xdr: "AAAAAQ==" });
+      expect(res1.body).toEqual({ success: true, data: { xdr: "AAAAAQ==" } });
+      expect(res2.body).toEqual({ success: true, data: { xdr: "AAAAAQ==" } });
       expect(mockPrepareTransaction).toHaveBeenCalledTimes(1);
     });
 

@@ -465,6 +465,18 @@ paths:
       responses:
         '200':
           description: Transaction XDR built
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      xdr:
+                        type: string
         '400':
           description: Invalid parameters or disallowed method
         '429':
@@ -502,6 +514,18 @@ paths:
       responses:
         '200':
           description: Unsigned transaction XDR
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      xdr:
+                        type: string
         '400':
           description: Validation error
         '429':
@@ -582,6 +606,18 @@ paths:
       responses:
         '200':
           description: Unsigned transaction XDR
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      xdr:
+                        type: string
         '400':
           description: Validation error
         '429':

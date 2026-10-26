@@ -175,7 +175,8 @@ Build an unsigned transaction to add or remove whitelisted tokens.
 Build an unsigned transaction XDR for authorized contract entrypoints.
 - **Auth**: None (Public; caller wallet signs)
 - **Rate Limit**: 20 requests / minute (`BUILD_TX_RATE_MAX`)
-- **Body**: `{ contractId, method, args, sourceAddress }`
+- **Body**: `{ contractId, method, args, sourceAddress }`; each arg is `{ type, value }` with `type` one of `address`, `i128`, `u32`, `u64`, `bool`, `bytes` (hex string) or `vec`
+- **Response**: `{ success: true, data: { xdr } }`
 
 #### POST /api/jobs/:contractId/milestones/:index/partial-release
 
@@ -184,6 +185,7 @@ Build an unsigned transaction XDR for partial milestone release.
 - **Rate Limit**: 10 requests / minute (`PARTIAL_RELEASE_RATE_MAX`)
 - **Params**: `contractId`, `index` (milestone index)
 - **Body**: `{ amount, sourceAddress }`
+- **Response**: `{ success: true, data: { xdr } }`
 
 #### GET /api/jobs/:contractId/milestones/:index/time-remaining (and /auto-release)
 
@@ -200,6 +202,7 @@ Build an unsigned transaction XDR to claim an auto-released milestone.
 - **Rate Limit**: 10 requests / minute (`CLAIM_AUTO_RELEASE_RATE_MAX`)
 - **Params**: `contractId`, `index`
 - **Body**: `{ sourceAddress }`
+- **Response**: `{ success: true, data: { xdr } }`
 
 #### POST /api/jobs/submit
 

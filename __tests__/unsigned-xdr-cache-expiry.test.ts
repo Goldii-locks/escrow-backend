@@ -124,7 +124,7 @@ it("uses a 120–300s signing window for unsigned transactions", () => {
 describe.each(ROUTES)("$name unsigned XDR cache (#677)", ({ path, body }) => {
   it("sets time bounds of now + UNSIGNED_TX_TIMEOUT_S", async () => {
     const res = await request(app).post(path).send(body).expect(200);
-    expect(maxTimeOf(res.body.xdr)).toBe(nowS() + UNSIGNED_TX_TIMEOUT_S);
+    expect(maxTimeOf(res.body.data.xdr)).toBe(nowS() + UNSIGNED_TX_TIMEOUT_S);
   });
 
   it("serves the cached XDR while enough validity remains", async () => {
@@ -133,21 +133,21 @@ describe.each(ROUTES)("$name unsigned XDR cache (#677)", ({ path, body }) => {
     setClock(UNSIGNED_TX_TIMEOUT_S - UNSIGNED_TX_MIN_REMAINING_S - 1);
     const second = await request(app).post(path).send(body).expect(200);
 
-    expect(second.body.xdr).toBe(first.body.xdr);
+    expect(second.body.data.xdr).toBe(first.body.data.xdr);
     expect(mockPrepareTransaction).toHaveBeenCalledTimes(1);
   });
 
   it("rebuilds a fresh XDR for requests late in the validity window", async () => {
     const first = await request(app).post(path).send(body).expect(200);
-    const firstMaxTime = maxTimeOf(first.body.xdr);
+    const firstMaxTime = maxTimeOf(first.body.data.xdr);
 
     setClock(UNSIGNED_TX_TIMEOUT_S - UNSIGNED_TX_MIN_REMAINING_S + 1);
     const late = await request(app).post(path).send(body).expect(200);
 
-    expect(late.body.xdr).not.toBe(first.body.xdr);
+    expect(late.body.data.xdr).not.toBe(first.body.data.xdr);
     expect(mockPrepareTransaction).toHaveBeenCalledTimes(2);
-    expect(maxTimeOf(late.body.xdr)).toBe(nowS() + UNSIGNED_TX_TIMEOUT_S);
-    expect(maxTimeOf(late.body.xdr)).toBeGreaterThan(firstMaxTime);
+    expect(maxTimeOf(late.body.data.xdr)).toBe(nowS() + UNSIGNED_TX_TIMEOUT_S);
+    expect(maxTimeOf(late.body.data.xdr)).toBeGreaterThan(firstMaxTime);
   });
 
   it("never serves an XDR with less than the minimum signing window left", async () => {
@@ -155,7 +155,7 @@ describe.each(ROUTES)("$name unsigned XDR cache (#677)", ({ path, body }) => {
     for (let t = 0; t <= UNSIGNED_TX_TIMEOUT_S * 3; t += 7) {
       setClock(t);
       const res = await request(app).post(path).send(body).expect(200);
-      const remaining = maxTimeOf(res.body.xdr) - Date.now() / 1000;
+      const remaining = maxTimeOf(res.body.data.xdr) - Date.now() / 1000;
       expect(remaining).toBeGreaterThanOrEqual(UNSIGNED_TX_MIN_REMAINING_S);
       expect(remaining).toBeLessThanOrEqual(UNSIGNED_TX_TIMEOUT_S);
     }

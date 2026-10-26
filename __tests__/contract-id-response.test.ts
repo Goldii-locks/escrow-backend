@@ -145,7 +145,7 @@ describe("GET /api/jobs/:contractId – response format and status codes", () =>
   });
 
   it("returns 200 with a standardized success envelope for a valid job", async () => {
-    const retval = jobScVal();
+    const retval = jobScVal([{ amount: 100n, status: "Delivered" }]);
 
     mockSimulateTransaction.mockResolvedValue({
       result: { retval },
@@ -156,15 +156,15 @@ describe("GET /api/jobs/:contractId – response format and status codes", () =>
       .expect(200);
 
     expect(res.body.success).toBe(true);
-    expect(res.body.data).toMatchObject({
+    expect(res.body.data).toEqual({
       id: VALID_CONTRACT,
       client: CLIENT,
       freelancer: FREELANCER,
       arbiter: ARBITER,
       token: TOKEN,
       funded: true,
+      milestones: [{ index: 0, amount: "100", status: "Delivered" }],
     });
-    expect(Array.isArray(res.body.data.milestones)).toBe(true);
   });
 });
 
