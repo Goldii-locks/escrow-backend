@@ -48,6 +48,28 @@ export const strictLimiter = rateLimit({
   message: rateLimitMessage,
 });
 
+/**
+ * Dedicated limit for the webhook subscription mutations (#604). The shared
+ * general limiter is one bucket for every client, so a single caller could
+ * exhaust it and lock everyone else out; these two routes also mutate
+ * subscriptions, so they get their own budget on top of the general one.
+ */
+const webhookMax = parseInt(
+  process.env.WEBHOOK_RATE_LIMIT_MAX || "30",
+  10
+);
+
+export const webhookLimiter = rateLimit({
+  windowMs,
+  max: webhookMax,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: rateLimitMessage,
+  // Suite-wide requests come from one address, so the budget is skipped under
+  // test rather than set to zero (a zero max rejects every request).
+  skip: () => process.env.NODE_ENV === "test",
+});
+
 export function walletLookupLimiter(req: Request, res: Response, next: NextFunction): void {
   const key = req.ip || req.socket.remoteAddress || "unknown";
   const now = Date.now();
