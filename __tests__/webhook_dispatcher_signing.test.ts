@@ -5,6 +5,7 @@ import {
   setDb,
   insertEvent,
   addSubscription,
+  registerContract,
 } from "../src/indexer/db.js";
 
 const mockLogger = {
@@ -26,7 +27,7 @@ const {
 } = await import("../src/utils/webhook_dispatcher.js");
 
 const CONTRACT_A =
-  "CA3D5K7UXYZ123456789012345678901234567890123456789012345678901";
+  "CDD5WKK3WT3QVKXMXTJNDIXE4T73FK6GGXDSD6UTJAH6YYZU52SQ4MUH";
 const WEBHOOK_URL = "https://example.com/webhook";
 
 let testDb: Database.Database;
@@ -45,6 +46,8 @@ beforeEach(() => {
   testDb.exec("DELETE FROM webhook_subscriptions");
   testDb.exec("DELETE FROM events");
   jest.clearAllMocks();
+  // Subscribe requires the contract to be indexed (monitored + active).
+  registerContract(CONTRACT_A, "test contract");
 });
 
 describe("webhook_dispatcher telemetry (#520)", () => {

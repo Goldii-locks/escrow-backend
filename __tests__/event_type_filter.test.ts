@@ -10,12 +10,15 @@ import {
   removeSubscription,
   getSubscriptions,
   getSubscriptionsForContract,
+  registerContract,
   type WebhookSubscription,
 } from "../src/indexer/db.js";
 import logger from "../src/utils/logger.js";
 
-const CONTRACT_A = "CA3D5K7UXYZ123456789012345678901234567890123456789012345678901";
-const CONTRACT_B = "CB3D5K7UXYZ123456789012345678901234567890123456789012345678902";
+const CONTRACT_A =
+  "CDD5WKK3WT3QVKXMXTJNDIXE4T73FK6GGXDSD6UTJAH6YYZU52SQ4MUH";
+const CONTRACT_B =
+  "CBQWCYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQWCV5G";
 const WEBHOOK_URL_A = "https://example.com/webhook-a";
 const WEBHOOK_URL_B = "https://example.com/webhook-b";
 
@@ -37,6 +40,8 @@ beforeEach(() => {
   testDb.exec("DELETE FROM indexer_state WHERE key != 'last_ledger_sequence'");
   jest.restoreAllMocks();
   jest.clearAllMocks();
+  // The subscribe route requires the contract to be indexed (monitored + active).
+  registerContract(CONTRACT_A, "test contract");
 });
 
 afterEach(() => {

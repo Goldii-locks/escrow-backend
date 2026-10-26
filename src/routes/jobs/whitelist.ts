@@ -29,6 +29,7 @@ import { whitelistCache ,
   inFlightWhitelistRequests,
   UNSIGNED_TX_TIMEOUT_S,
 } from "./caches.js";
+import { formatError } from "../../utils/format-error.js";
 
 const router = Router();
 
@@ -138,11 +139,11 @@ router.get(
       }
 
       sendSuccess(res, { tokens });
-    } catch (err: any) {
+    } catch (err: unknown) {
       // Robust error handling with no stack trace leakage. Errors keep their
       // original message so they can be classified here rather than collapsed
       // into a single generic failure.
-      const message = err?.message ?? "Internal server error";
+      const message = formatError(err);
 
       // 401: authentication rejected by the RPC layer
       if (/unauthorized|invalid authentication/i.test(message)) {
@@ -237,8 +238,8 @@ router.post(
         logger.info("Whitelist update transaction built", { contractId, token, action });
         sendSuccess(res, { xdr });
         return;
-      } catch (err: any) {
-        const message = err?.message ?? String(err);
+      } catch (err: unknown) {
+        const message = formatError(err);
         if (/unauthorized|invalid authentication/i.test(message)) {
           logger.warn("Unauthorized request for whitelist update", { contractId });
           sendError(res, 401, "Unauthorized");
@@ -300,8 +301,8 @@ router.post(
         400,
         "Bulk whitelist update is not supported: submit one { token, action, adminAddress } request per address to receive a signable transaction",
       );
-    } catch (err: any) {
-      const message = err?.message ?? String(err);
+    } catch (err: unknown) {
+      const message = formatError(err);
       if (/unauthorized|invalid authentication/i.test(message)) {
         logger.warn("Unauthorized request for whitelist update", { contractId });
         sendError(res, 401, "Unauthorized");

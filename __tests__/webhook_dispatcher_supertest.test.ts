@@ -11,6 +11,7 @@ import {
   initSchema,
   setDb,
   addSubscription,
+  registerContract,
   closeDb,
 } from "../src/indexer/db.js";
 
@@ -28,7 +29,7 @@ jest.unstable_mockModule("../src/utils/logger.js", () => ({
 const { default: router } = await import("../src/routes/webhooks.js");
 
 const CONTRACT_A =
-  "CA3D5K7UXYZ123456789012345678901234567890123456789012345678901";
+  "CDD5WKK3WT3QVKXMXTJNDIXE4T73FK6GGXDSD6UTJAH6YYZU52SQ4MUH";
 
 const ADMIN_KEY = "webhook-supertest-admin-key";
 const originalAdminKey = process.env.ADMIN_API_KEY;
@@ -66,6 +67,8 @@ beforeEach(() => {
   process.env.ADMIN_API_KEY = ADMIN_KEY;
   testDb.exec("DELETE FROM webhook_subscriptions");
   jest.clearAllMocks();
+  // Subscribe requires the contract to be indexed (monitored + active).
+  registerContract(CONTRACT_A, "test contract");
 });
 
 afterEach(() => {

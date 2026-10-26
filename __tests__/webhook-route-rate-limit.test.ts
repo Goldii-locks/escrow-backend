@@ -17,8 +17,10 @@ import Database from "better-sqlite3";
 import request from "supertest";
 import express from "express";
 
+// A valid contract id: subscribe now rejects malformed ids and contracts the
+// indexer does not monitor (#641), so the tests register it first.
 const CONTRACT =
-  "CA3D5K7UXYZ123456789012345678901234567890123456789012345678901";
+  "CDD5WKK3WT3QVKXMXTJNDIXE4T73FK6GGXDSD6UTJAH6YYZU52SQ4MUH";
 const ADMIN_KEY = "webhook-rate-limit-admin-key";
 
 const ORIGINAL_ENV = { ...process.env };
@@ -37,6 +39,7 @@ describe("webhook mutation rate limit (#604)", () => {
     const db = await import("../src/indexer/db.js");
     db.setDb(testDb);
     db.initSchema();
+    db.registerContract(CONTRACT, "test contract");
 
     const { default: router } = await import("../src/routes/webhooks.js");
 
