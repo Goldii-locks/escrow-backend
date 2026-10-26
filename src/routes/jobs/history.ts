@@ -13,6 +13,7 @@ import {
   historyQuerySchema,
 } from "./shared.js";
 import type { RequestWithValidatedQuery, ByWalletQuery } from "./shared.js";
+import { formatError } from "../../utils/format-error.js";
 
 const router = Router();
 
@@ -39,11 +40,11 @@ router.get(
 
       const result = getEventsByContract(contractId, page, limit);
       sendSuccess(res, result);
-    } catch (err: any) {
+    } catch (err: unknown) {
       // Log the detail server-side only; never forward raw DB errors (#672).
       logger.error("Failed to fetch job history", {
         contractId: req.params.contractId,
-        error: err?.message,
+        error: formatError(err),
       });
       sendError(res, 500, "Internal server error");
     }

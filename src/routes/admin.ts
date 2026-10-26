@@ -15,6 +15,9 @@ import {
 } from "../indexer/webhook-delivery.js";
 import {
   fetchHistoricalEvents,
+  getConsecutiveFailures,
+  getCurrentPollIntervalMs,
+  getLastSuccessfulPollAt,
   getLatestLedgerSequence,
   validateHistoricalRange,
   type HistoricalImportResult,
@@ -28,6 +31,9 @@ import {
   registerContract,
   deregisterContract,
 } from "../indexer/db.js";
+import { sendSuccess } from "../utils/api-response.js";
+import logger from "../utils/logger.js";
+import { formatError } from "../utils/format-error.js";
 
 const router = Router();
 
@@ -184,10 +190,33 @@ router.delete("/contracts/:contractId", validate(contractParamSchema, "params"),
   });
 });
 
-router.get("/indexer-status", (_req, res) => {
+/**
+ * ledgerLag (chain head - lastIndexedLedger) requires an RPC call, so cache it
+ * for a few seconds to avoid hitting the RPC on every status refresh. An RPC
+ * failure reports ledgerLag as null instead of failing the whole status call.
+ */
+const LEDGER_LAG_CACHE_TTL_MS = 5000;
+let ledgerLagCache: { value: number; at: number } | null = null;
+
+async function getLedgerLagCached(lastIndexedLedger: number): Promise<number | null> {
+  const now = Date.now();
+  if (ledgerLagCache && now - ledgerLagCache.at < LEDGER_LAG_CACHE_TTL_MS) {
+    return ledgerLagCache.value;
+  }
+  try {
+    const lag = (await getLatestLedgerSequence()) - lastIndexedLedger;
+    ledgerLagCache = { value: lag, at: now };
+    return lag;
+  } catch (err) {
+    logger.warn("Could not read chain head for indexer status", { error: formatError(err) });
+    return null;
+  }
+}
+
+router.get("/indexer-status", async (_req, res) => {
   const status = getIndexerStatusData();
-  res.json({
-    success: true,
+  const ledgerLag = await getLedgerLagCached(status.lastIndexedLedger);
+  sendSuccess(res, {
     lastIndexedLedger: status.lastIndexedLedger,
     totalEvents: status.totalEvents,
     uptimeSeconds: getIndexerUptimeSeconds(),
@@ -197,10 +226,14 @@ router.get("/indexer-status", (_req, res) => {
     reconciliation: getLatestReconciliationResults(),
     failedDeliveries: getFailedDeliveryCount(),
     deadDeliveries: getDeadDeliveries(),
+    consecutiveFailures: getConsecutiveFailures(),
+    lastSuccessfulPollAt: getLastSuccessfulPollAt(),
+    pollIntervalMs: getCurrentPollIntervalMs(),
+    ledgerLag,
   });
 });
 
-// GET /api/admin/webhook-subscriptions – every webhook subscription,
+// GET /api/admin/webhook-subscriptions - every webhook subscription,
 // including the ones that were auto-disabled after repeated delivery
 // failures (#701).
 router.get("/webhook-subscriptions", (_req, res) => {

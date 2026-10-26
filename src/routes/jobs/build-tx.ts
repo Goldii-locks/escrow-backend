@@ -29,6 +29,7 @@ import {
   getFreshCachedXdr,
   setCachedXdr,
 } from "./caches.js";
+import { formatError } from "../../utils/format-error.js";
 
 const router = Router();
 
@@ -210,12 +211,12 @@ router.post(
       let xdr: string;
       try {
         xdr = await requestPromise;
-      } catch (err: any) {
+      } catch (err: unknown) {
         logger.debug("RPC promise rejected for build-tx, clearing cache entry", {
           traceId,
           ...pathVars,
           cacheKey,
-          error: err?.message ?? String(err),
+          error: formatError(err),
         });
         buildTxCache.del(cacheKey);
         throw err;
@@ -258,9 +259,9 @@ router.post(
       });
 
       res.json({ success: true, xdr });
-    } catch (err: any) {
-      const message = err?.message ?? String(err);
-      const stack = err?.stack;
+    } catch (err: unknown) {
+      const message = formatError(err);
+      const stack = err instanceof Error ? err.stack : undefined;
       logger.debug("Build-tx error caught", {
         traceId,
         ...pathVars,

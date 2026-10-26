@@ -36,6 +36,7 @@ import {
   SimError,
   classifySimError,
 } from "./errors.js";
+import { formatError } from "../../utils/format-error.js";
 
 const router = Router();
 
@@ -197,7 +198,7 @@ router.get(
         logger.info("Fee preview served from in-flight cache", { contractId, amount });
       }
       sendSuccess(res, split);
-    } catch (err: any) {
+    } catch (err: unknown) {
       // Failures are never cached; the client only sees a classified status
       // and a fixed message, never the raw RPC error.
       if (err instanceof SimError) {
@@ -207,7 +208,7 @@ router.get(
       logger.error("Failed to compute fee preview", {
         contractId,
         amount,
-        error: err?.message ?? String(err),
+        error: formatError(err),
       });
       sendError(res, 500, "Internal server error");
     } finally {
@@ -289,9 +290,9 @@ router.get(
         token: job.token,
       });
       sendSuccess(res, job);
-    } catch (err: any) {
+    } catch (err: unknown) {
       if (!(err instanceof SimError)) {
-        logger.error("Failed to fetch job", { contractId, error: err?.message });
+        logger.error("Failed to fetch job", { contractId, error: formatError(err) });
       }
       sendError(res, 500, "Internal server error");
     }

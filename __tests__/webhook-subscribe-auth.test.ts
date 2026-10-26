@@ -14,14 +14,17 @@ import request from "supertest";
 import express from "express";
 import {
   initSchema,
+  registerContract,
   setDb,
   addSubscription,
   getSubscriptions,
 } from "../src/indexer/db.js";
 
 const KEY = "webhook-auth-test-admin-key";
+// A valid contract id: subscribe now rejects malformed ids and contracts the
+// indexer does not monitor (#641), so the tests register it first.
 const CONTRACT =
-  "CA3D5K7UXYZ123456789012345678901234567890123456789012345678901";
+  "CDD5WKK3WT3QVKXMXTJNDIXE4T73FK6GGXDSD6UTJAH6YYZU52SQ4MUH";
 const SUBSCRIBED_URL = "https://example.com/hook";
 const ATTACKER_URL = "https://attacker.example/hook";
 
@@ -50,6 +53,7 @@ afterAll(() => {
 beforeEach(() => {
   process.env.ADMIN_API_KEY = KEY;
   testDb.exec("DELETE FROM webhook_subscriptions");
+  registerContract(CONTRACT, "test contract");
 });
 
 afterEach(() => {

@@ -216,7 +216,7 @@ Submit a signed transaction to the Stellar network and return execution status.
 
 Retrieve indexer health, current ledger, event counters, uptime, and reconciliation status.
 - **Auth**: Admin API Key (`x-api-key: <ADMIN_API_KEY>` or `Bearer`)
-- **Response**: `{ success: true, lastIndexedLedger, totalEvents, uptimeSeconds, lastEventAt, eventsByType, reconciliation }`
+- **Response**: `{ success: true, data: { lastIndexedLedger, totalEvents, uptimeSeconds, lastEventAt, eventsByType, skippedLedgerRange, reconciliation, failedDeliveries, deadDeliveries, consecutiveFailures, lastSuccessfulPollAt, pollIntervalMs, ledgerLag } }` (`ledgerLag` is `null` when the RPC head cannot be read)
 
 #### GET /api/admin/webhook-subscriptions
 

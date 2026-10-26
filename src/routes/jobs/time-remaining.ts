@@ -27,6 +27,7 @@ import {
   SimError,
   classifySimError,
 } from "./errors.js";
+import { formatError } from "../../utils/format-error.js";
 
 const router = Router();
 
@@ -60,7 +61,6 @@ router.get(
         contractId,
         index,
         ip: req.ip ?? req.socket?.remoteAddress,
-        requestId: (req as any).requestId,
       });
 
       const cached = timeRemainingCache.get<number>(cacheKey);
@@ -124,13 +124,12 @@ router.get(
         logger.info("Time remaining served from in-flight cache", { contractId, index });
       }
       sendSuccess(res, { secondsRemaining });
-    } catch (err: any) {
+    } catch (err: unknown) {
       if (err instanceof SimError) {
         logger.warn("Simulation error for time-remaining", {
           contractId,
           index,
           status: err.status,
-          requestId: (req as any).requestId,
         });
         if (err.status === 404) {
           sendError(res, 404, "Job not found");
@@ -140,11 +139,10 @@ router.get(
         return;
       }
       logger.error("Failed to get time remaining", {
-        error: err?.message,
+        error: formatError(err),
         contractId: req.params.contractId,
         index: req.params.index,
-        stack: err?.stack,
-        requestId: (req as any).requestId,
+        stack: err instanceof Error ? err.stack : undefined,
       });
       sendError(res, 500, "Internal server error");
     }

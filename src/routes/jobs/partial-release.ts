@@ -33,6 +33,7 @@ import {
 import {
   classifySimError,
 } from "./errors.js";
+import { formatError } from "../../utils/format-error.js";
 
 const router = Router();
 
@@ -85,8 +86,8 @@ router.post(
       let account;
       try {
         account = await server.getAccount(sourceAddress as string);
-      } catch (err: any) {
-        const errMsg = String(err?.message || err);
+      } catch (err: unknown) {
+        const errMsg = formatError(err);
         const { status, message } = classifySimError(errMsg);
         logger.error("Failed to get account for partial release", {
           traceId,
@@ -94,7 +95,7 @@ router.post(
           index,
           sourceAddress,
           error: errMsg,
-          stack: err?.stack,
+          stack: err instanceof Error ? err.stack : undefined,
         });
         sendError(res, status, message);
         return;
@@ -145,8 +146,8 @@ router.post(
           let prepared;
           try {
             prepared = await server.prepareTransaction(tx);
-          } catch (err: any) {
-            const errMsg = String(err?.message || err);
+          } catch (err: unknown) {
+            const errMsg = formatError(err);
             const { status, message } = classifySimError(errMsg);
             logger.error("Failed to prepare transaction for partial release", {
               traceId,
@@ -174,10 +175,16 @@ router.post(
       let xdr: string;
       try {
         xdr = await requestPromise;
-      } catch (err: any) {
+      } catch (err: unknown) {
         partialReleaseCache.del(cacheKey);
-        if (err && err.status) {
-          sendError(res, err.status, err.message);
+        if (
+          typeof err === "object" &&
+          err !== null &&
+          "status" in err &&
+          "message" in err
+        ) {
+          const { status, message } = err as { status: number; message: string };
+          sendError(res, status, message);
           return;
         }
         throw err;
@@ -190,8 +197,8 @@ router.post(
       }
 
       res.json({ success: true, xdr });
-    } catch (err: any) {
-      const errMsg = String(err?.message || err);
+    } catch (err: unknown) {
+      const errMsg = formatError(err);
       // Structured, server-side-only error detail – the client receives a clean
       // 500 body with no internal stack trace leakage (#117).
       logger.error("Unexpected error in partial release", {
@@ -199,7 +206,7 @@ router.post(
         contractId: req.params.contractId,
         index: req.params.index,
         error: errMsg,
-        stack: err?.stack,
+        stack: err instanceof Error ? err.stack : undefined,
       });
       sendError(res, 500, "Internal server error");
     }
