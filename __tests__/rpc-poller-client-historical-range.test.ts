@@ -3,10 +3,17 @@ import { setDb, runMigrations, closeDb } from "../src/indexer/db.js";
 import {
   RpcPollerClient,
   countEventsByLedger,
-  mapRpcEventToRow,
+  mapRpcEventToRow as mapRpcEventToRowTyped,
   DEFAULT_RPC_HISTORICAL_PAGE_SIZE,
   type RpcServerLike,
 } from "../src/indexer/rpc-poller-client.js";
+
+// The SDK-typed mapper (#645) takes Api.EventResponse; these tests feed it
+// deliberately loose stub shapes.
+const mapRpcEventToRow = mapRpcEventToRowTyped as unknown as (
+  raw: unknown,
+  fallbackContractId?: string,
+) => ReturnType<typeof mapRpcEventToRowTyped>;
 import { LedgerRangeValidationError } from "../src/indexer/ledger-range-tracker.js";
 
 const CONTRACT_ID = "CTEST0000000000000000000000000000000000000000000000000001";
@@ -327,7 +334,7 @@ describe("RpcPollerClient – dynamic historical sync ranges (#272)", () => {
 
     it("forwards filters and the resolved page start to the RPC", async () => {
       const { client, server } = makeClient(buildEvents(1, 10, 1));
-      const filters = [{ type: "contract", contractIds: [CONTRACT_ID] }];
+      const filters = [{ type: "contract" as const, contractIds: [CONTRACT_ID] }];
 
       await client.fetchEventRange({
         startLedger: 3,

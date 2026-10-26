@@ -70,7 +70,7 @@ describe("buildGetEventsRequest", () => {
     expect(request.filters[0].contractIds).toEqual(["CONTRACT-ALPHA"]);
     expect(request.filters[0].topics).toEqual([["*"]]);
     for (const eventType of EVENT_TYPES) {
-      expect(request.filters[0].topics.flat()).not.toContain(eventType);
+      expect(request.filters[0].topics?.flat()).not.toContain(eventType);
     }
   });
 

@@ -1,4 +1,5 @@
 import { Server } from "@stellar/stellar-sdk/rpc";
+import type { Api } from "@stellar/stellar-sdk/rpc";
 
 
 import { scValToNative } from "@stellar/stellar-sdk";
@@ -198,9 +199,9 @@ export function toEventTimestamp(ledgerClosedAt: unknown): number | null {
 }
 
 /** Map an RPC event notification onto the row shape `events` stores. */
-function toEventRow(event: any, fallbackContractId: string): EventRow {
+function toEventRow(event: Api.EventResponse, fallbackContractId: string): EventRow {
   return {
-    contractId: event.contractId?.contractId?.() ?? fallbackContractId,
+    contractId: event.contractId?.contractId() ?? fallbackContractId,
     eventType: scValToNative(event.topic[0]) as string,
     ledgerSequence: event.ledger,
     timestamp: toEventTimestamp(event.ledgerClosedAt),
@@ -210,9 +211,11 @@ function toEventRow(event: any, fallbackContractId: string): EventRow {
     eventId:
       typeof event.id === "string" && event.id
         ? event.id
-        : typeof event.pagingToken === "string" && event.pagingToken
-          ? event.pagingToken
-          : undefined,
+        : (() => {
+            // Older RPC nodes still send the legacy pagingToken (#607).
+            const token = (event as { pagingToken?: unknown }).pagingToken;
+            return typeof token === "string" && token ? token : undefined;
+          })(),
     // The transaction hash lets the UI link the event to a block explorer (#700).
     txHash: typeof event.txHash === "string" ? event.txHash : null,
   };
@@ -448,7 +451,7 @@ export async function fetchHistoricalEvents(
       : { startLedger, endLedger, contractIds, limit: HISTORICAL_PAGE_SIZE };
 
     const page = await rpcClient.getEvents(params);
-    const pageEvents: any[] = page?.events ?? [];
+    const pageEvents: Api.EventResponse[] = page?.events ?? [];
     if (pageEvents.length === 0) break;
 
     eventsFound += pageEvents.length;

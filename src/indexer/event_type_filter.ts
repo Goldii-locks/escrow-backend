@@ -1,3 +1,4 @@
+import type { Api } from "@stellar/stellar-sdk/rpc";
 /**
  * Canonical topic[0] discriminators emitted by the milestone-escrow contract
  * (#687).
@@ -118,12 +119,20 @@ export function isKnownEventType(topic: unknown): topic is EventType {
   );
 }
 
+/** The `Server.getEvents` request this module builds (#645). */
+export interface GetEventsRequest {
+  startLedger?: number;
+  cursor?: string;
+  filters: Api.EventFilter[];
+  limit: number;
+}
+
 /** Parameters for building a `Server.getEvents` request. */
 export interface GetEventsParams {
   startLedger?: number;
   cursor?: string;
   contractIds?: string[];
-  filters?: any[];
+  filters?: Api.EventFilter[];
   limit?: number;
 }
 
@@ -168,35 +177,17 @@ export interface RpcGetEventsResult {
  * `RpcPollerClient.getEvents()` so 429/503 responses honour `Retry-After`
  * and share the same backoff as every other RPC call in the indexer.
  */
-export function buildGetEventsRequest(params: GetEventsParams): {
-  startLedger?: number;
-  cursor?: string;
-  filters: Array<{
-    type: string;
-    contractIds?: string[];
-    topics: string[][];
-  }>;
-  limit: number;
-} {
+export function buildGetEventsRequest(params: GetEventsParams): GetEventsRequest {
   const filters =
     params.filters ??
     [
       {
-        type: "contract",
+        type: "contract" as const,
         contractIds: params.contractIds ?? [],
         topics: [["*"]],
       },
     ];
-  const request: {
-    startLedger?: number;
-    cursor?: string;
-    filters: Array<{
-      type: string;
-      contractIds?: string[];
-      topics: string[][];
-    }>;
-    limit: number;
-  } = {
+  const request: GetEventsRequest = {
     filters,
     limit: params.limit ?? 100,
   };
