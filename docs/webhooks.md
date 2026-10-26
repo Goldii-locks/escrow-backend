@@ -279,7 +279,14 @@ for how inflow/outflow event types map to on-chain balances.
 
 ## Outgoing webhook signature verification (#694)
 
-Email-alert webhooks are signed with HMAC-SHA256 over
+> **Not active for event deliveries.** The indexer's event webhooks
+> (`src/indexer/webhook-delivery.ts`) are currently sent unsigned. The
+> signing senders (the email-alert sender and the unreachable
+> `src/indexer/webhook_dispatcher.ts`) were removed as dead code (#782,
+> #631). The scheme below is what `src/utils/webhook_signature_verifier.ts`
+> verifies, for when signing is wired into live delivery.
+
+Email-alert webhooks were signed with HMAC-SHA256 over
 `${timestamp}.${body}` (Stripe/Slack-style) so captured deliveries cannot
 be replayed. Each delivery sends:
 
