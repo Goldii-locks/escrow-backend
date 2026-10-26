@@ -12,7 +12,7 @@
  * | `roundFinancialReportDivision` | `utils/financial_report_exporter.ts` | `half-even` | delegates to `divideHalfEven` |
  * | `divideRoundHalfEven` | `utils/conversion_rate_math.ts` | `half-even` | fractional rates without float bias |
  * | `roundIntegerDivision` | `utils/tax_deduction_estimator.ts` | caller-chosen | tax preview; default `truncate` matches prior behavior |
- * | `calculateFeeDeductionHalfEven` | `utils/fee_deduction_calculator.ts` | `half-even` | fee/net must reconcile exactly |
+ * | `calculateFeeDeductionHalfEven` | `utils/fee-deduction-calculator.ts` | `half-even` | fee/net must reconcile exactly |
  * | `applyStablecoinCentsMultiplier` | `utils/stablecoin_cents_multiplier.ts` | caller-chosen (default `half-even`) | cents scaling |
  *
  * NOTE on-chain policy: the Soroban contract truncates (Rust `/` on `i128`)

@@ -11,7 +11,8 @@
  */
 
 import { writeFile } from "node:fs/promises";
-import { escapeCSVField } from "./csv-serializer.js";
+import { escapeCsvField } from "./csv-serializer.js";
+import { formatDecimalForDb } from "./db-precision.js";
 import { digitCount, MAX_SAFE_DIGITS, parseIntegerInput,
   isAmountWithinRange, MAX_AMOUNT, MIN_AMOUNT,
 } from "./digit-limit-validator.js";
@@ -343,7 +344,7 @@ function cellValue(
  * so an embedded delimiter, quote or newline cannot break the table.
  */
 export function formatBlock(cells: Array<string | number | bigint>, options: ResolvedReportOptions): string {
-  return cells.map((cell) => escapeCSVField(cell)).join(options.delimiter);
+  return cells.map((cell) => escapeCsvField(cell)).join(options.delimiter);
 }
 
 /** The header block: one line holding the column names. */
@@ -756,25 +757,7 @@ export type FormatReportRowResult =
  * fractional digits for DB storage. `decimals = 0` renders a plain integer.
  */
 export function formatReportValueForDb(value: bigint, decimals: number): string {
-  if (typeof value !== "bigint") {
-    throw new TypeError("formatReportValueForDb: value must be a bigint");
-  }
-  if (!Number.isInteger(decimals) || decimals < 0) {
-    throw new RangeError(
-      `formatReportValueForDb: decimals must be a non-negative integer, got ${decimals}`
-    );
-  }
-  if (decimals === 0) {
-    return value.toString();
-  }
-  const isNegative = value < 0n;
-  const abs = isNegative ? -value : value;
-  const scale = 10n ** BigInt(decimals);
-  const integerPart = abs / scale;
-  const fractionalPart = abs % scale;
-  const fracStr = fractionalPart.toString().padStart(decimals, "0");
-  const formatted = `${integerPart.toString()}.${fracStr}`;
-  return isNegative ? `-${formatted}` : formatted;
+  return formatDecimalForDb(value, decimals, { label: "formatReportValueForDb" });
 }
 
 /**
@@ -1524,14 +1507,6 @@ export function validateCalculationParameters(
   };
 }
 
-function escapeCsvCell(value: unknown): string {
-  const raw = value === null || value === undefined ? "" : String(value);
-  if (/[",\n\r]/.test(raw)) {
-    return `"${raw.replace(/"/g, '""')}"`;
-  }
-  return raw;
-}
-
 /**
  * Export transaction log rows to a CSV spreadsheet block, summing amounts and
  * reporting calculation exceptions via detailed parameter warning codes.
@@ -1609,12 +1584,12 @@ export function exportTransactionLogs(
     }
     lines.push(
       [
-        escapeCsvCell(row.transactionId),
-        escapeCsvCell(row.contractId),
-        escapeCsvCell(parsed.value.toString()),
-        escapeCsvCell(row.currency ?? ""),
-        escapeCsvCell(row.eventType ?? ""),
-        escapeCsvCell(row.timestamp ?? ""),
+        escapeCsvField(row.transactionId),
+        escapeCsvField(row.contractId),
+        escapeCsvField(parsed.value.toString()),
+        escapeCsvField(row.currency ?? ""),
+        escapeCsvField(row.eventType ?? ""),
+        escapeCsvField(row.timestamp ?? ""),
       ].join(",")
     );
   }

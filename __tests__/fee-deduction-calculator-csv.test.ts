@@ -3,32 +3,34 @@ import os from "os";
 import path from "path";
 import {
   ERROR_CODES,
-  buildCsvBlock,
-  exportToCsv,
-  formatToCsv,
-  serializeToCsv,
+  validateFeeDeductionRecord,
+  type FeeDeductionRecord,
+} from "../src/utils/fee-deduction-calculator.js";
+import {
+  buildFeeCsvBlock as buildCsvBlock,
+  buildFeeCsvBlock as exportToCsv,
+  buildFeeCsvBlock as formatToCsv,
+  buildFeeCsvBlock as serializeToCsv,
   formatFeeTable,
   formatDeductionTable,
   exportDeductionToCsv,
   exportFeeToCsv,
-  exportToCsvFile,
-  serializeToCsvFile,
+  exportFeeCsvFile as exportToCsvFile,
+  exportFeeCsvFile as serializeToCsvFile,
   serializeFeeRecordsToFile,
-  writeCsvToFile,
+  writeFeeCsvToFile as writeCsvToFile,
   escapeCsvField,
   formatRowToCsv,
   parseCsvLine,
-  parseCsvBlock,
-  readCsvFromFile,
-  parseCsvFromFile,
-  validateFeeDeductionRecord,
-  type FeeDeductionRecord,
-} from "../src/utils/fee_deduction_calculator.js";
+  parseFeeCsvBlock as parseCsvBlock,
+  readFeeCsvFromFile as readCsvFromFile,
+  readFeeCsvFromFile as parseCsvFromFile,
+} from "../src/utils/csv-serializer.js";
 
 // Smallest amount outside the contract's i128 range (i128 max + 1).
 const OVER_I128 = (2n ** 127n).toString();
 
-describe("fee_deduction_calculator CSV format exporters (#435)", () => {
+describe("fee deduction CSV format exporters (#435)", () => {
   describe("escapeCsvField and formatRowToCsv", () => {
     it("escapes fields with commas and quotes", () => {
       expect(escapeCsvField('USD, Coin "Gold"')).toBe('"USD, Coin ""Gold"""');
