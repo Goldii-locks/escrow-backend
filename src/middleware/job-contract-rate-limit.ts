@@ -1,527 +1,111 @@
 import type { NextFunction, Request, Response } from "express";
 
-type RateBucket = {
-  count: number;
-  resetAt: number;
+export type RateBucket = { count: number; resetAt: number };
+
+export interface RouteLimiterOptions {
+  name?: string;
+  envPrefix: string;
+  defaultMax: number;
+  defaultWindowMs: number;
+}
+
+export type RouteLimiterMiddleware = ((req: Request, res: Response, next: NextFunction) => void) & {
+  middleware: RouteLimiterMiddleware;
+  reset: () => void;
+  buckets: Map<string, RateBucket>;
+  sweep: () => void;
 };
 
-const buckets = new Map<string, RateBucket>();
+export function makeRouteLimiter(options: RouteLimiterOptions): RouteLimiterMiddleware {
+  const { envPrefix, defaultMax, defaultWindowMs } = options;
+  const buckets = new Map<string, RateBucket>();
+  let sweepTimer: NodeJS.Timeout | null = null;
 
-export function resetJobContractRateLimitBuckets(): void {
-  buckets.clear();
-}
-
-function resolveWindowMs(): number {
-  const configured = Number(process.env.JOB_CONTRACT_RATE_WINDOW_MS ?? "60000");
-  return Number.isFinite(configured) && configured > 0 ? configured : 60000;
-}
-
-function resolveMaxRequests(): number {
-  const configured = Number(process.env.JOB_CONTRACT_RATE_MAX ?? "30");
-  return Number.isFinite(configured) && configured > 0 ? configured : 30;
-}
-
-/** Dedicated rate limiter for GET /api/jobs/:contractId. */
-export function jobContractRateLimit(
-  req: Request,
-  res: Response,
-  next: NextFunction
-): void {
-  const windowMs = resolveWindowMs();
-  const maxRequests = resolveMaxRequests();
-  const key = req.ip || req.socket.remoteAddress || "unknown";
-  const now = Date.now();
-
-  let bucket = buckets.get(key);
-  if (!bucket || now >= bucket.resetAt) {
-    bucket = { count: 0, resetAt: now + windowMs };
-    buckets.set(key, bucket);
+  function sweep(now = Date.now()): void {
+    for (const [key, bucket] of buckets.entries()) {
+      if (now >= bucket.resetAt) buckets.delete(key);
+    }
+    if (buckets.size === 0 && sweepTimer) {
+      clearInterval(sweepTimer);
+      sweepTimer = null;
+    }
   }
 
-  bucket.count += 1;
-
-  const remaining = Math.max(0, maxRequests - bucket.count);
-  res.setHeader("X-RateLimit-Limit", String(maxRequests));
-  res.setHeader("X-RateLimit-Remaining", String(remaining));
-  res.setHeader("X-RateLimit-Reset", String(Math.ceil(bucket.resetAt / 1000)));
-
-  if (bucket.count > maxRequests) {
-    res.status(429).json({
-      success: false,
-      error: "Too many requests, please try again later",
-    });
-    return;
+  function ensureSweepTimer(windowMs: number): void {
+    if (!sweepTimer) {
+      sweepTimer = setInterval(() => sweep(), windowMs);
+      if (typeof sweepTimer.unref === "function") sweepTimer.unref();
+    }
   }
 
-  next();
+  const resolveWindowMs = (): number => {
+    const configured = Number(process.env[`${envPrefix}_WINDOW_MS`] ?? defaultWindowMs);
+    return Number.isFinite(configured) && configured > 0 ? configured : defaultWindowMs;
+  };
+
+  const resolveMaxRequests = (): number => {
+    const configured = Number(process.env[`${envPrefix}_MAX`] ?? defaultMax);
+    return Number.isFinite(configured) && configured > 0 ? configured : defaultMax;
+  };
+
+  const middleware = (req: Request, res: Response, next: NextFunction): void => {
+    const windowMs = resolveWindowMs();
+    const maxRequests = resolveMaxRequests();
+    ensureSweepTimer(windowMs);
+
+    const key = req.ip || req.socket?.remoteAddress || "unknown";
+    const now = Date.now();
+    let bucket = buckets.get(key);
+    if (!bucket || now >= bucket.resetAt) {
+      bucket = { count: 0, resetAt: now + windowMs };
+      buckets.set(key, bucket);
+    }
+
+    bucket.count += 1;
+    const remaining = Math.max(0, maxRequests - bucket.count);
+    res.setHeader("X-RateLimit-Limit", String(maxRequests));
+    res.setHeader("X-RateLimit-Remaining", String(remaining));
+    res.setHeader("X-RateLimit-Reset", String(Math.ceil(bucket.resetAt / 1000)));
+
+    if (bucket.count > maxRequests) {
+      res.status(429).json({ success: false, error: "Too many requests, please try again later" });
+      return;
+    }
+
+    next();
+  };
+
+  middleware.middleware = middleware as RouteLimiterMiddleware;
+  middleware.buckets = buckets;
+  middleware.sweep = sweep;
+  middleware.reset = () => {
+    buckets.clear();
+    if (sweepTimer) {
+      clearInterval(sweepTimer);
+      sweepTimer = null;
+    }
+  };
+
+  return middleware as RouteLimiterMiddleware;
 }
 
-const partialReleaseBuckets = new Map<string, RateBucket>();
-
-export function resetPartialReleaseRateLimitBuckets(): void {
-  partialReleaseBuckets.clear();
-}
-
-function resolvePartialReleaseWindowMs(): number {
-  const configured = Number(process.env.PARTIAL_RELEASE_RATE_WINDOW_MS ?? "60000");
-  return Number.isFinite(configured) && configured > 0 ? configured : 60000;
-}
-
-function resolvePartialReleaseMaxRequests(): number {
-  const configured = Number(process.env.PARTIAL_RELEASE_RATE_MAX ?? "10");
-  return Number.isFinite(configured) && configured > 0 ? configured : 10;
-}
-
-/** Dedicated rate limiter for POST /api/jobs/:contractId/milestones/:index/partial-release. */
-export function partialReleaseRateLimit(
-  req: Request,
-  res: Response,
-  next: NextFunction
-): void {
-  const windowMs = resolvePartialReleaseWindowMs();
-  const maxRequests = resolvePartialReleaseMaxRequests();
-  const key = req.ip || req.socket.remoteAddress || "unknown";
-  const now = Date.now();
-
-  let bucket = partialReleaseBuckets.get(key);
-  if (!bucket || now >= bucket.resetAt) {
-    bucket = { count: 0, resetAt: now + windowMs };
-    partialReleaseBuckets.set(key, bucket);
-  }
-
-  bucket.count += 1;
-
-  const remaining = Math.max(0, maxRequests - bucket.count);
-  res.setHeader("X-RateLimit-Limit", String(maxRequests));
-  res.setHeader("X-RateLimit-Remaining", String(remaining));
-  res.setHeader("X-RateLimit-Reset", String(Math.ceil(bucket.resetAt / 1000)));
-
-  if (bucket.count > maxRequests) {
-    res.status(429).json({
-      success: false,
-      error: "Too many requests, please try again later",
-    });
-    return;
-  }
-
-  next();
-}
-
-const partialPaymentAllocatorBuckets = new Map<string, RateBucket>();
-
-export function resetPartialPaymentAllocatorRateLimitBuckets(): void {
-  partialPaymentAllocatorBuckets.clear();
-}
-
-function resolvePartialPaymentAllocatorWindowMs(): number {
-  const configured = Number(
-    process.env.PARTIAL_PAYMENT_ALLOCATOR_RATE_WINDOW_MS ?? "60000"
-  );
-  return Number.isFinite(configured) && configured > 0 ? configured : 60000;
-}
-
-function resolvePartialPaymentAllocatorMaxRequests(): number {
-  const configured = Number(process.env.PARTIAL_PAYMENT_ALLOCATOR_RATE_MAX ?? "50");
-  return Number.isFinite(configured) && configured > 0 ? configured : 50;
-}
-
-/** Dedicated rate limiter for partial payment allocator endpoints. */
-export function partialPaymentAllocatorRateLimit(
-  req: Request,
-  res: Response,
-  next: NextFunction
-): void {
-  const windowMs = resolvePartialPaymentAllocatorWindowMs();
-  const maxRequests = resolvePartialPaymentAllocatorMaxRequests();
-  const key = req.ip || req.socket?.remoteAddress || "unknown";
-  const now = Date.now();
-
-  let bucket = partialPaymentAllocatorBuckets.get(key);
-  if (!bucket || now >= bucket.resetAt) {
-    bucket = { count: 0, resetAt: now + windowMs };
-    partialPaymentAllocatorBuckets.set(key, bucket);
-  }
-
-  bucket.count += 1;
-
-  const remaining = Math.max(0, maxRequests - bucket.count);
-  res.setHeader("X-RateLimit-Limit", String(maxRequests));
-  res.setHeader("X-RateLimit-Remaining", String(remaining));
-  res.setHeader("X-RateLimit-Reset", String(Math.ceil(bucket.resetAt / 1000)));
-
-  if (bucket.count > maxRequests) {
-    res.status(429).json({
-      success: false,
-      error: "Too many requests, please try again later",
-    });
-    return;
-  }
-
-  next();
-}
-
-const whitelistBuckets = new Map<string, RateBucket>();
-
-export function resetJobWhitelistRateLimitBuckets(): void {
-  whitelistBuckets.clear();
-}
-
-const whitelistUpdateBuckets = new Map<string, RateBucket>();
-
-export function resetWhitelistUpdateRateLimitBuckets(): void {
-  whitelistUpdateBuckets.clear();
-}
-
-function resolveWhitelistUpdateWindowMs(): number {
-  const configured = Number(process.env.JOB_WHITELIST_UPDATE_RATE_WINDOW_MS ?? "60000");
-  return Number.isFinite(configured) && configured > 0 ? configured : 60000;
-}
-
-function resolveWhitelistUpdateMaxRequests(): number {
-  const configured = Number(process.env.JOB_WHITELIST_UPDATE_RATE_MAX ?? "10");
-  return Number.isFinite(configured) && configured > 0 ? configured : 10;
-}
-
-/** Dedicated rate limiter for POST /api/jobs/:contractId/whitelist/update. */
-export function whitelistUpdateRateLimit(
-  req: Request,
-  res: Response,
-  next: NextFunction
-): void {
-  const windowMs = resolveWhitelistUpdateWindowMs();
-  const maxRequests = resolveWhitelistUpdateMaxRequests();
-  const key = req.ip || req.socket.remoteAddress || "unknown";
-  const now = Date.now();
-
-  let bucket = whitelistUpdateBuckets.get(key);
-  if (!bucket || now >= bucket.resetAt) {
-    bucket = { count: 0, resetAt: now + windowMs };
-    whitelistUpdateBuckets.set(key, bucket);
-  }
-
-  bucket.count += 1;
-
-  const remaining = Math.max(0, maxRequests - bucket.count);
-  res.setHeader("X-RateLimit-Limit", String(maxRequests));
-  res.setHeader("X-RateLimit-Remaining", String(remaining));
-  res.setHeader("X-RateLimit-Reset", String(Math.ceil(bucket.resetAt / 1000)));
-
-  if (bucket.count > maxRequests) {
-    res.status(429).json({
-      success: false,
-      error: "Too many requests, please try again later",
-    });
-    return;
-  }
-
-  next();
-}
-
-// ---------------------------------------------------------------------------
-// createJobDraft rate limiter
-// ---------------------------------------------------------------------------
-
-const createJobDraftBuckets = new Map<string, RateBucket>();
-
-export function resetCreateJobDraftRateLimitBuckets(): void {
-  createJobDraftBuckets.clear();
-}
-
-function resolveCreateJobDraftWindowMs(): number {
-  const configured = Number(process.env.CREATE_JOB_DRAFT_RATE_WINDOW_MS ?? "60000");
-  return Number.isFinite(configured) && configured > 0 ? configured : 60000;
-}
-
-function resolveCreateJobDraftMaxRequests(): number {
-  const configured = Number(process.env.CREATE_JOB_DRAFT_RATE_MAX ?? "5");
-  return Number.isFinite(configured) && configured > 0 ? configured : 5;
-}
-
-function resolveWhitelistWindowMs(): number {
-  const configured = Number(process.env.JOB_WHITELIST_RATE_WINDOW_MS ?? "60000");
-  return Number.isFinite(configured) && configured > 0 ? configured : 60000;
-}
-
-function resolveWhitelistMaxRequests(): number {
-  const configured = Number(process.env.JOB_WHITELIST_RATE_MAX ?? "20");
-  return Number.isFinite(configured) && configured > 0 ? configured : 20;
-}
-
-/** Dedicated rate limiter for GET /api/jobs/:contractId/whitelist. */
-export function jobWhitelistRateLimit(
-  req: Request,
-  res: Response,
-  next: NextFunction
-): void {
-  const windowMs = resolveWhitelistWindowMs();
-  const maxRequests = resolveWhitelistMaxRequests();
-  const key = req.ip || req.socket.remoteAddress || "unknown";
-  const now = Date.now();
-
-  let bucket = whitelistBuckets.get(key);
-  if (!bucket || now >= bucket.resetAt) {
-    bucket = { count: 0, resetAt: now + windowMs };
-    whitelistBuckets.set(key, bucket);
-  }
-
-  bucket.count += 1;
-
-  const remaining = Math.max(0, maxRequests - bucket.count);
-  res.setHeader("X-RateLimit-Limit", String(maxRequests));
-  res.setHeader("X-RateLimit-Remaining", String(remaining));
-  res.setHeader("X-RateLimit-Reset", String(Math.ceil(bucket.resetAt / 1000)));
-
-  if (bucket.count > maxRequests) {
-    res.status(429).json({
-      success: false,
-      error: "Too many requests, please try again later",
-    });
-    return;
-  }
-
-  next();
-}
-
-const timeRemainingBuckets = new Map<string, RateBucket>();
-
-export function resetTimeRemainingRateLimitBuckets(): void {
-  timeRemainingBuckets.clear();
-}
-
-function resolveTimeRemainingWindowMs(): number {
-  const configured = Number(process.env.TIME_REMAINING_RATE_WINDOW_MS ?? "60000");
-  return Number.isFinite(configured) && configured > 0 ? configured : 60000;
-}
-
-function resolveTimeRemainingMaxRequests(): number {
-  const configured = Number(process.env.TIME_REMAINING_RATE_MAX ?? "60");
-  return Number.isFinite(configured) && configured > 0 ? configured : 60;
-}
-
-/** Dedicated rate limiter for GET /api/jobs/:contractId/milestones/:index/time-remaining. */
-export function timeRemainingRateLimit(
-  req: Request,
-  res: Response,
-  next: NextFunction
-): void {
-  const windowMs = resolveTimeRemainingWindowMs();
-  const maxRequests = resolveTimeRemainingMaxRequests();
-  const key = req.ip || req.socket.remoteAddress || "unknown";
-  const now = Date.now();
-
-  let bucket = timeRemainingBuckets.get(key);
-  if (!bucket || now >= bucket.resetAt) {
-    bucket = { count: 0, resetAt: now + windowMs };
-    timeRemainingBuckets.set(key, bucket);
-  }
-
-  bucket.count += 1;
-
-  const remaining = Math.max(0, maxRequests - bucket.count);
-  res.setHeader("X-RateLimit-Limit", String(maxRequests));
-  res.setHeader("X-RateLimit-Remaining", String(remaining));
-  res.setHeader("X-RateLimit-Reset", String(Math.ceil(bucket.resetAt / 1000)));
-
-  if (bucket.count > maxRequests) {
-    res.status(429).json({
-      success: false,
-      error: "Too many requests, please try again later",
-    });
-    return;
-  }
-
-  next();
-}
-
-
-const buildTxBuckets = new Map<string, RateBucket>();
-
-export function resetBuildTxRateLimitBuckets(): void {
-  buildTxBuckets.clear();
-}
-
-function resolveBuildTxWindowMs(): number {
-  const configured = Number(process.env.BUILD_TX_RATE_WINDOW_MS ?? "60000");
-  return Number.isFinite(configured) && configured > 0 ? configured : 60000;
-}
-
-function resolveBuildTxMaxRequests(): number {
-  const configured = Number(process.env.BUILD_TX_RATE_MAX ?? "20");
-  return Number.isFinite(configured) && configured > 0 ? configured : 20;
-}
-
-/** Dedicated rate limiter for POST /api/jobs/build-tx. */
-export function buildTxRateLimit(
-  req: Request,
-  res: Response,
-  next: NextFunction
-): void {
-  const windowMs = resolveBuildTxWindowMs();
-  const maxRequests = resolveBuildTxMaxRequests();
-  const key = req.ip || req.socket.remoteAddress || "unknown";
-  const now = Date.now();
-
-  let bucket = buildTxBuckets.get(key);
-  if (!bucket || now >= bucket.resetAt) {
-    bucket = { count: 0, resetAt: now + windowMs };
-    buildTxBuckets.set(key, bucket);
-  }
-
-  bucket.count += 1;
-
-  const remaining = Math.max(0, maxRequests - bucket.count);
-  res.setHeader("X-RateLimit-Limit", String(maxRequests));
-  res.setHeader("X-RateLimit-Remaining", String(remaining));
-  res.setHeader("X-RateLimit-Reset", String(Math.ceil(bucket.resetAt / 1000)));
-
-  if (bucket.count > maxRequests) {
-    res.status(429).json({
-      success: false,
-      error: "Too many requests, please try again later",
-    });
-    return;
-  }
-
-  next();
-}
-
-/** Dedicated rate limiter for POST /api/jobs/create-job-draft. */
-export function createJobDraftRateLimit(
-  req: Request,
-  res: Response,
-  next: NextFunction
-): void {
-  const windowMs = resolveCreateJobDraftWindowMs();
-  const maxRequests = resolveCreateJobDraftMaxRequests();
-  const key = req.ip || req.socket.remoteAddress || "unknown";
-  const now = Date.now();
-
-  let bucket = createJobDraftBuckets.get(key);
-  if (!bucket || now >= bucket.resetAt) {
-    bucket = { count: 0, resetAt: now + windowMs };
-    createJobDraftBuckets.set(key, bucket);
-  }
-
-  bucket.count += 1;
-
-  const remaining = Math.max(0, maxRequests - bucket.count);
-  res.setHeader("X-RateLimit-Limit", String(maxRequests));
-  res.setHeader("X-RateLimit-Remaining", String(remaining));
-  res.setHeader("X-RateLimit-Reset", String(Math.ceil(bucket.resetAt / 1000)));
-
-  if (bucket.count > maxRequests) {
-    res.status(429).json({
-      success: false,
-      error: "Too many requests, please try again later",
-    });
-    return;
-  }
-
-  next();
-}
-
-const claimAutoReleaseBuckets = new Map<string, RateBucket>();
-
-export function resetClaimAutoReleaseRateLimitBuckets(): void {
-  claimAutoReleaseBuckets.clear();
-}
-
-function resolveClaimAutoReleaseWindowMs(): number {
-  const configured = Number(process.env.CLAIM_AUTO_RELEASE_RATE_WINDOW_MS ?? "60000");
-  return Number.isFinite(configured) && configured > 0 ? configured : 60000;
-}
-
-function resolveClaimAutoReleaseMaxRequests(): number {
-  const configured = Number(process.env.CLAIM_AUTO_RELEASE_RATE_MAX ?? "10");
-  return Number.isFinite(configured) && configured > 0 ? configured : 10;
-}
-
-/** Dedicated rate limiter for POST /api/jobs/:contractId/milestones/:index/claim-auto-release. */
-export function claimAutoReleaseRateLimit(
-  req: Request,
-  res: Response,
-  next: NextFunction
-): void {
-  const windowMs = resolveClaimAutoReleaseWindowMs();
-  const maxRequests = resolveClaimAutoReleaseMaxRequests();
-  const key = req.ip || req.socket.remoteAddress || "unknown";
-  const now = Date.now();
-
-  let bucket = claimAutoReleaseBuckets.get(key);
-  if (!bucket || now >= bucket.resetAt) {
-    bucket = { count: 0, resetAt: now + windowMs };
-    claimAutoReleaseBuckets.set(key, bucket);
-  }
-
-  bucket.count += 1;
-
-  const remaining = Math.max(0, maxRequests - bucket.count);
-  res.setHeader("X-RateLimit-Limit", String(maxRequests));
-  res.setHeader("X-RateLimit-Remaining", String(remaining));
-  res.setHeader("X-RateLimit-Reset", String(Math.ceil(bucket.resetAt / 1000)));
-
-  if (bucket.count > maxRequests) {
-    res.status(429).json({
-      success: false,
-      error: "Too many requests, please try again later",
-    });
-    return;
-  }
-
-  next();
-}
-
-// ---------------------------------------------------------------------------
-// Submit rate limiter – dedicated buckets for POST /api/jobs/submit
-// ---------------------------------------------------------------------------
-
-const submitBuckets = new Map<string, RateBucket>();
-
-export function resetSubmitRateLimitBuckets(): void {
-  submitBuckets.clear();
-}
-
-function resolveSubmitWindowMs(): number {
-  const configured = Number(process.env.SUBMIT_RATE_WINDOW_MS ?? "60000");
-  return Number.isFinite(configured) && configured > 0 ? configured : 60000;
-}
-
-function resolveSubmitMaxRequests(): number {
-  const configured = Number(process.env.SUBMIT_RATE_MAX ?? "5");
-  return Number.isFinite(configured) && configured > 0 ? configured : 5;
-}
-
-/** Dedicated rate limiter for POST /api/jobs/submit. */
-export function submitRateLimit(
-  req: Request,
-  res: Response,
-  next: NextFunction
-): void {
-  const windowMs = resolveSubmitWindowMs();
-  const maxRequests = resolveSubmitMaxRequests();
-  const key = req.ip || req.socket.remoteAddress || "unknown";
-  const now = Date.now();
-
-  let bucket = submitBuckets.get(key);
-  if (!bucket || now >= bucket.resetAt) {
-    bucket = { count: 0, resetAt: now + windowMs };
-    submitBuckets.set(key, bucket);
-  }
-
-  bucket.count += 1;
-
-  const remaining = Math.max(0, maxRequests - bucket.count);
-  res.setHeader("X-RateLimit-Limit", String(maxRequests));
-  res.setHeader("X-RateLimit-Remaining", String(remaining));
-  res.setHeader("X-RateLimit-Reset", String(Math.ceil(bucket.resetAt / 1000)));
-
-  if (bucket.count > maxRequests) {
-    res.status(429).json({
-      success: false,
-      error: "Too many requests, please try again later",
-    });
-    return;
-  }
-
-  next();
-}
+export const jobContractRateLimit = makeRouteLimiter({ envPrefix: "JOB_CONTRACT_RATE", defaultMax: 30, defaultWindowMs: 60000 });
+export const resetJobContractRateLimitBuckets = (): void => jobContractRateLimit.reset();
+export const partialReleaseRateLimit = makeRouteLimiter({ envPrefix: "PARTIAL_RELEASE_RATE", defaultMax: 10, defaultWindowMs: 60000 });
+export const resetPartialReleaseRateLimitBuckets = (): void => partialReleaseRateLimit.reset();
+export const partialPaymentAllocatorRateLimit = makeRouteLimiter({ envPrefix: "PARTIAL_PAYMENT_ALLOCATOR_RATE", defaultMax: 50, defaultWindowMs: 60000 });
+export const resetPartialPaymentAllocatorRateLimitBuckets = (): void => partialPaymentAllocatorRateLimit.reset();
+export const whitelistUpdateRateLimit = makeRouteLimiter({ envPrefix: "JOB_WHITELIST_UPDATE_RATE", defaultMax: 10, defaultWindowMs: 60000 });
+export const resetWhitelistUpdateRateLimitBuckets = (): void => whitelistUpdateRateLimit.reset();
+export const jobWhitelistRateLimit = makeRouteLimiter({ envPrefix: "JOB_WHITELIST_RATE", defaultMax: 20, defaultWindowMs: 60000 });
+export const resetJobWhitelistRateLimitBuckets = (): void => jobWhitelistRateLimit.reset();
+export const timeRemainingRateLimit = makeRouteLimiter({ envPrefix: "TIME_REMAINING_RATE", defaultMax: 60, defaultWindowMs: 60000 });
+export const resetTimeRemainingRateLimitBuckets = (): void => timeRemainingRateLimit.reset();
+export const buildTxRateLimit = makeRouteLimiter({ envPrefix: "BUILD_TX_RATE", defaultMax: 20, defaultWindowMs: 60000 });
+export const resetBuildTxRateLimitBuckets = (): void => buildTxRateLimit.reset();
+export const createJobDraftRateLimit = makeRouteLimiter({ envPrefix: "CREATE_JOB_DRAFT_RATE", defaultMax: 5, defaultWindowMs: 60000 });
+export const resetCreateJobDraftRateLimitBuckets = (): void => createJobDraftRateLimit.reset();
+export const claimAutoReleaseRateLimit = makeRouteLimiter({ envPrefix: "CLAIM_AUTO_RELEASE_RATE", defaultMax: 10, defaultWindowMs: 60000 });
+export const resetClaimAutoReleaseRateLimitBuckets = (): void => claimAutoReleaseRateLimit.reset();
+export const submitRateLimit = makeRouteLimiter({ envPrefix: "SUBMIT_RATE", defaultMax: 5, defaultWindowMs: 60000 });
+export const resetSubmitRateLimitBuckets = (): void => submitRateLimit.reset();

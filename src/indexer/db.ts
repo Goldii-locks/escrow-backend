@@ -512,6 +512,37 @@ const MIGRATIONS: Migration[] = [
       `);
     },
   },
+  {
+    version: 18,
+    description: "create job_participants table and backfill init events (#640)",
+    up: `
+      CREATE TABLE IF NOT EXISTS job_participants (
+        contract_id TEXT NOT NULL,
+        address TEXT NOT NULL,
+        role TEXT NOT NULL,
+        PRIMARY KEY (contract_id, address, role)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_job_participants_address
+        ON job_participants (address);
+
+      INSERT OR IGNORE INTO job_participants (contract_id, address, role)
+      SELECT contract_id, json_extract(data_json, '$.client'), 'client'
+      FROM events
+      WHERE json_extract(data_json, '$.client') IS NOT NULL
+        AND json_extract(data_json, '$.client') != ''
+      UNION
+      SELECT contract_id, json_extract(data_json, '$.freelancer'), 'freelancer'
+      FROM events
+      WHERE json_extract(data_json, '$.freelancer') IS NOT NULL
+        AND json_extract(data_json, '$.freelancer') != ''
+      UNION
+      SELECT contract_id, json_extract(data_json, '$.arbiter'), 'arbiter'
+      FROM events
+      WHERE json_extract(data_json, '$.arbiter') IS NOT NULL
+        AND json_extract(data_json, '$.arbiter') != '';
+    `,
+  },
 ];
 
 /** Index names created by the SQLite schema manager lookup-index migration (#259). */
@@ -1371,6 +1402,9 @@ export function insertEvent(
       eventId ?? `${contractId}:${ledgerSequence}:${eventType}`,
       txHash
     );
+    if (result.changes > 0) {
+      recordJobParticipants(db, contractId, eventType, dataJson);
+    }
     return result.changes > 0;
   });
   return tx();
@@ -1390,6 +1424,37 @@ export interface EventRow {
    * indexed before the column existed.
    */
   txHash?: string | null;
+}
+
+/**
+ * Extracts wallet participants from an event if it is an init/initialized event,
+ * and inserts them into the job_participants table.
+ */
+function recordJobParticipants(
+  db: import("better-sqlite3").Database,
+  contractId: string,
+  eventType: string,
+  dataJson: string,
+): void {
+  try {
+    const data = JSON.parse(dataJson) as Record<string, unknown>;
+    const insertStmt = db.prepare(
+      `INSERT OR IGNORE INTO job_participants (contract_id, address, role)
+       VALUES (?, ?, ?)`
+    );
+
+    if (typeof data.client === "string" && data.client.trim().length > 0) {
+      insertStmt.run(contractId, data.client.trim(), "client");
+    }
+    if (typeof data.freelancer === "string" && data.freelancer.trim().length > 0) {
+      insertStmt.run(contractId, data.freelancer.trim(), "freelancer");
+    }
+    if (typeof data.arbiter === "string" && data.arbiter.trim().length > 0) {
+      insertStmt.run(contractId, data.arbiter.trim(), "arbiter");
+    }
+  } catch {
+    // Unparseable dataJson - ignore participant extraction
+  }
 }
 
 /**
@@ -1429,7 +1494,7 @@ export function insertEventBatch(events: EventRow[], newLedger: number): void {
 
   const batchTransaction = db.transaction(() => {
     for (const ev of events) {
-      insertStmt.run(
+      const res = insertStmt.run(
         ev.contractId,
         ev.eventType,
         ev.ledgerSequence,
@@ -1438,6 +1503,9 @@ export function insertEventBatch(events: EventRow[], newLedger: number): void {
         eventDedupeId(ev),
         ev.txHash ?? null
       );
+      if (res.changes > 0) {
+        recordJobParticipants(db, ev.contractId, ev.eventType, ev.dataJson);
+      }
     }
     updateLedger.run(newLedger.toString());
   });
@@ -1688,44 +1756,36 @@ export async function getJobsByWallet(
 
     const countRow = db
       .prepare(
-        `SELECT COUNT(*) AS cnt
-         FROM (
-           SELECT contract_id
-           FROM (
-             SELECT contract_id, data_json,
-               ROW_NUMBER() OVER (
-                 PARTITION BY contract_id
-                 ORDER BY ledger_sequence ASC, id ASC
-               ) AS rn
-             FROM events
-           )
-           WHERE rn = 1
-             AND (json_extract(data_json, '$.client')     = ?
-               OR json_extract(data_json, '$.freelancer') = ?
-               OR json_extract(data_json, '$.arbiter')    = ?)
-           GROUP BY contract_id
-         )`
+        `SELECT COUNT(DISTINCT contract_id) AS cnt
+         FROM job_participants
+         WHERE address = ?`
       )
-      .get(address, address, address) as { cnt: number };
+      .get(address) as { cnt: number };
 
     const total = countRow?.cnt ?? 0;
 
     const rows = db
       .prepare(
-        `SELECT
-           l.contract_id,
-           l.event_type                                     AS latest_event_type,
-           l.ledger_sequence                                AS latest_ledger,
-           l.timestamp                                      AS latest_timestamp,
-           CASE
-             WHEN json_extract(i.data_json, '$.client')     = ? THEN 'client'
-             WHEN json_extract(i.data_json, '$.freelancer') = ? THEN 'freelancer'
-             WHEN json_extract(i.data_json, '$.arbiter')    = ? THEN 'arbiter'
-             ELSE 'unknown'
-           END                                              AS role,
-           i.data_json                                      AS init_data
-         FROM (
-           SELECT e.*,
+        `WITH wallet_contracts AS (
+           SELECT
+             contract_id,
+             CASE
+               WHEN MAX(role = 'client') = 1 THEN 'client'
+               WHEN MAX(role = 'freelancer') = 1 THEN 'freelancer'
+               WHEN MAX(role = 'arbiter') = 1 THEN 'arbiter'
+               ELSE 'unknown'
+             END AS role
+           FROM job_participants
+           WHERE address = ?
+           GROUP BY contract_id
+         ),
+         ranked_events AS (
+           SELECT
+             e.contract_id,
+             e.event_type,
+             e.ledger_sequence,
+             e.timestamp,
+             e.data_json,
              ROW_NUMBER() OVER (
                PARTITION BY e.contract_id
                ORDER BY e.ledger_sequence DESC, e.id DESC
@@ -1735,27 +1795,24 @@ export async function getJobsByWallet(
                ORDER BY e.ledger_sequence ASC, e.id ASC
              ) AS rn_asc
            FROM events e
-         ) l
-         JOIN (
-           SELECT e.*,
-             ROW_NUMBER() OVER (
-               PARTITION BY e.contract_id
-               ORDER BY e.ledger_sequence ASC, e.id ASC
-             ) AS rn_asc
-           FROM events e
-         ) i ON i.contract_id = l.contract_id AND i.rn_asc = 1
-         WHERE l.rn_desc = 1
-           AND (json_extract(i.data_json, '$.client')     = ?
-             OR json_extract(i.data_json, '$.freelancer') = ?
-             OR json_extract(i.data_json, '$.arbiter')    = ?)
-         ORDER BY l.ledger_sequence DESC, l.contract_id ASC
+           JOIN wallet_contracts wc ON wc.contract_id = e.contract_id
+         )
+         SELECT
+           wc.contract_id,
+           wc.role,
+           l.event_type      AS latest_event_type,
+           l.ledger_sequence AS latest_ledger,
+           l.timestamp       AS latest_timestamp,
+           -- milestone_count comes from the job's first (init) event, as
+           -- before; job_participants only replaces the address lookup (#640).
+           i.data_json       AS init_data
+         FROM wallet_contracts wc
+         JOIN ranked_events l ON l.contract_id = wc.contract_id AND l.rn_desc = 1
+         JOIN ranked_events i ON i.contract_id = wc.contract_id AND i.rn_asc = 1
+         ORDER BY l.ledger_sequence DESC, wc.contract_id ASC
          LIMIT ? OFFSET ?`
       )
-      .all(
-        address, address, address,
-        address, address, address,
-        safeLimit, offset
-      ) as Array<{
+      .all(address, safeLimit, offset) as Array<{
         contract_id: string;
         latest_event_type: string;
         latest_ledger: number;
@@ -2217,7 +2274,10 @@ export function insertHistoricalEventBatch(
         eventDedupeId(ev),
         ev.txHash ?? null,
       );
-      if (result.changes > 0) inserted += 1;
+      if (result.changes > 0) {
+        inserted += 1;
+        recordJobParticipants(db, ev.contractId, ev.eventType, ev.dataJson);
+      }
     }
 
     if (options.advanceLivePointer) {

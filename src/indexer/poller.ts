@@ -932,15 +932,18 @@ export async function pollEvents(): Promise<boolean> {
     failureMonitor.recordSuccess();
     await recordActiveNodeSuccess();
 
-    // --- Dynamic poller throttling (#265) ---
-    const throttleState = adjustPollerInterval(totalEvents);
+    // --- Dynamic poller throttling ---
+    adjustPollerInterval(totalEvents);
     adjustIndexerRunnerPollInterval(totalEvents);
+
+    const sawActivity = anyGroupPolled;
+    currentPollIntervalMs = nextPollIntervalMs(currentPollIntervalMs, sawActivity);
 
     logger.info("Processed indexer poll", {
       eventCount: totalEvents,
       upToLedger: currentLedger,
       elapsedMs: Math.round(totalElapsed),
-      pollIntervalMs: throttleState.currentIntervalMs,
+      pollIntervalMs: currentPollIntervalMs,
     });
 
     if (anyGroupPolled) {
@@ -988,6 +991,9 @@ export async function pollEvents(): Promise<boolean> {
     await recordActiveNodeFailure(err);
 
     // A failed poll advanced nothing, so report no progress to the throttler.
+    adjustPollerInterval(0);
+    adjustIndexerRunnerPollInterval(0);
+    currentPollIntervalMs = nextPollIntervalMs(currentPollIntervalMs, false);
     return false;
   }
 }
@@ -996,7 +1002,7 @@ let pollerTimeout: NodeJS.Timeout | null = null;
 let pollerRunning = false;
 
 /**
- * One poll plus the interval adjustment its outcome implies (#689).
+ * One poll cycle (#689); pollEvents() applies the interval adjustment.
  *
  * Never rejects: `pollEvents` already converts failures to a `false`
  * return, but a defensive catch keeps the loop alive even if a future code
@@ -1004,8 +1010,9 @@ let pollerRunning = false;
  */
 async function runPollCycle(): Promise<void> {
   try {
-    const sawActivity = await pollEvents();
-    currentPollIntervalMs = nextPollIntervalMs(currentPollIntervalMs, sawActivity);
+    // pollEvents() adjusts the interval itself, so the logged and scheduled
+    // delays match (#639).
+    await pollEvents();
   } catch (err) {
     const consecutiveFailures = failureMonitor.recordFailure("poll", {
       error: formatError(err),

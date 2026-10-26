@@ -69,7 +69,7 @@ export function resetConversionRateLimit(): void {
  * rejection semantics used by the app's request-level rate limiters, scoped
  * to this module's own call volume instead of a client IP.
  */
-function checkConversionRateLimit():
+export function checkConversionRateLimit():
   | { ok: true }
   | { ok: false; error: string; code: DecimalsErrorCode } {
   const now = Date.now();
@@ -88,6 +88,70 @@ function checkConversionRateLimit():
     };
   }
 
+  return { ok: true };
+}
+
+export interface TokenBucketLimiter {
+  consume?: () => boolean | { ok: boolean; error?: string; code?: DecimalsErrorCode };
+  check?: () => boolean | { ok: boolean; error?: string; code?: DecimalsErrorCode };
+  checkRateLimit?: () => boolean | { ok: boolean; error?: string; code?: DecimalsErrorCode };
+  tryConsume?: () => boolean;
+}
+
+export function createTokenBucket(config: { maxCalls: number; windowMs?: number }): TokenBucketLimiter {
+  let count = 0;
+  let start = Date.now();
+  const windowMs = config.windowMs ?? 60_000;
+  return {
+    consume: () => {
+      const now = Date.now();
+      if (now - start >= windowMs) {
+        start = now;
+        count = 0;
+      }
+      count += 1;
+      return count <= config.maxCalls;
+    },
+  };
+}
+
+export function evaluateLimiter(
+  limiter?: TokenBucketLimiter | (() => boolean | { ok: boolean; error?: string; code?: DecimalsErrorCode })
+): { ok: true } | { ok: false; error: string; code: DecimalsErrorCode } {
+  if (!limiter) return { ok: true };
+  let res: unknown;
+  if (typeof limiter === "function") {
+    res = limiter();
+  } else if (typeof limiter.consume === "function") {
+    res = limiter.consume();
+  } else if (typeof limiter.tryConsume === "function") {
+    res = limiter.tryConsume();
+  } else if (typeof limiter.checkRateLimit === "function") {
+    res = limiter.checkRateLimit();
+  } else if (typeof limiter.check === "function") {
+    res = limiter.check();
+  }
+
+  if (typeof res === "boolean") {
+    if (!res) {
+      return {
+        ok: false,
+        error: "conversion rate limit exceeded",
+        code: ERROR_CODES.RATE_LIMITED,
+      };
+    }
+    return { ok: true };
+  }
+  if (res && typeof res === "object") {
+    const obj = res as { ok?: boolean; error?: string; code?: DecimalsErrorCode };
+    if (obj.ok === false) {
+      return {
+        ok: false,
+        error: obj.error ?? "conversion rate limit exceeded",
+        code: obj.code ?? ERROR_CODES.RATE_LIMITED,
+      };
+    }
+  }
   return { ok: true };
 }
 
@@ -392,6 +456,10 @@ export function validateSplitSum(
   return { ok: true, value: total };
 }
 
+export interface ToRawUnitsOptions {
+  limiter?: TokenBucketLimiter | (() => boolean | { ok: boolean; error?: string; code?: DecimalsErrorCode });
+}
+
 /**
  * Convert a human-readable decimal amount (e.g. "12.5") into raw integer
  * units by scaling with the token's decimals value (raw = human * 10^decimals).
@@ -399,11 +467,14 @@ export function validateSplitSum(
  */
 export function toRawUnits(
   humanAmount: string | number,
-  decimals: number
+  decimals: number,
+  options?: ToRawUnitsOptions
 ): ConversionResult {
-  const rateCheck = checkConversionRateLimit();
-  if (!rateCheck.ok) {
-    return rateCheck;
+  if (options?.limiter) {
+    const rateCheck = evaluateLimiter(options.limiter);
+    if (!rateCheck.ok) {
+      return rateCheck;
+    }
   }
 
   const decimalsCheck = validateDecimals(decimals);
@@ -482,6 +553,7 @@ export interface ToHumanUnitsOptions {
    * Defaults to false (trimmed trailing zeros, e.g. "1.5").
    */
   fixedScale?: boolean;
+  limiter?: TokenBucketLimiter | (() => boolean | { ok: boolean; error?: string; code?: DecimalsErrorCode });
 }
 
 /**
@@ -498,9 +570,11 @@ export function toHumanUnits(
   decimals: number,
   options?: ToHumanUnitsOptions
 ): { ok: true; value: string } | { ok: false; error: string; code: DecimalsErrorCode } {
-  const rateCheck = checkConversionRateLimit();
-  if (!rateCheck.ok) {
-    return rateCheck;
+  if (options?.limiter) {
+    const rateCheck = evaluateLimiter(options.limiter);
+    if (!rateCheck.ok) {
+      return rateCheck;
+    }
   }
 
   const decimalsCheck = validateDecimals(decimals);

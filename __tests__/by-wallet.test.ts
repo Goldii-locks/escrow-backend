@@ -38,11 +38,7 @@ function seedEvent(
     dataJson: string;
   }
 ) {
-  db.prepare(
-    `INSERT OR IGNORE INTO events
-       (contract_id, event_type, ledger_sequence, timestamp, data_json)
-     VALUES (?, ?, ?, ?, ?)`
-  ).run(
+  insertEvent(
     opts.contractId,
     opts.eventType,
     opts.ledger,
@@ -70,6 +66,7 @@ afterAll(() => {
 beforeEach(() => {
     resetByWalletRateLimitBuckets();
   testDb.exec("DELETE FROM events");
+  testDb.exec("DELETE FROM job_participants");
   resetJobsByWalletCache();
 });
 
@@ -794,5 +791,151 @@ describe("GET /api/jobs/by-wallet/:address – status codes", () => {
     setDb(freshDb);
     initSchema();
     resetJobsByWalletCache();
+  });
+
+  // -------------------------------------------------------------------------
+  // EXPLAIN QUERY PLAN & Index Verification (#640)
+  // -------------------------------------------------------------------------
+
+  describe("EXPLAIN QUERY PLAN – job_participants index utilization (#640)", () => {
+    it("uses idx_job_participants_address and does not SCAN events for participant lookup", () => {
+      // Seed several contracts so SQLite's cost-based query planner prefers index search
+      for (let i = 1; i <= 20; i++) {
+        seedEvent(testDb, {
+          contractId: `CONTRACT-PLAN-${i}`,
+          eventType: "initialized",
+          ledger: 100 + i,
+          timestamp: 1000 + i,
+          dataJson: JSON.stringify({
+            client: `GCLIENT_TEST_${i % 5}`,
+            freelancer: `GFREELANCER_TEST_${i % 5}`,
+            arbiter: `GARBITER_TEST_${i % 5}`,
+          }),
+        });
+      }
+
+      const countPlan = testDb
+        .prepare(
+          `EXPLAIN QUERY PLAN
+           SELECT COUNT(DISTINCT contract_id) AS cnt
+           FROM job_participants
+           WHERE address = ?`
+        )
+        .all("GCLIENT_TEST_0") as Array<{ detail: string }>;
+
+      const countPlanDetails = countPlan.map((r) => r.detail).join(" ");
+      expect(countPlanDetails).toMatch(/USING INDEX idx_job_participants_address/i);
+      expect(countPlanDetails).not.toMatch(/SCAN events/i);
+
+      const pagePlan = testDb
+        .prepare(
+          `EXPLAIN QUERY PLAN
+           WITH wallet_contracts AS (
+             SELECT
+               contract_id,
+               CASE
+                 WHEN MAX(role = 'client') = 1 THEN 'client'
+                 WHEN MAX(role = 'freelancer') = 1 THEN 'freelancer'
+                 WHEN MAX(role = 'arbiter') = 1 THEN 'arbiter'
+                 ELSE 'unknown'
+               END AS role
+             FROM job_participants
+             WHERE address = ?
+             GROUP BY contract_id
+           ),
+           ranked_events AS (
+             SELECT
+               e.contract_id,
+               e.event_type,
+               e.ledger_sequence,
+               e.timestamp,
+               e.data_json,
+               ROW_NUMBER() OVER (
+                 PARTITION BY e.contract_id
+                 ORDER BY e.ledger_sequence DESC, e.id DESC
+               ) AS rn
+             FROM events e
+             JOIN wallet_contracts wc ON wc.contract_id = e.contract_id
+           )
+           SELECT
+             wc.contract_id,
+             wc.role,
+             re.event_type AS latest_event_type,
+             re.ledger_sequence AS latest_ledger,
+             re.timestamp AS latest_timestamp,
+             re.data_json
+           FROM wallet_contracts wc
+           JOIN ranked_events re ON re.contract_id = wc.contract_id AND re.rn = 1
+           ORDER BY re.ledger_sequence DESC, wc.contract_id ASC
+           LIMIT ? OFFSET ?`
+        )
+        .all("GCLIENT_TEST_0", 10, 0) as Array<{ detail: string }>;
+
+      const pagePlanDetails = pagePlan.map((r) => r.detail).join(" ");
+      expect(pagePlanDetails).toMatch(/USING INDEX idx_job_participants_address/i);
+      expect(pagePlanDetails).not.toMatch(/SCAN events\b/i);
+    });
+
+    it("verifies by-wallet lookup latency remains stable as table grows from 10k to 100k events (#640)", async () => {
+      // Create a dedicated db for load scaling comparison
+      const scaleDb = new Database(":memory:");
+      setDb(scaleDb);
+      initSchema();
+
+      const targetWallet = "GTARGET_SCALE_WALLET";
+
+      // Insert 10k events
+      const insertStmt = scaleDb.prepare(
+        `INSERT OR IGNORE INTO events
+         (contract_id, event_type, ledger_sequence, timestamp, data_json)
+         VALUES (?, ?, ?, ?, ?)`
+      );
+      const participantStmt = scaleDb.prepare(
+        `INSERT OR IGNORE INTO job_participants (contract_id, address, role)
+         VALUES (?, ?, ?)`
+      );
+
+      const populateBatch = (fromIndex: number, toIndex: number) => {
+        const tx = scaleDb.transaction(() => {
+          for (let i = fromIndex; i < toIndex; i++) {
+            const cid = `C-SCALE-${Math.floor(i / 5)}`;
+            const isTarget = i % 100 === 0;
+            const client = isTarget ? targetWallet : `GCLIENT_${i % 50}`;
+            const freelancer = `GFREELANCER_${i % 50}`;
+            insertStmt.run(cid, "initialized", i, 1000 + i, JSON.stringify({ client, freelancer }));
+            participantStmt.run(cid, client, "client");
+            participantStmt.run(cid, freelancer, "freelancer");
+          }
+        });
+        tx();
+      };
+
+      populateBatch(0, 10000);
+      resetJobsByWalletCache();
+
+      // Measure at 10k rows
+      const t0 = performance.now();
+      const res10k = await getJobsByWallet(targetWallet, 1, 10);
+      const elapsed10k = performance.now() - t0;
+      expect(res10k.total).toBeGreaterThan(0);
+
+      // Scale to 100k rows
+      populateBatch(10000, 100000);
+      resetJobsByWalletCache();
+
+      // Measure at 100k rows
+      const t1 = performance.now();
+      const res100k = await getJobsByWallet(targetWallet, 1, 10);
+      const elapsed100k = performance.now() - t1;
+      expect(res100k.total).toBeGreaterThan(0);
+
+      // Both should complete very quickly (< 1000 ms, vs full scan which takes several seconds or timeouts)
+      expect(elapsed10k).toBeLessThan(1000);
+      expect(elapsed100k).toBeLessThan(1000);
+
+      scaleDb.close();
+      setDb(testDb);
+      resetJobsByWalletCache();
+    });
   });
 });
