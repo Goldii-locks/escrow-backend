@@ -224,6 +224,7 @@ router.get("/indexer-status", async (_req, res) => {
     lastEventAt: status.lastEventAt,
     eventsByType: status.eventsByType,
     skippedLedgerRange: status.skippedLedgerRange ?? null,
+    undecodableEvents: status.undecodableEvents,
     reconciliation: getLatestReconciliationResults(),
     failedDeliveries: getFailedDeliveryCount(),
     deadDeliveries: getDeadDeliveries(),

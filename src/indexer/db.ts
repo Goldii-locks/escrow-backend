@@ -543,6 +543,25 @@ const MIGRATIONS: Migration[] = [
         AND json_extract(data_json, '$.arbiter') != '';
     `,
   },
+  {
+    version: 19,
+    description: "undecodable_events table for per-event decode failures (#658)",
+    up: `
+      CREATE TABLE IF NOT EXISTS undecodable_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        event_id TEXT,
+        ledger_sequence INTEGER,
+        contract_id TEXT,
+        topic_xdr TEXT,
+        value_xdr TEXT,
+        error_message TEXT NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_undecodable_events_ledger
+        ON undecodable_events (ledger_sequence);
+    `,
+  },
 ];
 
 /** Index names created by the SQLite schema manager lookup-index migration (#259). */
@@ -1933,6 +1952,8 @@ export interface IndexerStatusData {
   lastEventAt: string | null;
   eventsByType: Record<string, number>;
   skippedLedgerRange?: SkippedLedgerRange | null;
+  /** Events skipped because they could not be decoded (#658). */
+  undecodableEvents: number;
 }
 
 export interface WebhookSubscription {
@@ -2162,7 +2183,44 @@ export function getIndexerStatusData(): IndexerStatusData {
     lastEventAt: lastEventRow.last_at,
     eventsByType,
     skippedLedgerRange: getSkippedLedgerRange(),
+    undecodableEvents: countUndecodableEvents(),
   };
+}
+
+export interface UndecodableEventRecord {
+  eventId: string | null;
+  ledgerSequence: number | null;
+  contractId: string | null;
+  topicXdr: string | null;
+  valueXdr: string | null;
+  errorMessage: string;
+}
+
+/** Store the raw form of an event that could not be decoded (#658). */
+export function recordUndecodableEvent(record: UndecodableEventRecord): void {
+  getDb()
+    .prepare(
+      `INSERT INTO undecodable_events
+         (event_id, ledger_sequence, contract_id, topic_xdr, value_xdr, error_message)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      record.eventId,
+      record.ledgerSequence,
+      record.contractId,
+      record.topicXdr,
+      record.valueXdr,
+      record.errorMessage,
+    );
+}
+
+/** Number of events skipped because they could not be decoded. */
+export function countUndecodableEvents(): number {
+  const row = getDb()
+    .prepare("SELECT COUNT(*) as count FROM undecodable_events")
+    .get() as { count: number };
+
+  return row.count;
 }
 
 // ---------------------------------------------------------------------------

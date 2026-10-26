@@ -5,6 +5,7 @@ import { scValToNative } from "@stellar/stellar-sdk";
 import {
   insertEventBatch,
   insertHistoricalEventBatch,
+  recordUndecodableEvent,
   getActiveContractIds,
   getActiveContractsWithPointers,
   updateContractPointer,
@@ -211,6 +212,58 @@ function toEventRow(event: any, fallbackContractId: string): EventRow {
   };
 }
 
+/** Raw XDR for an event part, or null if it cannot even be serialized. */
+type XdrSerializable = { toXDR(format: "base64"): string };
+function rawXdr(part: unknown): string | null {
+  try {
+    if (Array.isArray(part)) {
+      return JSON.stringify((part as XdrSerializable[]).map((p) => p.toXDR("base64")));
+    }
+    return part ? (part as XdrSerializable).toXDR("base64") : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Decode events one at a time (#658). An event that cannot be decoded is
+ * written to undecodable_events with its raw XDR and the error, a warning is
+ * logged, and the rest of the page is still processed.
+ */
+function decodeEventsIsolated(
+  events: Parameters<typeof toEventRow>[0][],
+  fallbackContractId: string,
+): EventRow[] {
+  const rows: EventRow[] = [];
+  for (const event of events) {
+    try {
+      rows.push(toEventRow(event, fallbackContractId));
+    } catch (err) {
+      const errorMessage = formatError(err);
+      try {
+        recordUndecodableEvent({
+          eventId: event?.id ?? null,
+          ledgerSequence: event?.ledger ?? null,
+          contractId: fallbackContractId,
+          topicXdr: rawXdr(event?.topic),
+          valueXdr: rawXdr(event?.value),
+          errorMessage,
+        });
+      } catch (recordErr) {
+        logger.error("Failed to record undecodable event", {
+          error: formatError(recordErr),
+        });
+      }
+      logger.warn("Skipping undecodable event", {
+        eventId: event?.id,
+        ledger: event?.ledger,
+        error: errorMessage,
+      });
+    }
+  }
+  return rows;
+}
+
 // ---------------------------------------------------------------------------
 // Poll diagnostics (#270)
 // ---------------------------------------------------------------------------
@@ -394,8 +447,7 @@ export async function fetchHistoricalEvents(
 
     eventsFound += pageEvents.length;
 
-    const batch: EventRow[] = pageEvents
-      .map((event) => toEventRow(event, contractIds[0] ?? ""))
+    const batch: EventRow[] = decodeEventsIsolated(pageEvents, contractIds[0] ?? "")
       .filter(
         (row) =>
           row.ledgerSequence >= startLedger && row.ledgerSequence <= endLedger,
@@ -834,9 +886,8 @@ export async function pollEvents(): Promise<boolean> {
 
         const pageEvents: any[] = (events as any).events ?? [];
         // Build the batch to be written atomically (#84)
-        const batch: EventRow[] = pageEvents.map((event) =>
-          toEventRow(event, groupContractIds[0])
-        );
+        // Decode per event so one bad event cannot block the page (#658).
+        const batch: EventRow[] = decodeEventsIsolated(pageEvents, groupContractIds[0]);
 
         // Register escrow contracts created by the factory (#660) so the next
         // poll indexes them, and fetch the new contract's first page now so a
@@ -872,8 +923,9 @@ export async function pollEvents(): Promise<boolean> {
               }),
             );
             const childPage: any[] = (childEvents as any).events ?? [];
-            const childBatch: EventRow[] = childPage.map((childEv) =>
-              toEventRow(childEv, childContractId as string)
+            const childBatch: EventRow[] = decodeEventsIsolated(
+              childPage,
+              childContractId as string,
             );
             batch.push(...childBatch);
             childEventCount += childBatch.length;
