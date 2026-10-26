@@ -200,12 +200,72 @@ export function checkConversionRateLimit(clientKey: string): RateLimitResult {
   };
 }
 
+export type ConversionRateLimiter =
+  | {
+      consume?: () => boolean | { ok: boolean; error?: string; code?: ScraperErrorCode };
+      check?: () => boolean | { ok: boolean; error?: string; code?: ScraperErrorCode };
+      checkRateLimit?: () => boolean | { ok: boolean; error?: string; code?: ScraperErrorCode };
+      tryConsume?: () => boolean;
+    }
+  | (() => boolean | { ok: boolean; error?: string; code?: ScraperErrorCode });
+
+export function createConversionRateTokenBucket(config: { maxCalls: number; windowMs?: number }): ConversionRateLimiter {
+  let count = 0;
+  let start = Date.now();
+  const windowMs = config.windowMs ?? 60_000;
+  return {
+    consume: () => {
+      const now = Date.now();
+      if (now - start >= windowMs) {
+        start = now;
+        count = 0;
+      }
+      count += 1;
+      return count <= config.maxCalls;
+    },
+  };
+}
+
 /**
  * Validate an oracle conversion rate against digit limits.
  */
 export function validateConversionRate(
-  rate: string | number | bigint
+  rate: string | number | bigint,
+  options?: { limiter?: ConversionRateLimiter }
 ): ValidationResult {
+  if (options?.limiter) {
+    let res: unknown;
+    const limiter = options.limiter;
+    if (typeof limiter === "function") {
+      res = limiter();
+    } else if (typeof limiter.consume === "function") {
+      res = limiter.consume();
+    } else if (typeof limiter.tryConsume === "function") {
+      res = limiter.tryConsume();
+    } else if (typeof limiter.checkRateLimit === "function") {
+      res = limiter.checkRateLimit();
+    } else if (typeof limiter.check === "function") {
+      res = limiter.check();
+    }
+    if (typeof res === "boolean" && !res) {
+      return {
+        ok: false,
+        error: "conversion rate limit exceeded",
+        code: ERROR_CODES.RATE_LIMIT_EXCEEDED,
+      };
+    }
+    if (res && typeof res === "object") {
+      const obj = res as { ok?: boolean; error?: string; code?: ScraperErrorCode };
+      if (obj.ok === false) {
+        return {
+          ok: false,
+          error: obj.error ?? "conversion rate limit exceeded",
+          code: obj.code ?? ERROR_CODES.RATE_LIMIT_EXCEEDED,
+        };
+      }
+    }
+  }
+
   const parsed = parseIntegerInput(
     rate,
     "rate",
