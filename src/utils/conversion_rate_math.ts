@@ -18,7 +18,7 @@
  * (banker's rounding) protocol: halfway cases round to the nearest *even*
  * digit. This eliminates the systematic upward bias produced by the more
  * common "round half up" rule and is consistent with IEEE 754 default rounding
- * and the approach used by `fee_deduction_calculator`.
+ * and the approach used by `fee-deduction-calculator`.
  *
  * ### Unknown tickers
  * `resolveAssetTicker` returns a `TickerResolution` that always succeeds —
@@ -48,6 +48,8 @@ import {
   resolveTokenMetadata,
   type TokenMetadataOptions,
 } from "./token-metadata.js";
+import { escapeCsvField, parseCsvLine } from "./csv-serializer.js";
+import { formatDecimalForDb } from "./db-precision.js";
 
 export { MAX_SAFE_DIGITS };
 
@@ -490,28 +492,7 @@ export async function resolveAssetForToken(
  * formatForDb(100n, 0)          // "100"
  */
 export function formatForDb(value: bigint, decimals: number): string {
-  if (!Number.isInteger(decimals) || decimals < 0) {
-    throw new RangeError(
-      `formatForDb: decimals must be a non-negative integer, got ${decimals}`
-    );
-  }
-
-  if (decimals === 0) {
-    return value.toString();
-  }
-
-  const isNegative = value < 0n;
-  const abs = isNegative ? -value : value;
-  const scale = 10n ** BigInt(decimals);
-
-  const integerPart = abs / scale;
-  const fractionalPart = abs % scale;
-
-  // Pad fractional part with leading zeros to `decimals` width
-  const fracStr = fractionalPart.toString().padStart(decimals, "0");
-  const formatted = `${integerPart.toString()}.${fracStr}`;
-
-  return isNegative ? `-${formatted}` : formatted;
+  return formatDecimalForDb(value, decimals, { label: "formatForDb" });
 }
 
 /**
@@ -592,18 +573,6 @@ export type CsvExportResult =
   | { ok: false; error: string; code: OverflowErrorCode };
 
 /**
- * Escape a single CSV cell value.
- * Wraps the value in double-quotes if it contains a comma, double-quote, or
- * newline, and escapes embedded double-quotes by doubling them.
- */
-function escapeCsvCell(value: string): string {
-  if (/[",\r\n]/.test(value)) {
-    return `"${value.replace(/"/g, '""')}"`;
-  }
-  return value;
-}
-
-/**
  * Serialize an array of conversion-rate rows to RFC 4180-compatible CSV text.
  *
  * Columns: pair, rate, timestamp (omitted when none of the rows carry one).
@@ -650,8 +619,8 @@ export function exportConversionRatesToCsv(
     }
 
     const cells: string[] = [
-      escapeCsvCell(row.pair.trim()),
-      escapeCsvCell(rateCheck.value.toString()),
+      escapeCsvField(row.pair.trim()),
+      escapeCsvField(rateCheck.value.toString()),
     ];
 
     if (includeTimestamp) {
@@ -706,7 +675,7 @@ export function parseConversionRatesCsv(
     };
   }
 
-  const header = rawLines[0].split(",").map((h) => h.trim());
+  const header = parseCsvLine(rawLines[0]).map((h) => h.trim());
   const hasPair = header[0] === "pair";
   const hasRate = header[1] === "rate";
   const hasTimestamp = header[2] === "timestamp";
@@ -722,7 +691,7 @@ export function parseConversionRatesCsv(
   const rows: ConversionRateRow[] = [];
 
   for (let i = 1; i < rawLines.length; i++) {
-    const cols = rawLines[i].split(",");
+    const cols = parseCsvLine(rawLines[i]);
 
     const pair = cols[0]?.trim() ?? "";
     if (pair === "") {

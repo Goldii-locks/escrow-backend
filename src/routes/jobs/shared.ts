@@ -1,6 +1,5 @@
 import type { Request, Response, NextFunction } from "express";
 import {
-  Account,
   Contract,
   Networks,
   TransactionBuilder,
@@ -9,7 +8,6 @@ import {
   scValToNative,
   Address,
 } from "@stellar/stellar-sdk";
-import { Server } from "@stellar/stellar-sdk/rpc";
 import {
   getJobsByWallet,
   getEventsByContract,
@@ -76,7 +74,13 @@ import {
   type WhitelistUpdateRequestBody,
   type FeePreviewQuery,
 } from "../../schemas/jobs.js";
-import { config } from "../../config.js";
+import {
+  RPC_URL,
+  NETWORK_PASSPHRASE,
+  server,
+  getRpcUrl,
+  simulationSource,
+} from "../../utils/soroban-call.js";
 import logger from "../../utils/logger.js";
 import { isValidStellarContractId } from "../../utils/stellar.js";
 import { randomUUID } from "crypto";
@@ -99,34 +103,10 @@ export function maskAddress(address: string | undefined | null): string {
 }
 
 export const CONTRACT_ID = process.env.CONTRACT_ID || "";
-const RPC_URL =
-  process.env.SOROBAN_RPC_URL || "https://soroban-testnet.stellar.org";
-export const NETWORK_PASSPHRASE =
-  process.env.SOROBAN_NETWORK_PASSPHRASE || Networks.TESTNET;
+// The RPC Server, network config and read-simulation source live in
+// utils/soroban-call.ts (#620); re-exported here for the route modules.
+export { NETWORK_PASSPHRASE, server, getRpcUrl, simulationSource };
 
-// #691: Apply an explicit HTTP timeout so stalled RPC connections surface as
-// a 504 rather than hanging indefinitely. Default 10 s; override via env.
-const RPC_TIMEOUT_MS = config.rpcTimeoutMs;
-export const server = new Server(RPC_URL, { timeout: RPC_TIMEOUT_MS });
-
-/** RPC URL the module-level Server was built with (#602). */
-export function getRpcUrl(): string {
-  return RPC_URL;
-}
-
-/**
- * Source account for read-only simulations (#616). Simulation never checks
- * the source sequence number, so a local Account needs no RPC getAccount
- * lookup — and removes the hidden DEPLOYER_ADDRESS requirement that turned
- * every read endpoint into a 500 when it was unset.
- */
-export function simulationSource(): Account {
-  return new Account(
-    process.env.SIMULATION_SOURCE ||
-      "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
-    "0",
-  );
-}
 
 /**
  * #692: Validate that the configured SOROBAN_NETWORK_PASSPHRASE matches the

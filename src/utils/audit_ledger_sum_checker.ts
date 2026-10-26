@@ -4,8 +4,13 @@
  * Rejects inputs whose digit count would risk unsafe numeric overflow.
  */
 
-import fs from "node:fs";
-import path from "node:path";
+import {
+  escapeCsvField,
+  formatRowToCsv,
+  countCsvDataRows,
+  writeCsvFile,
+} from "./csv-serializer.js";
+import { formatDecimalForDb } from "./db-precision.js";
 import {
   parseIntegerInput,
   MAX_SAFE_DIGITS,
@@ -601,7 +606,7 @@ export type RoundingResult =
  *   numerator === value * denominator + pre_round_remainder
  *
  * This is consistent with the round-half-to-even used in
- * `fee_deduction_calculator.calculateFeeDeductionHalfEven`.
+ * `fee-deduction-calculator.calculateFeeDeductionHalfEven`.
  */
 export function roundHalfEven(
   numerator: bigint,
@@ -1244,27 +1249,7 @@ export type LedgerFormatResult =
  * `decimals = 0` the value renders as a plain integer string.
  */
 export function formatLedgerValueForDb(value: bigint, decimals = 0): string {
-  if (typeof value !== "bigint") {
-    throw new TypeError("formatLedgerValueForDb: value must be a bigint");
-  }
-  if (!Number.isInteger(decimals) || decimals < 0) {
-    throw new RangeError(
-      `formatLedgerValueForDb: decimals must be a non-negative integer, got ${decimals}`
-    );
-  }
-
-  if (decimals === 0) {
-    return value.toString();
-  }
-
-  const isNegative = value < 0n;
-  const abs = isNegative ? -value : value;
-  const scale = 10n ** BigInt(decimals);
-  const integerPart = abs / scale;
-  const fractionalPart = abs % scale;
-  const fracStr = fractionalPart.toString().padStart(decimals, "0");
-  const formatted = `${integerPart.toString()}.${fracStr}`;
-  return isNegative ? `-${formatted}` : formatted;
+  return formatDecimalForDb(value, decimals, { label: "formatLedgerValueForDb" });
 }
 
 /**
@@ -1422,36 +1407,15 @@ export type AuditLedgerCsvFileOutcome =
 
 /**
  * Escape a CSV field (RFC 4180). Empty/optional values become empty cells.
- * Numeric bigints keep their exact decimal-digit representation.
+ * Alias of the shared `escapeCsvField` in csv-serializer.ts.
  */
-export function escapeAuditLedgerCsvField(
-  value: unknown,
-  delimiter = ","
-): string {
-  if (value === null || value === undefined) {
-    return "";
-  }
-  const str = typeof value === "bigint" ? value.toString() : String(value);
-  if (
-    str.includes(delimiter) ||
-    str.includes('"') ||
-    str.includes("\n") ||
-    str.includes("\r")
-  ) {
-    return `"${str.replace(/"/g, '""')}"`;
-  }
-  return str;
-}
+export const escapeAuditLedgerCsvField = escapeCsvField;
 
-/** Format an array of values into a single escaped CSV row. */
-export function formatAuditLedgerCsvRow(
-  values: unknown[],
-  delimiter = ","
-): string {
-  return values
-    .map((value) => escapeAuditLedgerCsvField(value, delimiter))
-    .join(delimiter);
-}
+/**
+ * Format an array of values into a single escaped CSV row. Alias of the
+ * shared `formatRowToCsv` in csv-serializer.ts.
+ */
+export const formatAuditLedgerCsvRow = formatRowToCsv;
 
 function csvInputError(error: string): AuditLedgerCsvOutcome {
   return { ok: false, error, code: ERROR_CODES.INVALID_CSV_INPUT };
@@ -1596,16 +1560,7 @@ export function writeAuditLedgerCsvFile(
 
   if (typeof records === "string") {
     csvContent = records;
-    const trimmed = records.trim();
-    if (trimmed.length === 0) {
-      rowCount = 0;
-    } else {
-      const splitLines = trimmed.split(/\r?\n/);
-      rowCount =
-        options.includeHeader !== false
-          ? Math.max(0, splitLines.length - 1)
-          : splitLines.length;
-    }
+    rowCount = countCsvDataRows(records, options.includeHeader !== false);
   } else {
     const formatted = buildAuditLedgerCsvBlock(records, options);
     if (!formatted.ok) {
@@ -1616,16 +1571,10 @@ export function writeAuditLedgerCsvFile(
   }
 
   try {
-    const dir = path.dirname(filePath);
-    if (dir && dir !== "." && !fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
-    const encoding = options.encoding ?? "utf8";
-    fs.writeFileSync(filePath, csvContent, { encoding });
     return {
       ok: true,
       filePath,
-      bytesWritten: Buffer.byteLength(csvContent, encoding),
+      bytesWritten: writeCsvFile(filePath, csvContent, options.encoding ?? "utf8"),
       rowCount,
     };
   } catch (error) {
