@@ -18,7 +18,7 @@ function stubServer(getLatestLedger: RpcServerLike["getLatestLedger"]): RpcServe
   return {
     getLatestLedger,
     getEvents: async () => ({ events: [] }),
-  };
+  } as unknown as RpcServerLike;
 }
 
 describe("indexer_metrics_collector – RPC health check backoff retry (#334)", () => {

@@ -1,4 +1,5 @@
 import { Server } from "@stellar/stellar-sdk/rpc";
+import type { Api } from "@stellar/stellar-sdk/rpc";
 import { scValToNative } from "@stellar/stellar-sdk";
 import { insertEvent, type EventRow } from "./db.js";
 import {
@@ -279,7 +280,7 @@ export const MAX_RPC_REQUESTS_PER_PAGE = 1000;
  */
 export interface RpcServerLike {
   getLatestLedger(): Promise<{ sequence: number }>;
-  getEvents(params: any): Promise<any>;
+  getEvents(params: RpcGetEventsParams): Promise<Api.GetEventsResponse>;
 }
 
 export interface RpcGetEventsParams {
@@ -287,7 +288,7 @@ export interface RpcGetEventsParams {
   startLedger?: number;
   /** Paging cursor returned by a previous getEvents call. */
   cursor?: string;
-  filters?: any[];
+  filters?: Api.EventFilter[];
   limit?: number;
 }
 
@@ -307,7 +308,7 @@ export interface RpcHistoricalRangeOptions {
   /** Fallback end when neither an explicit nor an env end is set. */
   defaultEnd?: number;
   /** Contract/topic filters forwarded verbatim to getEvents. */
-  filters?: any[];
+  filters?: Api.EventFilter[];
   /** Ledgers per fetch page (default: client `historicalPageSize`). */
   pageSize?: number;
   /** Max events requested per RPC call (default: client `eventsLimit`). */
@@ -318,7 +319,7 @@ export interface RpcHistoricalFetchResult {
   range: LedgerRange;
   pages: LedgerRange[];
   /** Raw RPC events, de-duplicated and clamped to the resolved range. */
-  events: any[];
+  events: Api.EventResponse[];
   eventCount: number;
   /** Per-ledger event counts, ascending by ledger sequence. */
   ledgerEventCounts: LedgerEventCount[];
@@ -346,9 +347,20 @@ function validatePositiveInt(name: string, value: unknown): number {
   return value;
 }
 
-/** Read a contract id off a raw RPC event, tolerating both SDK and plain shapes. */
-function readContractId(raw: any): string {
-  const contractId = raw?.contractId;
+/**
+ * `pagingToken` is gone from the SDK's EventResponse type, but older RPC
+ * nodes and recorded fixtures still send it; read it without trusting the type.
+ */
+function legacyPagingToken(raw: Api.EventResponse): string | undefined {
+  const token = (raw as Api.EventResponse & { pagingToken?: unknown }).pagingToken;
+  return typeof token === "string" && token ? token : undefined;
+}
+
+/** Read a contract id off a parsed RPC event, tolerating both SDK and plain shapes. */
+function readContractId(raw: Api.EventResponse): string {
+  const contractId = raw.contractId;
+  // Test stubs may pass a plain string; the SDK parser produces a Contract
+  // instance. Handle both at runtime even though the type says Contract.
   if (typeof contractId === "string") return contractId;
   if (contractId && typeof contractId.contractId === "function") {
     try {
@@ -361,8 +373,10 @@ function readContractId(raw: any): string {
 }
 
 /** Read the event type from `topic[0]`, tolerating both ScVal and plain shapes. */
-function readEventType(raw: any): string {
-  const topic = raw?.topic?.[0];
+function readEventType(raw: Api.EventResponse): string {
+  // Stubs and malformed notifications may omit the topic entirely.
+  const topic = raw.topic?.[0];
+  // Test stubs pass plain strings; the SDK parser produces xdr.ScVal.
   if (typeof topic === "string") return topic;
   if (topic === undefined || topic === null) return "unknown";
   try {
@@ -373,12 +387,11 @@ function readEventType(raw: any): string {
 }
 
 /** Stable identity for a raw RPC event, used to drop repeats across pages. */
-function rpcEventKey(raw: any): string {
-  if (typeof raw?.id === "string" && raw.id) return raw.id;
-  if (typeof raw?.pagingToken === "string" && raw.pagingToken) {
-    return raw.pagingToken;
-  }
-  return `${readContractId(raw)}|${String(raw?.ledger)}|${readEventType(raw)}`;
+function rpcEventKey(raw: Api.EventResponse): string {
+  if (raw.id) return raw.id;
+  const pagingToken = legacyPagingToken(raw);
+  if (pagingToken) return pagingToken;
+  return `${readContractId(raw)}|${String(raw.ledger)}|${readEventType(raw)}`;
 }
 
 /**
@@ -387,23 +400,21 @@ function rpcEventKey(raw: any): string {
  * live polls produce identical rows.
  */
 export function mapRpcEventToRow(
-  raw: any,
+  raw: Api.EventResponse,
   fallbackContractId: string = ""
 ): EventRow {
   return {
     contractId: readContractId(raw) || fallbackContractId,
     eventType: readEventType(raw),
-    ledgerSequence: Number(raw?.ledger),
-    timestamp: raw?.ledgerClosedAt
+    ledgerSequence: raw.ledger,
+    timestamp: raw.ledgerClosedAt
       ? Math.floor(new Date(raw.ledgerClosedAt).getTime() / 1000)
       : Math.floor(Date.now() / 1000),
     dataJson: JSON.stringify(raw?.value ?? null),
     eventId:
       typeof raw?.id === "string" && raw.id
         ? raw.id
-        : typeof raw?.pagingToken === "string" && raw.pagingToken
-          ? raw.pagingToken
-          : undefined,
+        : legacyPagingToken(raw),
   };
 }
 
@@ -690,7 +701,7 @@ export interface RpcPollerClientOptions extends Partial<RpcRetryConfig> {
   /** Ceiling on rows held in the memory queue. */
   maxQueueSize?: number;
   /** Override the raw-event to `EventRow` mapping. */
-  mapEvent?: (raw: any) => EventRow;
+  mapEvent?: (raw: Api.EventResponse) => EventRow;
   /** Inject a server stub instead of connecting to `rpcUrl`. */
   server?: RpcServerLike;
 }
@@ -705,7 +716,7 @@ export class RpcPollerClient {
   private config: RpcRetryConfig;
   private readonly historicalPageSize: number;
   private readonly eventsLimit: number;
-  private readonly mapEvent: (raw: any) => EventRow;
+  private readonly mapEvent: (raw: Api.EventResponse) => EventRow;
   private readonly queue: RpcEventQueue;
 
   constructor(rpcUrl: string, options: RpcPollerClientOptions = {}) {
@@ -726,7 +737,7 @@ export class RpcPollerClient {
       "eventsLimit",
       options.eventsLimit ?? DEFAULT_RPC_EVENTS_LIMIT
     );
-    this.mapEvent = options.mapEvent ?? ((raw: any) => mapRpcEventToRow(raw));
+    this.mapEvent = options.mapEvent ?? ((raw: Api.EventResponse) => mapRpcEventToRow(raw));
     this.queue = new RpcEventQueue({
       persist: options.persistEvent,
       maxQueueSize: options.maxQueueSize,
@@ -749,7 +760,7 @@ export class RpcPollerClient {
     );
   }
 
-  async getEvents(params: RpcGetEventsParams): Promise<any> {
+  async getEvents(params: RpcGetEventsParams): Promise<Api.GetEventsResponse> {
     return withRetry(
       () => this.server.getEvents(params),
       this.config,
@@ -797,7 +808,7 @@ export class RpcPollerClient {
     const pages = chunkLedgerRange(range, pageSize);
     const filters = options.filters ?? [];
 
-    const events: any[] = [];
+    const events: Api.EventResponse[] = [];
     const seen = new Set<string>();
     let requestCount = 0;
     let latestLedger: number | undefined;
@@ -816,19 +827,17 @@ export class RpcPollerClient {
         const response = await this.getEvents(params);
         requestCount++;
 
-        const batch: any[] = Array.isArray(response?.events)
+        const batch: Api.EventResponse[] = Array.isArray(response?.events)
           ? response.events
           : [];
         if (typeof response?.latestLedger === "number") {
           latestLedger = response.latestLedger;
         }
 
-        // A short batch means the RPC has nothing left for this window; an
-        // event past the page end means the rest are out of range too.
         let done = batch.length < limit;
 
         for (const raw of batch) {
-          const ledger = Number(raw?.ledger);
+          const ledger = raw.ledger;
           if (!Number.isFinite(ledger)) continue;
           if (ledger > page.endLedger) {
             done = true;
@@ -901,7 +910,7 @@ export class RpcPollerClient {
    * concurrently: identical notifications collapse to a single insert (#269).
    */
   async submitEventNotifications(
-    events: Array<EventRow | any>
+    events: Array<EventRow | Api.EventResponse>
   ): Promise<RpcEventSubmitResult> {
     const rows = events.map((event) =>
       isEventRow(event) ? event : this.mapEvent(event)
@@ -915,18 +924,24 @@ export class RpcPollerClient {
   }
 }
 
-function isEventRow(value: any): value is EventRow {
+function isEventRow(value: unknown): value is EventRow {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
   return (
-    typeof value?.contractId === "string" &&
-    typeof value?.eventType === "string" &&
-    typeof value?.ledgerSequence === "number" &&
-    typeof value?.dataJson === "string"
+    typeof v["contractId"] === "string" &&
+    typeof v["eventType"] === "string" &&
+    typeof v["ledgerSequence"] === "number" &&
+    typeof v["dataJson"] === "string"
   );
 }
 
-/** Prefer the response cursor, falling back to the last event's paging token. */
-function readNextCursor(response: any, batch: any[]): string | undefined {
+/** Prefer the response cursor, falling back to the last event's id. */
+function readNextCursor(
+  response: Api.GetEventsResponse,
+  batch: Api.EventResponse[]
+): string | undefined {
   const last = batch[batch.length - 1];
-  const candidate = response?.cursor ?? last?.pagingToken ?? last?.id;
+  const candidate =
+    response.cursor ?? (last ? legacyPagingToken(last) : undefined) ?? last?.id;
   return typeof candidate === "string" && candidate ? candidate : undefined;
 }

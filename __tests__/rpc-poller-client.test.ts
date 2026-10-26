@@ -6,9 +6,17 @@ import {
   getErrorStatusCode,
   isRetryableError,
   RpcPollerClient,
-  mapRpcEventToRow,
+  mapRpcEventToRow as mapRpcEventToRowTyped,
+  type RpcServerLike,
   RpcEventQueue,
 } from "../src/indexer/rpc-poller-client.js";
+
+// The SDK-typed mapper (#645) takes Api.EventResponse; these tests feed it
+// deliberately loose stub shapes.
+const mapRpcEventToRow = mapRpcEventToRowTyped as unknown as (
+  raw: unknown,
+  fallbackContractId?: string,
+) => ReturnType<typeof mapRpcEventToRowTyped>;
 import { jest } from "@jest/globals";
 import Database from "better-sqlite3";
 import {
@@ -394,7 +402,7 @@ describe("RpcPollerClient – exponential backoff retry", () => {
         getLatestLedger: async () => ({ sequence: 100 }),
         getEvents: async () => ({ events: [] }),
       };
-      const client = new RpcPollerClient("https://rpc.invalid", { server: stub });
+      const client = new RpcPollerClient("https://rpc.invalid", { server: stub as unknown as RpcServerLike });
       expect(client.underlyingServer).toBe(stub);
       expect(client.rpcServer).toBe(stub);
     });
@@ -404,7 +412,7 @@ describe("RpcPollerClient – exponential backoff retry", () => {
         getLatestLedger: async () => ({ sequence: 12345 }),
         getEvents: async (params: any) => ({ events: [], latestLedger: 12345, params }),
       };
-      const client = new RpcPollerClient("https://rpc.invalid", { server: stub });
+      const client = new RpcPollerClient("https://rpc.invalid", { server: stub as unknown as RpcServerLike });
       const ledgerRes = await client.getLatestLedger();
       expect(ledgerRes.sequence).toBe(12345);
 
