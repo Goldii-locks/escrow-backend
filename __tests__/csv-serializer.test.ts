@@ -78,6 +78,43 @@ describe("CSV Serializer", () => {
     it("should handle bigint values", () => {
       expect(escapeCSVField(999999999999n)).toBe("999999999999");
     });
+
+    describe("formula injection prevention (#633)", () => {
+      // Table-driven cases: [label, input, expectedOutput]
+      const cases: [string, string | number | bigint, string][] = [
+        // Formula-triggering strings must be prefixed with a single quote
+        ["=1+1 (string) is prefixed", "=1+1", "'=1+1"],
+        ["+1 (string) is prefixed", "+1", "'+1"],
+        ["@SUM(A1) (string) is prefixed", "@SUM(A1)", "'@SUM(A1)"],
+        ["-2+3 (string) is prefixed", "-2+3", "'-2+3"],
+        ["- (single dash string) is prefixed", "-", "'-"],
+        ["\\thello (tab-prefixed string) is prefixed", "\thello", "'\thello"],
+        // A CR also makes the field CSV-quoted.
+        ["\\rhello (CR-prefixed string) is prefixed", "\rhello", '"\'\rhello"'],
+        // A formula string containing commas must be prefixed then CSV-quoted
+        [
+          "=formula,with,commas is prefixed and CSV-quoted",
+          "=formula,with,commas",
+          '"\'=formula,with,commas"',
+        ],
+        // Plain strings without injection triggers must be unchanged
+        ["hello (plain string) has no prefix", "hello", "hello"],
+        [
+          "hello, world (comma string) is CSV-quoted but not prefixed",
+          "hello, world",
+          '"hello, world"',
+        ],
+        // Numeric and bigint types must never be prefixed, even when negative
+        ["-42 (number) is unchanged", -42, "-42"],
+        ["0 (number) is unchanged", 0, "0"],
+        ["42n (bigint) is unchanged", 42n, "42"],
+        ["-42n (negative bigint) is unchanged", -42n, "-42"],
+      ];
+
+      it.each(cases)("%s", (_label, input, expected) => {
+        expect(escapeCSVField(input as string | number | bigint)).toBe(expected);
+      });
+    });
   });
 
   describe("formatCSVTimestamp", () => {

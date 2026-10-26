@@ -559,6 +559,12 @@ const CSV_SERIALIZATION_ERRORS = {
  * @deprecated Use `escapeCsvField`; kept as an alias for existing callers.
  */
 export function escapeCSVField(value: string | number | bigint): string {
+  // Formula-injection guard (#633): only strings can carry a leading
+  // =, +, -, @, tab or CR. Numbers and bigints (including negatives) are
+  // left unchanged.
+  if (typeof value === "string" && /^[=+\-@\t\r]/.test(value)) {
+    value = `'${value}`;
+  }
   return escapeCsvField(value);
 }
 
