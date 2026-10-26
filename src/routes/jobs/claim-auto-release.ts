@@ -15,6 +15,8 @@ import {
   randomUUID,
   NETWORK_PASSPHRASE,
   server,
+  sendSuccess,
+  sendError,
 } from "./shared.js";
 import { rejectedRequestLogMeta } from "../../utils/log-redaction.js";
 import { getInclusionFee } from "../../utils/fee-helper.js";
@@ -78,11 +80,11 @@ router.post(
           source: "cache",
           xdrLength: cached.length,
         });
-        const responseBody = { success: true, xdr: cached };
+        const responseBody = { xdr: cached };
         logger.debug("Claim auto-release response body prepared", {
           traceId,
           ...pathVars,
-          success: responseBody.success,
+          success: true,
           xdrLength: responseBody.xdr.length,
         });
         logger.info("Claim auto-release response sent", {
@@ -93,7 +95,7 @@ router.post(
           cached: true,
           xdrLength: cached.length,
         });
-        res.json(responseBody);
+        sendSuccess(res, responseBody);
         return;
       }
 
@@ -107,11 +109,11 @@ router.post(
           source: "in-flight",
           xdrLength: xdr.length,
         });
-        const responseBody = { success: true, xdr };
+        const responseBody = { xdr };
         logger.debug("Claim auto-release response body prepared", {
           traceId,
           ...pathVars,
-          success: responseBody.success,
+          success: true,
           xdrLength: responseBody.xdr.length,
         });
         logger.info("Claim auto-release response sent", {
@@ -123,7 +125,7 @@ router.post(
           inFlight: true,
           xdrLength: xdr.length,
         });
-        res.json(responseBody);
+        sendSuccess(res, responseBody);
         return;
       }
 
@@ -203,11 +205,11 @@ router.post(
         ...pathVars,
         xdrLength: xdr.length,
       });
-      const responseBody = { success: true, xdr };
+      const responseBody = { xdr };
       logger.debug("Claim auto-release response body prepared", {
         traceId,
         ...pathVars,
-        success: responseBody.success,
+        success: true,
         xdrLength: responseBody.xdr.length,
       });
       logger.info("Claim auto-release response sent", {
@@ -219,7 +221,7 @@ router.post(
         xdrLength: xdr.length,
       });
 
-      res.json(responseBody);
+      sendSuccess(res, responseBody);
     } catch (err: unknown) {
       const message = formatError(err);
       const stack = err instanceof Error ? err.stack : undefined;
@@ -235,12 +237,12 @@ router.post(
         error: message,
         stack,
       });
-      const responseBody = { success: false, error: "Internal server error" };
+      const clientError = "Internal server error";
       logger.debug("Claim auto-release error response body prepared", {
         traceId,
         ...pathVars,
-        success: responseBody.success,
-        clientError: responseBody.error,
+        success: false,
+        clientError,
       });
       logger.info("Claim auto-release response sent", {
         traceId,
@@ -249,7 +251,7 @@ router.post(
         success: false,
         error: message,
       });
-      res.status(500).json(responseBody);
+      sendError(res, 500, clientError);
     }
   },
 );

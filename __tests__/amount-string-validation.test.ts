@@ -119,7 +119,7 @@ describe("partial-release amount (#678)", () => {
         .send({ amount, sourceAddress: VALID_ADDRESS })
         .expect(200);
 
-      const args = decodeInvokeArgs(res.body.xdr);
+      const args = decodeInvokeArgs(res.body.data.xdr);
       // approve_partial(caller, index, amount)
       expect(args[1]).toBe(0);
       expect(args[2]).toBe(BigInt(amount));
@@ -185,7 +185,7 @@ describe("build-tx i128/u64 arguments (#678)", () => {
       })
       .expect(200);
 
-    expect(decodeInvokeArgs(res.body.xdr)).toEqual([
+    expect(decodeInvokeArgs(res.body.data.xdr)).toEqual([
       BigInt(I128_MAX),
       18446744073709551615n,
       BigInt(BIG_AMOUNT),

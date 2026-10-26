@@ -208,17 +208,18 @@ describe("POST /api/jobs/:contractId/milestones/:index/claim-auto-release – su
 
     const res = await request(buildApp()).post(ENDPOINT).send(VALID_BODY).expect(200);
 
-    expect(res.body).toEqual({ success: true, xdr: "AAAAAQ==" });
+    expect(res.body).toEqual({ success: true, data: { xdr: "AAAAAQ==" } });
   });
 
-  it("response shape is exactly { success, xdr }", async () => {
+  it("response shape is exactly { success, data: { xdr } }", async () => {
     mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==" });
 
     const res = await request(buildApp()).post(ENDPOINT).send(VALID_BODY).expect(200);
 
-    expect(Object.keys(res.body)).toEqual(["success", "xdr"]);
+    expect(Object.keys(res.body)).toEqual(["success", "data"]);
+    expect(Object.keys(res.body.data)).toEqual(["xdr"]);
     expect(res.body.success).toBe(true);
-    expect(typeof res.body.xdr).toBe("string");
+    expect(typeof res.body.data.xdr).toBe("string");
   });
 
   it("calls getAccount with sourceAddress", async () => {
@@ -250,8 +251,8 @@ describe("POST /api/jobs/:contractId/milestones/:index/claim-auto-release – ca
     const first = await request(app).post(ENDPOINT).send(VALID_BODY).expect(200);
     const second = await request(app).post(ENDPOINT).send(VALID_BODY).expect(200);
 
-    expect(first.body).toEqual({ success: true, xdr: "AAAAAQ==" });
-    expect(second.body).toEqual({ success: true, xdr: "AAAAAQ==" });
+    expect(first.body).toEqual({ success: true, data: { xdr: "AAAAAQ==" } });
+    expect(second.body).toEqual({ success: true, data: { xdr: "AAAAAQ==" } });
     expect(mockGetAccount).toHaveBeenCalledTimes(1);
     expect(mockPrepareTransaction).toHaveBeenCalledTimes(1);
   });
@@ -270,7 +271,7 @@ describe("POST /api/jobs/:contractId/milestones/:index/claim-auto-release – ca
 
     for (const res of results) {
       expect(res.status).toBe(200);
-      expect(res.body).toEqual({ success: true, xdr: "AAAAAQ==" });
+      expect(res.body).toEqual({ success: true, data: { xdr: "AAAAAQ==" } });
     }
     expect(mockGetAccount).toHaveBeenCalledTimes(1);
     expect(mockPrepareTransaction).toHaveBeenCalledTimes(1);
@@ -289,8 +290,8 @@ describe("POST /api/jobs/:contractId/milestones/:index/claim-auto-release – ca
       .send({ sourceAddress: VALID_ADDRESS_2 })
       .expect(200);
 
-    expect(resA.body.xdr).toBe("XDR_A");
-    expect(resB.body.xdr).toBe("XDR_B");
+    expect(resA.body.data.xdr).toBe("XDR_A");
+    expect(resB.body.data.xdr).toBe("XDR_B");
     expect(mockPrepareTransaction).toHaveBeenCalledTimes(2);
   });
 
@@ -310,8 +311,8 @@ describe("POST /api/jobs/:contractId/milestones/:index/claim-auto-release – ca
       .send(VALID_BODY)
       .expect(200);
 
-    expect(res0.body.xdr).toBe("XDR_0");
-    expect(res1.body.xdr).toBe("XDR_1");
+    expect(res0.body.data.xdr).toBe("XDR_0");
+    expect(res1.body.data.xdr).toBe("XDR_1");
     expect(mockPrepareTransaction).toHaveBeenCalledTimes(2);
   });
 
@@ -325,7 +326,7 @@ describe("POST /api/jobs/:contractId/milestones/:index/claim-auto-release – ca
     await request(app).post(ENDPOINT).send(VALID_BODY).expect(500);
     const retry = await request(app).post(ENDPOINT).send(VALID_BODY).expect(200);
 
-    expect(retry.body).toEqual({ success: true, xdr: "AAAAAQ==" });
+    expect(retry.body).toEqual({ success: true, data: { xdr: "AAAAAQ==" } });
     expect(mockPrepareTransaction).toHaveBeenCalledTimes(2);
   });
 });
@@ -441,7 +442,7 @@ describe("POST /api/jobs/:contractId/milestones/:index/claim-auto-release – er
     mockPrepareTransaction.mockResolvedValueOnce({ toXDR: () => "AAAAAQ==" });
     const res = await request(buildApp()).post(ENDPOINT).send(VALID_BODY).expect(200);
 
-    expect(res.body).toEqual({ success: true, xdr: "AAAAAQ==" });
+    expect(res.body).toEqual({ success: true, data: { xdr: "AAAAAQ==" } });
     expect(mockPrepareTransaction).toHaveBeenCalledTimes(2);
   });
 });

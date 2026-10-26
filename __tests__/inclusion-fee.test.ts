@@ -62,7 +62,7 @@ async function buildFundTx(): Promise<string> {
     .post("/api/jobs/build-tx")
     .send({ contractId: VALID_CONTRACT, method: "fund", args: [], sourceAddress: VALID_ADDRESS })
     .expect(200);
-  return res.body.xdr;
+  return res.body.data.xdr;
 }
 
 beforeEach(() => {

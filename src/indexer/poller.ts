@@ -196,7 +196,11 @@ function toEventRow(event: any, fallbackContractId: string): EventRow {
     eventType: scValToNative(event.topic[0]) as string,
     ledgerSequence: event.ledger,
     timestamp: toEventTimestamp(event.ledgerClosedAt),
-    dataJson: JSON.stringify(scValToNative(event.value)),
+    // i128/u64 event fields decode to bigint, which JSON.stringify rejects;
+    // store them as decimal strings like the API does (#719).
+    dataJson: JSON.stringify(scValToNative(event.value), (_key, value) =>
+      typeof value === "bigint" ? value.toString() : value,
+    ),
     eventId:
       typeof event.id === "string" && event.id
         ? event.id

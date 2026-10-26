@@ -16,6 +16,7 @@ import {
   randomUUID,
   NETWORK_PASSPHRASE,
   server,
+  sendSuccess,
 } from "./shared.js";
 import { rejectedRequestLogMeta } from "../../utils/log-redaction.js";
 import { getInclusionFee } from "../../utils/fee-helper.js";
@@ -118,7 +119,7 @@ router.post(
           source: "cache",
           xdrLength: cachedXdr.length,
         });
-        res.json({ success: true, xdr: cachedXdr });
+        sendSuccess(res, { xdr: cachedXdr });
         return;
       }
 
@@ -196,7 +197,7 @@ router.post(
         logger.info("Partial-release XDR served from in-flight cache", { contractId, index });
       }
 
-      res.json({ success: true, xdr });
+      sendSuccess(res, { xdr });
     } catch (err: unknown) {
       const errMsg = formatError(err);
       // Structured, server-side-only error detail – the client receives a clean
