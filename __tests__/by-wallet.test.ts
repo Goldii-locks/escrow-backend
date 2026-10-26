@@ -6,6 +6,7 @@ import { autoAuth } from "./helpers/api-key-helper.js";
 import { resetByWalletRateLimitBuckets } from "../src/middleware/rateLimiter.js";
 import {
   initSchema,
+  insertEvent,
   insertEventBatch,
   setDb,
   getJobsByWallet,
