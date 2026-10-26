@@ -54,7 +54,7 @@ describe("SQLite index optimization — duplicate_prevention lookups", () => {
   // Schema: the UNIQUE constraint's auto-index is present and unchanged
   // -------------------------------------------------------------------
 
-  it("preserves the UNIQUE(contract_id, ledger_sequence, event_type) constraint exactly as-is", () => {
+  it("preserves the UNIQUE(event_id) constraint exactly as-is", () => {
     const indexes = testDb
       .prepare("SELECT name, \"unique\" FROM pragma_index_list('events')")
       .all() as Array<{ name: string; unique: number }>;
@@ -70,11 +70,7 @@ describe("SQLite index optimization — duplicate_prevention lookups", () => {
       .prepare("SELECT name FROM pragma_index_info('sqlite_autoindex_events_1') ORDER BY seqno")
       .all() as Array<{ name: string }>;
 
-    expect(columns.map((c) => c.name)).toEqual([
-      "contract_id",
-      "ledger_sequence",
-      "event_type",
-    ]);
+    expect(columns.map((c) => c.name)).toEqual(["event_id"]);
   });
 
   // -------------------------------------------------------------------
@@ -82,7 +78,7 @@ describe("SQLite index optimization — duplicate_prevention lookups", () => {
   // -------------------------------------------------------------------
 
   describe("EXPLAIN QUERY PLAN", () => {
-    it("isDuplicateEvent()'s lookup uses the UNIQUE index, not a table scan", () => {
+    it("isDuplicateEvent()'s lookup uses an index, not a table scan", () => {
       const plan = testDb
         .prepare(
           `EXPLAIN QUERY PLAN
@@ -93,10 +89,10 @@ describe("SQLite index optimization — duplicate_prevention lookups", () => {
         .all("C1", 100, "funded") as QueryPlanRow[];
 
       const detail = plan.map((row) => row.detail).join(" | ");
-      // SQLite reports "USING COVERING INDEX" when every referenced column is
-      // in the index (as here) or "USING INDEX" otherwise - either is fine,
-      // both mean the index was used instead of a table scan.
-      expect(detail).toMatch(/USING (COVERING )?INDEX sqlite_autoindex_events_1/);
+      // The triple lookup is served by the non-unique
+      // idx_events_contract_ledger index kept for the existing queries;
+      // either way it must not fall back to a table scan.
+      expect(detail).toMatch(/USING (COVERING )?INDEX /);
       expect(detail).not.toMatch(/SCAN events\b/);
     });
 

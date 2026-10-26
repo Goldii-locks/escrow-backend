@@ -1,12 +1,12 @@
 import Database from "better-sqlite3";
 import request from "supertest";
 import express from "express";
-import { autoAuth, TEST_API_KEY } from "./helpers/api-key-helper.js";
-import type { Request, Response } from "express";
+import { autoAuth } from "./helpers/api-key-helper.js";
+
 import { resetByWalletRateLimitBuckets } from "../src/middleware/rateLimiter.js";
 import {
   initSchema,
-  insertEvent,
+  insertEventBatch,
   setDb,
   getJobsByWallet,
   resetJobsByWalletCache,
@@ -324,6 +324,60 @@ describe("getJobsByWallet() – unit", () => {
     const result = await getJobsByWallet(addr, 3, 10);
     expect(result.page).toBe(3);
     expect(result.limit).toBe(10);
+  });
+
+  describe("Cache invalidation (#661)", () => {
+    it("invalidates cached empty result for wallet W when an init event involving W is indexed", async () => {
+      const W = "GWALLETINVALIDATE1";
+      // 1. Initial query: cache empty result
+      const emptyResult = await getJobsByWallet(W);
+      expect(emptyResult.total).toBe(0);
+      expect(emptyResult.jobs).toHaveLength(0);
+
+      // 2. An init event involving W is indexed via insertEventBatch
+      insertEventBatch(
+        [
+          {
+            contractId: "C-NEW-JOB",
+            eventType: "init",
+            ledgerSequence: 50,
+            timestamp: 500,
+            dataJson: JSON.stringify({ client: W, freelancer: "GFREELANCER", arbiter: "GARBITER" }),
+          },
+        ],
+        50,
+      );
+
+      // 3. The next getJobsByWallet(W) returns the job without waiting for TTL
+      const refreshedResult = await getJobsByWallet(W);
+      expect(refreshedResult.total).toBe(1);
+      expect(refreshedResult.jobs[0].contract_id).toBe("C-NEW-JOB");
+      expect(refreshedResult.jobs[0].role).toBe("client");
+    });
+
+    it("invalidates cached result when initialized event is indexed for freelancer or arbiter", async () => {
+      const F = "GFREELANCERINVALIDATE";
+      const initial = await getJobsByWallet(F);
+      expect(initial.total).toBe(0);
+
+      insertEventBatch(
+        [
+          {
+            contractId: "C-JOB-F",
+            eventType: "initialized",
+            ledgerSequence: 60,
+            timestamp: 600,
+            dataJson: JSON.stringify({ client: "GCLIENT", freelancer: F, arbiter: "GARBITER" }),
+          },
+        ],
+        60,
+      );
+
+      const updated = await getJobsByWallet(F);
+      expect(updated.total).toBe(1);
+      expect(updated.jobs[0].contract_id).toBe("C-JOB-F");
+      expect(updated.jobs[0].role).toBe("freelancer");
+    });
   });
 });
 

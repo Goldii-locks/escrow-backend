@@ -1,6 +1,7 @@
 import Database from "better-sqlite3";
 import request from "supertest";
 import express from "express";
+import { StrKey } from "@stellar/stellar-sdk";
 import {
   initSchema,
   insertEvent,
@@ -153,6 +154,12 @@ describe("getEventsByContract() – unit", () => {
 // HTTP integration tests: GET /api/jobs/:contractId/history
 // ---------------------------------------------------------------------------
 
+
+/** A well-formed contract ID; the history route validates it (#612). */
+function validContractId(n: number): string {
+  return StrKey.encodeContract(Buffer.alloc(32, n));
+}
+
 describe("GET /api/jobs/:contractId/history – HTTP", () => {
   let app: express.Express;
 
@@ -164,7 +171,7 @@ describe("GET /api/jobs/:contractId/history – HTTP", () => {
   });
 
   it("returns success:true with events array and pagination fields", async () => {
-    const cid = "CA3D5K7UXYZ123456789012345678901234567890123456789012345678901";
+    const cid = validContractId(1);
     insertEvent(cid, "initialized", 1, 100, JSON.stringify({ client: "GCLIENT" }));
 
     const res = await request(app)
@@ -172,26 +179,26 @@ describe("GET /api/jobs/:contractId/history – HTTP", () => {
       .expect(200);
 
     expect(res.body.success).toBe(true);
-    expect(Array.isArray(res.body.events)).toBe(true);
-    expect(res.body.events).toHaveLength(1);
-    expect(res.body.events[0].event_type).toBe("initialized");
-    expect(res.body.total).toBeDefined();
-    expect(res.body.page).toBeDefined();
-    expect(res.body.limit).toBeDefined();
+    expect(Array.isArray(res.body.data.events)).toBe(true);
+    expect(res.body.data.events).toHaveLength(1);
+    expect(res.body.data.events[0].event_type).toBe("initialized");
+    expect(res.body.data.total).toBeDefined();
+    expect(res.body.data.page).toBeDefined();
+    expect(res.body.data.limit).toBeDefined();
   });
 
   it("returns empty events array for unknown contract", async () => {
     const res = await request(app)
-      .get("/api/jobs/CUNKNOWNXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX/history")
+      .get(`/api/jobs/${validContractId(99)}/history`)
       .expect(200);
 
     expect(res.body.success).toBe(true);
-    expect(res.body.events).toHaveLength(0);
-    expect(res.body.total).toBe(0);
+    expect(res.body.data.events).toHaveLength(0);
+    expect(res.body.data.total).toBe(0);
   });
 
   it("returns events in chronological order", async () => {
-    const cid = "CA3D5K7UXYZ123456789012345678901234567890123456789012345678902";
+    const cid = validContractId(2);
     insertEvent(cid, "initialized", 10, 1000, JSON.stringify({ client: "GCLIENT" }));
     insertEvent(cid, "funded", 20, 2000, JSON.stringify({ client: "GCLIENT" }));
     insertEvent(cid, "approved", 30, 3000, JSON.stringify({ client: "GCLIENT" }));
@@ -200,8 +207,8 @@ describe("GET /api/jobs/:contractId/history – HTTP", () => {
       .get(`/api/jobs/${cid}/history`)
       .expect(200);
 
-    expect(res.body.events).toHaveLength(3);
-    expect(res.body.events.map((e: any) => e.event_type)).toEqual([
+    expect(res.body.data.events).toHaveLength(3);
+    expect(res.body.data.events.map((e: any) => e.event_type)).toEqual([
       "initialized",
       "funded",
       "approved",
@@ -209,7 +216,7 @@ describe("GET /api/jobs/:contractId/history – HTTP", () => {
   });
 
   it("respects ?page=1&limit=2 query params", async () => {
-    const cid = "CA3D5K7UXYZ123456789012345678901234567890123456789012345678903";
+    const cid = validContractId(3);
     for (let i = 1; i <= 4; i++) {
       insertEvent(cid, `event${i}`, i, i * 100, JSON.stringify({ i }));
     }
@@ -219,21 +226,21 @@ describe("GET /api/jobs/:contractId/history – HTTP", () => {
       .expect(200);
 
     expect(res.body.success).toBe(true);
-    expect(res.body.events).toHaveLength(2);
-    expect(res.body.total).toBe(4);
-    expect(res.body.page).toBe(1);
-    expect(res.body.limit).toBe(2);
+    expect(res.body.data.events).toHaveLength(2);
+    expect(res.body.data.total).toBe(4);
+    expect(res.body.data.page).toBe(1);
+    expect(res.body.data.limit).toBe(2);
   });
 
   it("each event entry has the expected shape", async () => {
-    const cid = "CA3D5K7UXYZ123456789012345678901234567890123456789012345678904";
+    const cid = validContractId(4);
     insertEvent(cid, "funded", 50, 5000, JSON.stringify({ client: "GCLIENT" }));
 
     const res = await request(app)
       .get(`/api/jobs/${cid}/history`)
       .expect(200);
 
-    const event = res.body.events[0];
+    const event = res.body.data.events[0];
     expect(event).toMatchObject({
       id: expect.any(Number),
       contract_id: expect.any(String),

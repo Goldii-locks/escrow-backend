@@ -3,7 +3,7 @@ import express from "express";
 import Database from "better-sqlite3";
 import { initSchema, setDb } from "../src/indexer/db.js";
 import { resetTimeRemainingRateLimitBuckets } from "../src/middleware/job-contract-rate-limit.js";
-import { getAllowedOrigins } from "../src/middleware/job-contract-security.js";
+
 
 const VALID_CONTRACT =
   "CDD5WKK3WT3QVKXMXTJNDIXE4T73FK6GGXDSD6UTJAH6YYZU52SQ4MUH";
@@ -12,6 +12,11 @@ let testDb: Database.Database;
 let app: express.Express;
 
 beforeAll(async () => {
+  // These tests cover validation, CORS and rate limiting, not the contract
+  // read itself. Point the RPC at a closed local port so the simulation
+  // behind each request fails at once instead of reaching testnet (#616:
+  // reads no longer stop at a getAccount lookup first).
+  process.env.SOROBAN_RPC_URL = "https://127.0.0.1:9";
   testDb = new Database(":memory:");
   setDb(testDb);
   initSchema();

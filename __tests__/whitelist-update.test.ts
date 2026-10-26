@@ -1,7 +1,8 @@
 import { jest } from "@jest/globals";
 import request from "supertest";
 import express from "express";
-import { autoAuth, TEST_API_KEY } from "./helpers/api-key-helper.js";
+import { autoAuth } from "./helpers/api-key-helper.js";
+import { testAddress, tokenVecScVal } from "./helpers/scval-fixtures.js";
 import {
   resetJobWhitelistRateLimitBuckets,
   resetWhitelistUpdateRateLimitBuckets,
@@ -50,6 +51,11 @@ function buildApp() {
   return app;
 }
 
+// The bulk form is validated, then refused: Soroban runs one host function
+// per transaction, so no single signable transaction applies a list (#613).
+const BULK_REJECTED =
+  "Bulk whitelist update is not supported: submit one { token, action, adminAddress } request per address to receive a signable transaction";
+
 describe("POST /api/jobs/:contractId/whitelist/update", () => {
   beforeEach(() => {
     mockGetAccount.mockReset();
@@ -76,27 +82,20 @@ describe("POST /api/jobs/:contractId/whitelist/update", () => {
 
     mockSimulateTransaction.mockResolvedValue({
       result: {
-        retval: {
-          forEach: (fn: (item: unknown) => void) => {
-            fn({ toString: () => "TOKEN1" });
-          },
-        },
+        retval: tokenVecScVal(testAddress(11)),
       },
     });
   });
 
-  it("Test 1 — Valid Stellar address accepted", async () => {
+  it("Test 1 — Valid Stellar address passes validation, then the bulk form is refused (#613)", async () => {
     const res = await request(buildApp())
       .post(`/api/jobs/${VALID_CONTRACT}/whitelist/update`)
       .send({
         addresses: [VALID_STELLAR_ADDRESS_1],
       });
 
-    expect(res.status).toBe(200);
-    expect(res.body.success).toBe(true);
-    expect(res.body.data.addresses).toEqual([VALID_STELLAR_ADDRESS_1]);
-    expect(res.body.data.contractId).toBe(VALID_CONTRACT);
-    expect(res.body.data.updated).toBe(true);
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ success: false, error: BULK_REJECTED });
   });
 
   it("Test 2 — Clearly invalid address returns 400 Bad Request", async () => {
@@ -145,7 +144,7 @@ describe("POST /api/jobs/:contractId/whitelist/update", () => {
     expect(res.body.details[0].message).toMatch(/Invalid Stellar address/i);
   });
 
-  it("Test 5 — Multiple valid addresses accepted", async () => {
+  it("Test 5 — Multiple valid addresses pass validation, then the bulk form is refused (#613)", async () => {
     const res = await request(buildApp())
       .post(`/api/jobs/${VALID_CONTRACT}/whitelist/update`)
       .send({
@@ -156,9 +155,8 @@ describe("POST /api/jobs/:contractId/whitelist/update", () => {
         ],
       });
 
-    expect(res.status).toBe(200);
-    expect(res.body.success).toBe(true);
-    expect(res.body.data.addresses).toHaveLength(3);
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ success: false, error: BULK_REJECTED });
   });
 
   it("Test 6 — Missing or empty address input returns 400 Bad Request", async () => {
@@ -236,9 +234,10 @@ describe("POST /api/jobs/:contractId/whitelist/update", () => {
       const res = await request(buildApp())
         .post(`/api/jobs/${VALID_CONTRACT}/whitelist/update`)
         .send({ addresses: [VALID_STELLAR_ADDRESS_1] })
-        .expect(200);
+        .expect(400);
 
-      expect(res.body.success).toBe(true);
+      // Reached the handler: no API-key rejection.
+      expect(res.body.error).toBe(BULK_REJECTED);
     });
 
     it("ignores a wrong x-api-key header instead of rejecting it", async () => {
@@ -248,9 +247,10 @@ describe("POST /api/jobs/:contractId/whitelist/update", () => {
         .post(`/api/jobs/${VALID_CONTRACT}/whitelist/update`)
         .set("x-api-key", "wrong-key")
         .send({ addresses: [VALID_STELLAR_ADDRESS_1] })
-        .expect(200);
+        .expect(400);
 
-      expect(res.body.success).toBe(true);
+      // Reached the handler: no API-key rejection.
+      expect(res.body.error).toBe(BULK_REJECTED);
     });
 
     it("accepts the request when API_KEY is not set at all", async () => {
@@ -259,9 +259,10 @@ describe("POST /api/jobs/:contractId/whitelist/update", () => {
       const res = await request(buildApp())
         .post(`/api/jobs/${VALID_CONTRACT}/whitelist/update`)
         .send({ addresses: [VALID_STELLAR_ADDRESS_1] })
-        .expect(200);
+        .expect(400);
 
-      expect(res.body.success).toBe(true);
+      // Reached the handler: no API-key rejection.
+      expect(res.body.error).toBe(BULK_REJECTED);
     });
 
     it("accepts request when valid API key is provided", async () => {
@@ -271,9 +272,10 @@ describe("POST /api/jobs/:contractId/whitelist/update", () => {
         .post(`/api/jobs/${VALID_CONTRACT}/whitelist/update`)
         .set("x-api-key", "secret-key")
         .send({ addresses: [VALID_STELLAR_ADDRESS_1] })
-        .expect(200);
+        .expect(400);
 
-      expect(res.body.success).toBe(true);
+      // Reached the handler: no API-key rejection.
+      expect(res.body.error).toBe(BULK_REJECTED);
     });
   });
 
@@ -325,7 +327,9 @@ describe("POST /api/jobs/:contractId/whitelist/update", () => {
           .post(`/api/jobs/${VALID_CONTRACT}/whitelist/update`)
           .send({ addresses: [VALID_STELLAR_ADDRESS_1] });
 
-        expect(res.status).toBe(200);
+        // Under the limit the request reaches the handler, which refuses
+        // the bulk form (#613) rather than rate limiting it.
+        expect(res.status).toBe(400);
         expect(res.headers["x-ratelimit-limit"]).toBe("3");
         expect(res.headers["x-ratelimit-remaining"]).toBe(String(2 - i));
         expect(res.headers["x-ratelimit-reset"]).toBeDefined();
@@ -336,16 +340,16 @@ describe("POST /api/jobs/:contractId/whitelist/update", () => {
       process.env.JOB_WHITELIST_UPDATE_RATE_MAX = "2";
       const app = buildApp();
 
-      // First 2 requests succeed
+      // First 2 requests are not rate limited
       await request(app)
         .post(`/api/jobs/${VALID_CONTRACT}/whitelist/update`)
         .send({ addresses: [VALID_STELLAR_ADDRESS_1] })
-        .expect(200);
+        .expect(400);
 
       await request(app)
         .post(`/api/jobs/${VALID_CONTRACT}/whitelist/update`)
         .send({ addresses: [VALID_STELLAR_ADDRESS_1] })
-        .expect(200);
+        .expect(400);
 
       // 3rd request exceeds limit
       const res = await request(app)
@@ -370,7 +374,7 @@ describe("POST /api/jobs/:contractId/whitelist/update", () => {
       await request(app)
         .post(`/api/jobs/${VALID_CONTRACT}/whitelist/update`)
         .send({ addresses: [VALID_STELLAR_ADDRESS_1] })
-        .expect(200);
+        .expect(400);
 
       // Next whitelist update request is rate limited
       await request(app)
@@ -394,16 +398,16 @@ describe("POST /api/jobs/:contractId/whitelist/update", () => {
       await request(app)
         .post(`/api/jobs/${VALID_CONTRACT}/whitelist/update`)
         .send({ addresses: [VALID_STELLAR_ADDRESS_1] })
-        .expect(200);
+        .expect(400);
 
       // Reset buckets explicitly (simulating beforeEach behavior)
       resetWhitelistUpdateRateLimitBuckets();
 
-      // Next request should succeed again because buckets were cleared
+      // Next request is not rate limited because buckets were cleared
       const res = await request(app)
         .post(`/api/jobs/${VALID_CONTRACT}/whitelist/update`)
         .send({ addresses: [VALID_STELLAR_ADDRESS_1] })
-        .expect(200);
+        .expect(400);
 
       expect(res.headers["x-ratelimit-remaining"]).toBe("0");
     });

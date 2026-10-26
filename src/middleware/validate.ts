@@ -12,16 +12,23 @@ export type ValidationErrorDetail = {
   message: string;
 };
 
+/**
+ * Called when validation fails, before the 400 is sent. Receives the Zod
+ * error so handlers can log issue paths instead of the rejected payload
+ * (see utils/log-redaction.ts, #680).
+ */
+export type OnValidationReject = (req: Request, error: ZodError) => void;
+
 export function validate(
   schema: ZodSchema,
   target: Target = "params",
-  onReject?: (req: Request) => void,
+  onReject?: OnValidationReject,
 ) {
   return (req: Request, res: Response, next: NextFunction): void => {
     const result = schema.safeParse(req[target]);
     if (!result.success) {
-      onReject?.(req);
       const zodError = result.error as ZodError;
+      onReject?.(req, zodError);
       
       // Build details array from all Zod errors
       const details: ValidationErrorDetail[] = zodError.errors.map((err) => {
@@ -58,12 +65,12 @@ export function validate(
 export function validateWithFields(
   schema: ZodSchema,
   target: Target = "params",
-  onReject?: (req: Request) => void,
+  onReject?: OnValidationReject,
 ) {
   return (req: Request, res: Response, next: NextFunction): void => {
     const result = schema.safeParse(req[target]);
     if (!result.success) {
-      onReject?.(req);
+      onReject?.(req, result.error as ZodError);
       const errors = (result.error as ZodError).errors;
 
       const fields = errors.reduce((acc, err) => {

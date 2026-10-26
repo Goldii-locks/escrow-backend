@@ -257,7 +257,7 @@ describe("GET /jobs/whitelisted-tokens alias (#696)", () => {
 
 describe("GET /jobs/:contractId/milestones/:index/auto-release alias (#696)", () => {
   it("answers exactly like time-remaining", async () => {
-    mockSimulateTransaction.mockResolvedValue({ result: { retval: 120 } });
+    mockSimulateTransaction.mockResolvedValue({ result: { retval: nativeToScVal(120n, { type: "u64" }) } });
     const app = buildApp();
     const alias = await request(app)
       .get(`/api/v1/jobs/${VALID_CONTRACT}/milestones/0/auto-release`)

@@ -40,6 +40,14 @@ import {
   isAmountWithinRange,
 } from "./digit-limit-validator.js";
 import { divRound } from "./rounding.js";
+import {
+  DEFAULT_TOKEN_DECIMALS,
+  DEFAULT_TOKEN_LABEL,
+  getTokenLabel,
+  isKnownTokenSymbol,
+  resolveTokenMetadata,
+  type TokenMetadataOptions,
+} from "./token-metadata.js";
 
 export { MAX_SAFE_DIGITS };
 
@@ -60,6 +68,7 @@ export const ERROR_CODES = {
   UNKNOWN_ERROR_DEFINITION: "UNKNOWN_ERROR_DEFINITION",
   CALCULATION_EXCEPTION: "CALCULATION_EXCEPTION",
   PARAM_STRUCTURE_MISMATCH: "PARAM_STRUCTURE_MISMATCH",
+  NEGATIVE_AMOUNT: "NEGATIVE_AMOUNT",
 } as const;
 
 export type ScraperErrorCode =
@@ -227,7 +236,7 @@ export function applyConversionRate(
   const amount = parseIntegerInput(
     notional,
     "notional",
-    ERROR_CODES.INVALID_RATE,
+    ERROR_CODES.INVALID_AMOUNT,
     ERROR_CODES.AMOUNT_OUT_OF_RANGE
   );
   if (!amount.ok) {
@@ -237,7 +246,7 @@ export function applyConversionRate(
     return {
       ok: false,
       error: "notional cannot be negative",
-      code: ERROR_CODES.NEGATIVE_RATE,
+      code: ERROR_CODES.NEGATIVE_AMOUNT,
     };
   }
 
@@ -321,14 +330,6 @@ export interface KnownAssetConfig {
   label: string;
 }
 
-const KNOWN_ASSETS: Record<string, KnownAssetConfig> = {
-  XLM:  { ticker: "XLM",  decimals: 7, label: "Stellar Lumens" },
-  USDC: { ticker: "USDC", decimals: 7, label: "USD Coin (Stellar)" },
-  USDT: { ticker: "USDT", decimals: 7, label: "Tether (Stellar)" },
-  BTC:  { ticker: "BTC",  decimals: 7, label: "Bitcoin (Stellar)" },
-  ETH:  { ticker: "ETH",  decimals: 7, label: "Ether (Stellar)" },
-};
-
 /**
  * Result of a ticker resolution. Callers must inspect `known` before relying
  * on `config` — an unknown ticker always carries the default fallback config.
@@ -338,14 +339,15 @@ export type TickerResolution =
   | { known: false; ticker: string; config: KnownAssetConfig; fallback: true };
 
 /**
- * Default fallback configuration used for any ticker not present in
- * `KNOWN_ASSETS`. Uses 7 decimal places (Stellar-native precision) so that
- * downstream formatters produce a valid DB value even for novel token types.
+ * Default fallback configuration used for any ticker that is not part of the
+ * centralized label registry. Uses 7 decimal places (Stellar-native precision)
+ * so that downstream formatters produce a valid DB value even for novel token
+ * types.
  */
 export const DEFAULT_ASSET_FALLBACK: KnownAssetConfig = {
   ticker: "UNKNOWN",
-  decimals: 7,
-  label: "Unknown Stellar Token",
+  decimals: DEFAULT_TOKEN_DECIMALS,
+  label: DEFAULT_TOKEN_LABEL,
 };
 
 /**
@@ -363,10 +365,17 @@ export const DEFAULT_ASSET_FALLBACK: KnownAssetConfig = {
  */
 export function resolveAssetTicker(rawTicker: string): TickerResolution {
   const ticker = rawTicker.trim().toUpperCase();
-  const config = KNOWN_ASSETS[ticker];
 
-  if (config !== undefined) {
-    return { known: true, ticker, config };
+  if (isKnownTokenSymbol(ticker)) {
+    return {
+      known: true,
+      ticker,
+      config: {
+        ticker,
+        decimals: DEFAULT_TOKEN_DECIMALS,
+        label: getTokenLabel(ticker),
+      },
+    };
   }
 
   return {
@@ -374,6 +383,27 @@ export function resolveAssetTicker(rawTicker: string): TickerResolution {
     ticker: rawTicker.trim(),
     config: { ...DEFAULT_ASSET_FALLBACK, ticker: rawTicker.trim() },
     fallback: true,
+  };
+}
+
+/**
+ * Resolve the asset configuration of a token contract address, reading the
+ * symbol and the precision from the contract itself (#699).
+ */
+export async function resolveAssetForToken(
+  tokenAddress: string,
+  options?: TokenMetadataOptions
+): Promise<TickerResolution> {
+  const metadata = await resolveTokenMetadata(tokenAddress, options);
+  const ticker = metadata.symbol || DEFAULT_ASSET_FALLBACK.ticker;
+  return {
+    known: true,
+    ticker,
+    config: {
+      ticker,
+      decimals: metadata.decimals,
+      label: metadata.name || getTokenLabel(ticker),
+    },
   };
 }
 
@@ -442,6 +472,19 @@ export function formatRateForDb(rate: bigint, ticker: string): string {
 }
 
 /**
+ * Format a conversion rate bigint for DB storage using the precision read
+ * from the token contract itself (#699).
+ */
+export async function formatRateForDbForToken(
+  rate: bigint,
+  tokenAddress: string,
+  options?: TokenMetadataOptions
+): Promise<string> {
+  const resolution = await resolveAssetForToken(tokenAddress, options);
+  return formatForDb(rate, resolution.config.decimals);
+}
+
+/**
  * Format a notional amount bigint for DB storage with the precision specified
  * by the asset's ticker configuration.
  *
@@ -454,6 +497,19 @@ export function formatRateForDb(rate: bigint, ticker: string): string {
  */
 export function formatNotionalForDb(notional: bigint, ticker: string): string {
   const resolution = resolveAssetTicker(ticker);
+  return formatForDb(notional, resolution.config.decimals);
+}
+
+/**
+ * Format a notional amount bigint for DB storage using the precision read
+ * from the token contract itself (#699).
+ */
+export async function formatNotionalForDbForToken(
+  notional: bigint,
+  tokenAddress: string,
+  options?: TokenMetadataOptions
+): Promise<string> {
+  const resolution = await resolveAssetForToken(tokenAddress, options);
   return formatForDb(notional, resolution.config.decimals);
 }
 

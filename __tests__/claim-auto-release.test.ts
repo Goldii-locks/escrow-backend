@@ -20,7 +20,9 @@ jest.unstable_mockModule("../src/utils/logger.js", () => ({
   default: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
 }));
 
-const { default: router, resetClaimAutoReleaseCache } = await import("../src/routes/jobs.js");
+const { default: router, resetClaimAutoReleaseCache, UNSIGNED_TX_TIMEOUT_S } = await import(
+  "../src/routes/jobs.js"
+);
 const { default: mockLogger } = await import("../src/utils/logger.js");
 const { resetClaimAutoReleaseRateLimitBuckets } = await import(
   "../src/middleware/job-contract-rate-limit.js"
@@ -737,7 +739,7 @@ describe("POST /api/jobs/:contractId/milestones/:index/claim-auto-release – tr
     expect((meta.params as Record<string, unknown>).contractId).toBe("not-a-valid-contract");
   });
 
-  it("warn validation log contains invalid body on bad sourceAddress", async () => {
+  it("warn validation log describes the invalid body without its values (#680)", async () => {
     const badBody = { sourceAddress: "bad" };
     await request(buildApp()).post(ENDPOINT).send(badBody).expect(400);
 
@@ -746,7 +748,9 @@ describe("POST /api/jobs/:contractId/milestones/:index/claim-auto-release – tr
     );
     expect(warnCalls).toHaveLength(1);
     const [, meta] = warnCalls[0] as [string, Record<string, unknown>];
-    expect(meta.body).toEqual(badBody);
+    expect(meta.body).toBeUndefined();
+    expect(meta.bodyKeys).toEqual(["sourceAddress"]);
+    expect(meta.issuePaths).toEqual(["sourceAddress"]);
   });
 
   it("trace: logs handler entered with path vars and params", async () => {
@@ -850,7 +854,8 @@ describe("POST /api/jobs/:contractId/milestones/:index/claim-auto-release – tr
     expect(buildMeta.index).toBe(0);
     expect(buildMeta.sourceAddress).toBe(VALID_ADDRESS);
     expect(buildMeta.fee).toBeDefined();
-    expect(buildMeta.timeout).toBe(30);
+    // Unsigned XDRs get a 120–300s signing window (#677).
+    expect(buildMeta.timeout).toBe(UNSIGNED_TX_TIMEOUT_S);
 
     expect(debugCallsFor("Fetching Stellar account")).toHaveLength(1);
     expect(debugCallsFor("Stellar account fetched")).toHaveLength(1);

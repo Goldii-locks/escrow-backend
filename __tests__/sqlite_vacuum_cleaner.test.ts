@@ -8,13 +8,7 @@ import {
   runVacuumCleanup,
   ERROR_CODES,
   DEFAULT_RETENTION_DAYS,
-  isVacuumRetryableError,
-  computeVacuumBackoffMs,
-  withVacuumRetrySync,
-  withVacuumRetry,
-  runVacuumWithRetry,
   runVacuumCleanupWithRetry,
-  DEFAULT_VACUUM_RETRY_CONFIG,
 } from "../src/indexer/sqlite_vacuum_cleaner.js";
 import logger from "../src/utils/logger.js";
 
@@ -425,9 +419,9 @@ describe("sqlite_vacuum_cleaner — Issue 2: Simulated RPC events write to DB sc
   ): void {
     db.prepare(
       `INSERT OR IGNORE INTO events
-         (contract_id, event_type, ledger_sequence, timestamp, data_json)
-       VALUES (?, ?, ?, ?, ?)`,
-    ).run(contractId, eventType, ledgerSequence, timestamp, dataJson);
+         (contract_id, event_type, ledger_sequence, timestamp, data_json, event_id)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run(contractId, eventType, ledgerSequence, timestamp, dataJson, `${contractId}:${ledgerSequence}:${eventType}`);
   }
 
   it("simulated ContractInitialized event is persisted correctly", () => {

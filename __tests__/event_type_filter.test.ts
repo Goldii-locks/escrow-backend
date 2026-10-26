@@ -171,8 +171,10 @@ describe("event_type_filter – Transaction Isolation", () => {
       let callCount = 0;
       const mockPrepare = jest.fn((sql: string) => {
         callCount += 1;
+        // The SELECT that reads the row back runs after the INSERT (and,
+        // since #701, after the re-enable UPDATE).
         if (
-          callCount === 2 &&
+          callCount > 1 &&
           sql.includes("SELECT * FROM webhook_subscriptions")
         ) {
           throw new Error("Simulated SELECT failure after INSERT");
@@ -396,12 +398,29 @@ describe("event_type_filter – Transaction Isolation", () => {
 
   describe("HTTP route handlers – transaction error propagation", () => {
     let app: express.Express;
+    const ADMIN_KEY = "event-type-filter-admin-key";
+    const originalAdminKey = process.env.ADMIN_API_KEY;
 
     beforeAll(async () => {
       const { default: router } = await import("../src/routes/webhooks.js");
       app = express();
       app.use(express.json());
+      // #604: mutation routes require the admin credential; this suite's
+      // subject is transaction error propagation, so attach the key here.
+      app.use((req, _res, next) => {
+        req.headers["x-api-key"] = ADMIN_KEY;
+        next();
+      });
       app.use("/api/webhooks", router);
+    });
+
+    beforeEach(() => {
+      process.env.ADMIN_API_KEY = ADMIN_KEY;
+    });
+
+    afterEach(() => {
+      if (originalAdminKey === undefined) delete process.env.ADMIN_API_KEY;
+      else process.env.ADMIN_API_KEY = originalAdminKey;
     });
 
     it("subscribe route returns 500 when addSubscription throws", async () => {

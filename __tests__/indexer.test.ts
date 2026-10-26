@@ -1,7 +1,6 @@
 import Database from "better-sqlite3";
 import {
   runMigrations,
-  initSchema,
   getLastIndexedLedger,
   setLastIndexedLedger,
   insertEvent,
@@ -11,7 +10,6 @@ import {
   deregisterContract,
   getActiveContractIds,
   setDb,
-  getDb,
   type EventRow,
 } from "../src/indexer/db.js";
 

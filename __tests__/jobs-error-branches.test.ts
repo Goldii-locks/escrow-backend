@@ -2,8 +2,9 @@ import { jest } from "@jest/globals";
 import request from "supertest";
 import express from "express";
 import Database from "better-sqlite3";
-import { Keypair, StrKey } from "@stellar/stellar-sdk";
+import { Keypair, StrKey, nativeToScVal, xdr } from "@stellar/stellar-sdk";
 import { autoAuth } from "./helpers/api-key-helper.js";
+import { tokenVecScVal } from "./helpers/scval-fixtures.js";
 
 /**
  * Error and cache branches of the whitelist, partial-release, time-remaining
@@ -94,7 +95,7 @@ describe("GET /:contractId/whitelist", () => {
     const second = request(app).get(`/api/jobs/${VALID_CONTRACT}/whitelist`).then((r) => r);
     // Let both requests reach the handler before the simulation settles.
     await new Promise((r) => setTimeout(r, 50));
-    release({ result: { retval: [TOKEN_CONTRACT] } });
+    release({ result: { retval: tokenVecScVal(TOKEN_CONTRACT) } });
 
     const [r1, r2] = await Promise.all([first, second]);
     expect(r1.body).toEqual({ success: true, data: { tokens: [TOKEN_CONTRACT] } });
@@ -102,12 +103,22 @@ describe("GET /:contractId/whitelist", () => {
     expect(mockSimulateTransaction).toHaveBeenCalledTimes(1);
   });
 
-  it("returns an empty list when the retval is not iterable", async () => {
-    mockSimulateTransaction.mockResolvedValue({ result: { retval: 5 } });
+  it("returns 500 for a malformed retval and does not cache it", async () => {
+    mockSimulateTransaction.mockResolvedValue({ result: { retval: xdr.ScVal.scvU32(5) } });
+    const res = await request(buildApp())
+      .get(`/api/jobs/${VALID_CONTRACT}/whitelist`)
+      .expect(500);
+    expect(res.body).toEqual({ success: false, error: "Internal server error" });
+    expect(whitelistCache.get(VALID_CONTRACT)).toBeUndefined();
+  });
+
+  it("still returns and caches [] for an uninitialized contract (contract error #2)", async () => {
+    mockSimulateTransaction.mockResolvedValue({ error: "HostError: contract error #2" });
     const res = await request(buildApp())
       .get(`/api/jobs/${VALID_CONTRACT}/whitelist`)
       .expect(200);
     expect(res.body).toEqual({ success: true, data: { tokens: [] } });
+    expect(whitelistCache.get(VALID_CONTRACT)).toEqual([]);
   });
 
   it("returns a clean 500 for a non-Error rejection and caches nothing", async () => {
@@ -200,7 +211,7 @@ describe("POST /:contractId/whitelist/update (bulk)", () => {
     [RAW_ERROR, 500, "Internal server error"],
   ])("maps a thrown error %j to %i without caching", async (raw, status, error) => {
     whitelistCache.set(VALID_CONTRACT, ["CACHED"]);
-    mockGetAccount.mockRejectedValue(new Error(raw));
+    mockSimulateTransaction.mockRejectedValue(new Error(raw));
 
     const res = await request(buildApp())
       .post(`/api/jobs/${VALID_CONTRACT}/whitelist/update`)
@@ -220,18 +231,20 @@ describe("POST /:contractId/whitelist/update (bulk extras)", () => {
     const res = await request(buildApp())
       .post(`/api/jobs/${VALID_CONTRACT}/whitelist/update`)
       .send({ tokens: [TOKEN_CONTRACT] })
-      .expect(200);
+      .expect(400);
+    // The alias validates and the uninitialized contract is no error; the
+    // bulk form itself is then refused, since it is never executed on-chain
+    // (#613).
     expect(res.body).toEqual({
-      success: true,
-      data: { contractId: VALID_CONTRACT, addresses: [TOKEN_CONTRACT], updated: true },
+      success: false,
+      error:
+        "Bulk whitelist update is not supported: submit one { token, action, adminAddress } request per address to receive a signable transaction",
     });
-    // A successful update invalidates the cached list.
-    expect(whitelistCache.get(VALID_CONTRACT)).toBeUndefined();
   });
 
   it("returns a clean 500 for a non-Error rejection without caching", async () => {
     whitelistCache.set(VALID_CONTRACT, ["CACHED"]);
-    mockGetAccount.mockRejectedValue(RAW_ERROR);
+    mockSimulateTransaction.mockRejectedValue(RAW_ERROR);
     const res = await request(buildApp())
       .post(`/api/jobs/${VALID_CONTRACT}/whitelist/update`)
       .send({ addresses: [TOKEN_CONTRACT] })
@@ -343,7 +356,7 @@ describe("GET /:contractId/milestones/:index/time-remaining", () => {
     const first = request(app).get(url).then((r) => r);
     const second = request(app).get(url).then((r) => r);
     await new Promise((r) => setTimeout(r, 50));
-    release({ result: { retval: 99 } });
+    release({ result: { retval: nativeToScVal(99n, { type: "u64" }) } });
 
     const [r1, r2] = await Promise.all([first, second]);
     expect(r1.body).toEqual({ success: true, data: { secondsRemaining: 99 } });
@@ -366,6 +379,22 @@ describe("GET /:contractId/milestones/:index/time-remaining", () => {
 
     await request(app).get(url).expect(status);
     expect(mockSimulateTransaction).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([3600n, 0n])("decodes a u64 retval of %s seconds (#599)", async (secs) => {
+    mockSimulateTransaction.mockResolvedValue({
+      result: { retval: nativeToScVal(secs, { type: "u64" }) },
+    });
+    const res = await request(buildApp()).get(url).expect(200);
+    expect(res.body).toEqual({ success: true, data: { secondsRemaining: Number(secs) } });
+    expect(timeRemainingCache.get(`${VALID_CONTRACT}:0`)).toBe(Number(secs));
+  });
+
+  it("returns 500 for a non-numeric retval and does not cache it", async () => {
+    mockSimulateTransaction.mockResolvedValue({ result: { retval: xdr.ScVal.scvSymbol("x") } });
+    const res = await request(buildApp()).get(url).expect(500);
+    expect(res.body).toEqual({ success: false, error: "Internal server error" });
+    expect(timeRemainingCache.keys()).toHaveLength(0);
   });
 
   it("returns 500 for an empty retval and does not cache it", async () => {
@@ -401,16 +430,22 @@ describe("GET /:contractId/history", () => {
     db.close();
   });
 
+  // Paging is validated by the shared history query schema (#612), which
+  // reports the offending field in the standard ValidationError shape.
   it.each([
-    ["page=0", "page must be a positive integer"],
-    ["page=abc", "page must be a positive integer"],
-    ["limit=0", "limit must be between 1 and 100"],
-    ["limit=101", "limit must be between 1 and 100"],
-  ])("rejects %s with 400", async (query, error) => {
+    ["page=0", "page"],
+    ["page=abc", "page"],
+    ["limit=0", "limit"],
+    ["limit=101", "limit"],
+  ])("rejects %s with 400", async (query, field) => {
     const res = await request(buildApp())
       .get(`/api/jobs/${VALID_CONTRACT}/history?${query}`)
       .expect(400);
-    expect(res.body).toEqual({ success: false, error });
+    expect(res.body).toMatchObject({
+      success: false,
+      error: "ValidationError",
+      details: expect.arrayContaining([expect.objectContaining({ field })]),
+    });
   });
 
   it("returns a clean 500 when the database query fails", async () => {

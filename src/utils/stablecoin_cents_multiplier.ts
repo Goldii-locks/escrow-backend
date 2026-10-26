@@ -9,6 +9,11 @@
 
 import { divRound } from "./rounding.js";
 import { isAmountWithinRange } from "./digit-limit-validator.js";
+import {
+  DEFAULT_TOKEN_DECIMALS,
+  resolveTokenMetadata,
+  type TokenMetadataOptions,
+} from "./token-metadata.js";
 
 /** Max decimal digits allowed for a single cents amount (below Number.MAX_SAFE_INTEGER). */
 export const MAX_SAFE_DIGITS = 15;
@@ -444,73 +449,66 @@ export const applyCentsMultiplier = applyStablecoinCentsMultiplier;
 export const multiplyStablecoinCents = applyStablecoinCentsMultiplier;
 
 // ---------------------------------------------------------------------------
-// Per-ticker precision configuration (#479)
+// Token precision configuration (#699)
 // ---------------------------------------------------------------------------
+// The precision of an asset is no longer hard-coded per ticker. It is read
+// from the token contract itself (SEP-41 `decimals()`) through the
+// centralized `token-metadata.ts` registry, so a whitelisted token with a
+// non-standard precision is formatted correctly.
 
 export interface StablecoinConfig {
-  /** Number of decimal places used by the asset. */
+  /** Number of decimal places used by the asset (from the token contract). */
   decimals: number;
-  /** Multiplier applied to convert whole units into integer cents. */
+  /** Multiplier applied to convert whole units into integer base units. */
   centsMultiplier: number;
 }
 
 /**
- * Default configuration applied when a ticker key is missing or unknown.
- * Mirrors the most common stablecoin layout (2 decimals / 100 cents).
+ * Default configuration applied when a token's precision cannot be resolved.
+ * Mirrors the Stellar-native precision (7 decimals).
  */
 export const DEFAULT_STABLECOIN_CONFIG: StablecoinConfig = {
-  decimals: CENTS_DECIMALS,
-  centsMultiplier: CENTS_PER_UNIT,
+  decimals: DEFAULT_TOKEN_DECIMALS,
+  centsMultiplier: 10 ** DEFAULT_TOKEN_DECIMALS,
 };
 
 /**
- * Known Stellar stablecoin ticker keys mapped to their precision config.
- * Keys are upper-case; lookups are case-insensitive.
+ * Resolve the precision configuration for a token contract address from the
+ * token's own `decimals()` value.
  */
-export const STABLECOIN_CONFIGS: Record<string, StablecoinConfig> = {
-  USDC: { decimals: 2, centsMultiplier: 100 },
-  USDT: { decimals: 2, centsMultiplier: 100 },
-  USD: { decimals: 2, centsMultiplier: 100 },
-  DAI: { decimals: 2, centsMultiplier: 100 },
-  EURC: { decimals: 2, centsMultiplier: 100 },
-};
-
-function normalizeTicker(ticker?: string | null): string {
-  return typeof ticker === "string" ? ticker.trim().toUpperCase() : "";
-}
-
-/**
- * Resolve the precision configuration for a ticker key. Unknown, empty or
- * missing tickers return DEFAULT_STABLECOIN_CONFIG instead of failing.
- */
-export function getStablecoinConfig(ticker?: string | null): StablecoinConfig {
-  const key = normalizeTicker(ticker);
-  if (!key || !Object.prototype.hasOwnProperty.call(STABLECOIN_CONFIGS, key)) {
-    return DEFAULT_STABLECOIN_CONFIG;
-  }
-  return STABLECOIN_CONFIGS[key];
-}
-
-/**
- * Cents multiplier for a ticker key, falling back to the default
- * configuration when the ticker is missing or unknown.
- */
-export function stablecoin_cents_multiplier(ticker?: string | null): number {
-  return getStablecoinConfig(ticker).centsMultiplier;
+export async function getStablecoinConfig(
+  tokenAddress: string,
+  options?: TokenMetadataOptions
+): Promise<StablecoinConfig> {
+  const metadata = await resolveTokenMetadata(tokenAddress, options);
+  return {
+    decimals: metadata.decimals,
+    centsMultiplier: 10 ** metadata.decimals,
+  };
 }
 
 /**
  * Convert a human-readable amount into integer base units using the precision
- * resolved for `ticker`. Uses exact decimal-string arithmetic and applies the
- * same rules as `dollarsToCents`: negative amounts, non-numeric input,
- * sub-unit precision beyond the asset's decimals and digit overflow are
+ * resolved from the token contract. Uses exact decimal-string arithmetic and
+ * applies the same rules as `dollarsToCents`: negative amounts, non-numeric
+ * input, sub-unit precision beyond the asset's decimals and digit overflow are
  * rejected with typed errors.
  */
-export function toCents(
+export async function toCents(
   amount: string | number,
-  ticker?: string | null
-): ConversionResult {
-  const { decimals } = getStablecoinConfig(ticker);
+  tokenAddress: string,
+  options?: TokenMetadataOptions
+): Promise<ConversionResult> {
+  let decimals: number;
+  try {
+    decimals = (await resolveTokenMetadata(tokenAddress, options)).decimals;
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+      code: ERROR_CODES.INVALID_AMOUNT,
+    };
+  }
 
   if (typeof amount === "number" && !Number.isFinite(amount)) {
     return {
@@ -558,4 +556,177 @@ export function toCents(
   }
 
   return { ok: true, value: BigInt(combined) };
+}
+
+// ---------------------------------------------------------------------------
+// Exact configurable-precision conversion (#627, #628)
+// ---------------------------------------------------------------------------
+
+/**
+ * Options for exact decimal-to-cents conversion. Ported from the deleted root
+ * `src/stablecoin_cents_multiplier.ts`, reimplemented on bigint arithmetic:
+ * `decimals` sets the asset precision and `rounding` is applied to the
+ * discarded digits (`round` is half-up, matching the old documented default).
+ */
+export interface CentsConvertOptions {
+  decimals?: number;
+  rounding?: "floor" | "ceil" | "round";
+}
+
+function parseDecimalDigits(
+  input: string | number,
+  label: string,
+):
+  | { ok: true; sign: 1; int: string; frac: string }
+  | { ok: false; error: string; code: CentsErrorCode } {
+  if (typeof input === "number" && !Number.isFinite(input)) {
+    return {
+      ok: false,
+      error: `${label} must be a finite number`,
+      code: ERROR_CODES.INVALID_AMOUNT,
+    };
+  }
+  const text = String(input).trim();
+  const expanded = /[eE]/.test(text) ? expandExponent(text) : text;
+  const match = /^([+-]?)(\d*)(?:\.(\d*))?$/.exec(expanded);
+  if (!match || (match[2] === "" && (match[3] ?? "") === "")) {
+    return {
+      ok: false,
+      error: `${label} must be a numeric decimal value`,
+      code: ERROR_CODES.INVALID_AMOUNT,
+    };
+  }
+  if (match[1] === "-") {
+    return {
+      ok: false,
+      error: `${label} cannot be negative`,
+      code: ERROR_CODES.INVALID_AMOUNT,
+    };
+  }
+  return {
+    ok: true,
+    sign: 1,
+    int: match[2] === "" ? "0" : match[2].replace(/^0+(?=\d)/, ""),
+    frac: match[3] ?? "",
+  };
+}
+
+/** Expand exponent notation (e.g. `1e-7`) into plain decimal notation. */
+function expandExponent(text: string): string {
+  const negative = text.startsWith("-");
+  const unsigned = negative ? text.slice(1) : text;
+  const [mantissa, expPart] = unsigned.split(/[eE]/);
+  const exponent = parseInt(expPart, 10);
+  if (!Number.isFinite(exponent)) {
+    return text;
+  }
+  const dotIndex = mantissa.indexOf(".");
+  const digits = mantissa.replace(".", "");
+  const pointIndex = (dotIndex === -1 ? mantissa.length : dotIndex) + exponent;
+  let expanded: string;
+  if (pointIndex <= 0) {
+    expanded = `0.${"0".repeat(-pointIndex)}${digits}`;
+  } else if (pointIndex >= digits.length) {
+    expanded = `${digits}${"0".repeat(pointIndex - digits.length)}`;
+  } else {
+    expanded = `${digits.slice(0, pointIndex)}.${digits.slice(pointIndex)}`;
+  }
+  return `${negative ? "-" : ""}${expanded}`;
+}
+
+function validateConvertDecimals(
+  decimals: number,
+): Extract<ConversionResult, { ok: false }> | null {
+  if (!Number.isInteger(decimals) || decimals < 0) {
+    return {
+      ok: false,
+      error: `decimals must be a non-negative integer, received ${decimals}`,
+      code: ERROR_CODES.INVALID_AMOUNT,
+    };
+  }
+  return null;
+}
+
+/**
+ * Convert a human-readable amount into integer base units with configurable
+ * precision. All scaling uses bigint digit arithmetic (never float
+ * multiplication), so `toCentsExact("0.29", { rounding: "floor" })` is exactly
+ * `29n`. Rejects results outside the i128 amount range.
+ */
+export function toCentsExact(
+  amount: string | number,
+  options: CentsConvertOptions = {},
+): ConversionResult {
+  const decimals = options.decimals ?? CENTS_DECIMALS;
+  const rounding = options.rounding ?? "round";
+  const badDecimals = validateConvertDecimals(decimals);
+  if (badDecimals) {
+    return badDecimals;
+  }
+
+  const parsed = parseDecimalDigits(amount, "amount");
+  if (!parsed.ok) {
+    return parsed;
+  }
+
+  const kept = (parsed.frac + "0".repeat(decimals)).slice(0, decimals);
+  const discarded = parsed.frac.slice(decimals);
+  let magnitude = BigInt(`${parsed.int}${kept}`);
+  if (/[1-9]/.test(discarded)) {
+    const first = discarded[0];
+    const rest = discarded.slice(1);
+    const aboveHalf = first > "5" || (first === "5" && /[1-9]/.test(rest));
+    const isHalf = first === "5" && !/[1-9]/.test(rest);
+    let roundUp = false;
+    if (rounding === "ceil") {
+      roundUp = true;
+    } else if (rounding === "round") {
+      roundUp = aboveHalf || isHalf;
+    }
+    // "floor" on a non-negative amount truncates: roundUp stays false.
+    if (roundUp) {
+      magnitude += 1n;
+    }
+  }
+
+  if (!isAmountWithinRange(magnitude)) {
+    return {
+      ok: false,
+      error: "converted amount exceeds the i128 amount range",
+      code: ERROR_CODES.CONVERSION_OVERFLOW,
+    };
+  }
+  return { ok: true, value: magnitude };
+}
+
+/**
+ * Convert integer base units back into a human-readable decimal string with
+ * configurable precision. Exact decimal arithmetic: no float division, so
+ * `fromCentsExact(7)` is exactly `"0.07"`.
+ */
+export function fromCentsExact(
+  cents: string | number | bigint,
+  options: CentsConvertOptions = {},
+): DollarsResult {
+  const decimals = options.decimals ?? CENTS_DECIMALS;
+  const badDecimals = validateConvertDecimals(decimals);
+  if (badDecimals) {
+    return badDecimals;
+  }
+
+  const checked = validateCentsAmount(cents, "cents");
+  if (!checked.ok) {
+    return { ok: false, error: checked.error, code: checked.code };
+  }
+  const digits = checked.value.toString();
+  let decimal: string;
+  if (digits.length > decimals) {
+    const whole = digits.slice(0, digits.length - decimals);
+    const frac = digits.slice(digits.length - decimals);
+    decimal = decimals === 0 ? whole : `${whole}.${frac}`;
+  } else {
+    decimal = decimals === 0 ? digits : `0.${"0".repeat(decimals - digits.length)}${digits}`;
+  }
+  decimal = decimal.replace(/(\.\d*?)0+$/, "$1").replace(/\.$/, "");
+  return { ok: true, value: decimal };
 }

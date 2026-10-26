@@ -11,6 +11,14 @@ import {
   MAX_SAFE_DIGITS,
   isAmountWithinRange,
 } from "./digit-limit-validator.js";
+import {
+  DEFAULT_TOKEN_DECIMALS,
+  DEFAULT_TOKEN_LABEL,
+  getTokenLabel,
+  isKnownTokenSymbol,
+  resolveTokenMetadata,
+  type TokenMetadataOptions,
+} from "./token-metadata.js";
 
 export { MAX_SAFE_DIGITS };
 
@@ -171,11 +179,13 @@ export function checkAuditLedgerRateLimit(
 }
 
 // ---------------------------------------------------------------------------
-// Unknown Asset Ticker Fallbacks (#497)
+// Asset metadata resolution (#699)
 // ---------------------------------------------------------------------------
 
 /**
- * Well-known Stellar asset tickers with their decimal precision and metadata.
+ * Asset metadata for a Stellar token. The precision is read from the token
+ * contract itself (see `token-metadata.ts`); only the display label is kept
+ * in a static table.
  */
 export interface KnownAssetConfig {
   /** Ticker symbol (e.g. "XLM", "USDC") */
@@ -186,14 +196,6 @@ export interface KnownAssetConfig {
   label: string;
 }
 
-export const KNOWN_ASSETS: Record<string, KnownAssetConfig> = {
-  XLM: { ticker: "XLM", decimals: 7, label: "Stellar Lumens" },
-  USDC: { ticker: "USDC", decimals: 7, label: "USD Coin (Stellar)" },
-  USDT: { ticker: "USDT", decimals: 7, label: "Tether (Stellar)" },
-  BTC: { ticker: "BTC", decimals: 7, label: "Bitcoin (Stellar)" },
-  ETH: { ticker: "ETH", decimals: 7, label: "Ether (Stellar)" },
-};
-
 export type TickerResolution =
   | { known: true; ticker: string; config: KnownAssetConfig }
   | { known: false; ticker: string; config: KnownAssetConfig; fallback: true };
@@ -201,8 +203,8 @@ export type TickerResolution =
 /** Default fallback configuration used for unknown Stellar asset tickers. */
 export const DEFAULT_ASSET_FALLBACK: KnownAssetConfig = {
   ticker: "UNKNOWN",
-  decimals: 7,
-  label: "Unknown Stellar Token",
+  decimals: DEFAULT_TOKEN_DECIMALS,
+  label: DEFAULT_TOKEN_LABEL,
 };
 
 export interface AssetFormatConfig {
@@ -212,12 +214,15 @@ export interface AssetFormatConfig {
 
 export const DEFAULT_ASSET_FORMAT_CONFIG: AssetFormatConfig = {
   ticker: "UNKNOWN",
-  decimals: 7,
+  decimals: DEFAULT_TOKEN_DECIMALS,
 };
 
 /**
  * Resolve an asset ticker string to its configuration, returning a typed
  * fallback for any ticker not found in the registry.
+ *
+ * @deprecated Prefer `resolveAssetForToken`, which reads the symbol and the
+ * precision from the token contract itself (#699).
  */
 export function resolveAssetTicker(rawTicker?: string | null): TickerResolution {
   if (!rawTicker || typeof rawTicker !== "string") {
@@ -230,10 +235,16 @@ export function resolveAssetTicker(rawTicker?: string | null): TickerResolution 
   }
 
   const ticker = rawTicker.trim().toUpperCase();
-  const config = KNOWN_ASSETS[ticker];
-
-  if (config !== undefined) {
-    return { known: true, ticker, config };
+  if (isKnownTokenSymbol(ticker)) {
+    return {
+      known: true,
+      ticker,
+      config: {
+        ticker,
+        decimals: DEFAULT_TOKEN_DECIMALS,
+        label: getTokenLabel(ticker),
+      },
+    };
   }
 
   const rawTrimmed = rawTicker.trim();
@@ -246,13 +257,51 @@ export function resolveAssetTicker(rawTicker?: string | null): TickerResolution 
 }
 
 /**
+ * Resolve the asset configuration of a token contract address, reading the
+ * symbol and the precision from the contract itself (#699).
+ */
+export async function resolveAssetForToken(
+  tokenAddress: string,
+  options?: TokenMetadataOptions
+): Promise<TickerResolution> {
+  const metadata = await resolveTokenMetadata(tokenAddress, options);
+  const ticker = metadata.symbol || DEFAULT_ASSET_FALLBACK.ticker;
+  return {
+    known: true,
+    ticker,
+    config: {
+      ticker,
+      decimals: metadata.decimals,
+      label: metadata.name || getTokenLabel(ticker),
+    },
+  };
+}
+
+/**
  * Resolve the format configuration for a Stellar asset ticker, applying default
  * fallback configuration when the ticker is missing or unknown.
+ *
+ * @deprecated Prefer `getAssetFormatConfigForToken`.
  */
 export function getAssetFormatConfig(
   ticker?: string | null
 ): AssetFormatConfig {
   const resolution = resolveAssetTicker(ticker);
+  return {
+    ticker: resolution.config.ticker,
+    decimals: resolution.config.decimals,
+  };
+}
+
+/**
+ * Resolve the format configuration of a token contract address, using the
+ * precision read from the contract itself (#699).
+ */
+export async function getAssetFormatConfigForToken(
+  tokenAddress: string,
+  options?: TokenMetadataOptions
+): Promise<AssetFormatConfig> {
+  const resolution = await resolveAssetForToken(tokenAddress, options);
   return {
     ticker: resolution.config.ticker,
     decimals: resolution.config.decimals,

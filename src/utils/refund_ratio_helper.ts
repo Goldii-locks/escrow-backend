@@ -13,6 +13,14 @@ import {
   MAX_SAFE_DIGITS,
   isAmountWithinRange,
 } from "./digit-limit-validator.js";
+import {
+  DEFAULT_TOKEN_DECIMALS,
+  DEFAULT_TOKEN_LABEL,
+  getTokenLabel,
+  isKnownTokenSymbol,
+  resolveTokenMetadata,
+  type TokenMetadataOptions,
+} from "./token-metadata.js";
 
 export { MAX_SAFE_DIGITS };
 
@@ -172,8 +180,11 @@ export function applyRefundRatio(
 }
 
 // ---------------------------------------------------------------------------
-// Unknown asset ticker fallbacks (#469)
+// Token asset resolution (#699)
 // ---------------------------------------------------------------------------
+// Asset precision is no longer hard-coded per ticker: the symbol and the
+// number of decimals are read from the token contract itself through the
+// centralized `token-metadata.ts` registry.
 
 export interface RefundAssetConfig {
   /** Asset code as stored alongside refund rows (e.g. "XLM", "USDC"). */
@@ -184,20 +195,16 @@ export interface RefundAssetConfig {
   label: string;
 }
 
-export const KNOWN_REFUND_ASSETS: Readonly<Record<string, RefundAssetConfig>> =
-  Object.freeze({
-    XLM: { ticker: "XLM", decimals: 7, label: "Stellar Lumens" },
-    USDC: { ticker: "USDC", decimals: 7, label: "USD Coin (Stellar)" },
-    EURC: { ticker: "EURC", decimals: 7, label: "Euro Coin (Stellar)" },
-    USDT: { ticker: "USDT", decimals: 7, label: "Tether (Stellar)" },
-  });
-
-/** Default format configuration applied to missing or unfamiliar tickers. */
+/**
+ * Default format configuration applied to missing or unfamiliar tokens.
+ * The precision is the Stellar-native default; a token's real precision is
+ * always read from its contract.
+ */
 export const DEFAULT_REFUND_ASSET_CONFIG: Readonly<RefundAssetConfig> =
   Object.freeze({
     ticker: "UNKNOWN",
-    decimals: 7,
-    label: "Unknown Stellar Token",
+    decimals: DEFAULT_TOKEN_DECIMALS,
+    label: DEFAULT_TOKEN_LABEL,
   });
 
 /** Stellar asset codes are 1-12 alphanumeric characters. */
@@ -208,9 +215,48 @@ export type RefundTickerResolution =
   | { known: false; fallback: true; ticker: string; config: RefundAssetConfig };
 
 /**
+ * Resolve the asset configuration of a token contract address. The symbol and
+ * the precision come from the contract itself (SEP-41 `symbol()` /
+ * `decimals()`), so refund rows are always rendered at the token's real
+ * precision.
+ */
+export async function resolveRefundAssetForToken(
+  tokenAddress: string,
+  options?: TokenMetadataOptions
+): Promise<RefundTickerResolution> {
+  const metadata = await resolveTokenMetadata(tokenAddress, options);
+  const ticker = metadata.symbol || DEFAULT_REFUND_ASSET_CONFIG.ticker;
+  return {
+    known: true,
+    fallback: false,
+    ticker,
+    config: {
+      ticker,
+      decimals: metadata.decimals,
+      label: metadata.name || getTokenLabel(ticker),
+    },
+  };
+}
+
+/**
+ * Format configuration of a token contract address (ticker + on-chain
+ * precision).
+ */
+export async function getRefundAssetFormatConfigForToken(
+  tokenAddress: string,
+  options?: TokenMetadataOptions
+): Promise<{ ticker: string; decimals: number }> {
+  const { config } = await resolveRefundAssetForToken(tokenAddress, options);
+  return { ticker: config.ticker, decimals: config.decimals };
+}
+
+/**
  * Resolve a ticker key to its asset configuration. Missing, malformed, or
  * unregistered tickers fall back to DEFAULT_REFUND_ASSET_CONFIG; a well-formed
  * unknown code keeps its own (upper-cased) name so rows stay attributable.
+ *
+ * @deprecated Prefer `resolveRefundAssetForToken`, which reads the precision
+ * from the token contract instead of assuming it.
  */
 export function resolveRefundAssetTicker(
   rawTicker?: unknown
@@ -226,11 +272,17 @@ export function resolveRefundAssetTicker(
   }
 
   const ticker = trimmed.toUpperCase();
-  const config = Object.prototype.hasOwnProperty.call(KNOWN_REFUND_ASSETS, ticker)
-    ? KNOWN_REFUND_ASSETS[ticker]
-    : undefined;
-  if (config) {
-    return { known: true, fallback: false, ticker, config: { ...config } };
+  if (isKnownTokenSymbol(ticker)) {
+    return {
+      known: true,
+      fallback: false,
+      ticker,
+      config: {
+        ticker,
+        decimals: DEFAULT_TOKEN_DECIMALS,
+        label: getTokenLabel(ticker),
+      },
+    };
   }
 
   return {
@@ -241,7 +293,11 @@ export function resolveRefundAssetTicker(
   };
 }
 
-/** Format configuration for a ticker, with defaults applied to unknown keys. */
+/**
+ * Format configuration for a ticker, with defaults applied to unknown keys.
+ *
+ * @deprecated Prefer `getRefundAssetFormatConfigForToken`.
+ */
 export function getRefundAssetFormatConfig(
   ticker?: unknown
 ): { ticker: string; decimals: number } {
@@ -346,26 +402,72 @@ export function parseRefundDbValue(formatted: string, decimals: number): bigint 
  * Compute a refund split and format every column for DB storage. Each
  * formatted amount is parsed back and compared with its raw value, so a row
  * is only returned when all attributes preserve full precision.
+ *
+ * @deprecated Prefer `formatRefundRowForDbForToken`, which reads the asset
+ * precision from the token contract instead of assuming it.
  */
 export function formatRefundRowForDb(input: {
   amount: unknown;
   ratio: unknown;
   ticker?: unknown;
 }): RefundRowResult {
-  const principal = validateRefundAmount(input.amount);
+  const { ticker, decimals } = getRefundAssetFormatConfig(input.ticker);
+  return buildRefundRow(input.amount, input.ratio, ticker, decimals);
+}
+
+/**
+ * Compute a refund split for a token contract and format every column for DB
+ * storage using the precision read from the token contract (#699).
+ */
+export async function formatRefundRowForDbForToken(
+  input: {
+    amount: unknown;
+    ratio: unknown;
+    tokenAddress: string;
+  },
+  options?: TokenMetadataOptions
+): Promise<RefundRowResult> {
+  let asset: RefundAssetConfig;
+  try {
+    const resolution = await resolveRefundAssetForToken(
+      input.tokenAddress,
+      options
+    );
+    asset = resolution.config;
+  } catch (err) {
+    return failure(
+      err instanceof Error ? err.message : String(err),
+      ERROR_CODES.CALCULATION_EXCEPTION,
+      "tokenAddress"
+    );
+  }
+
+  return buildRefundRow(input.amount, input.ratio, asset.ticker, asset.decimals);
+}
+
+/**
+ * Shared refund row builder: validates the inputs, applies the ratio and
+ * renders every amount with the given precision.
+ */
+function buildRefundRow(
+  amount: unknown,
+  ratio: unknown,
+  ticker: string,
+  decimals: number
+): RefundRowResult {
+  const principal = validateRefundAmount(amount);
   if (!principal.ok) {
     return principal;
   }
-  const ratio = validateRefundRatio(input.ratio);
-  if (!ratio.ok) {
-    return ratio;
+  const ratioResult = validateRefundRatio(ratio);
+  if (!ratioResult.ok) {
+    return ratioResult;
   }
-  const refund = applyRefundRatio(principal.value, ratio.value);
+  const refund = applyRefundRatio(principal.value, ratioResult.value);
   if (!refund.ok) {
     return refund;
   }
 
-  const { ticker, decimals } = getRefundAssetFormatConfig(input.ticker);
   const remaining = principal.value - refund.value;
 
   try {
@@ -392,7 +494,7 @@ export function formatRefundRowForDb(input: {
       row: {
         asset_ticker: ticker,
         decimals,
-        ratio_bps: Number(ratio.value),
+        ratio_bps: Number(ratioResult.value),
         ...formatted,
         amount_raw: principal.value.toString(),
         refund_raw: refund.value.toString(),
@@ -401,7 +503,7 @@ export function formatRefundRowForDb(input: {
       },
     };
   } catch (error) {
-    return calculationFailure("formatRefundRowForDb", input, error);
+    return calculationFailure("formatRefundRowForDb", { amount, ratio }, error);
   }
 }
 

@@ -229,9 +229,9 @@ describe("LedgerRangeTracker — RPC mock integration tests (#302)", () => {
       // Seed an existing event for ledger 400
       testDb
         .prepare(
-          "INSERT INTO events (contract_id, event_type, ledger_sequence, timestamp, data_json) VALUES (?,?,?,?,?)"
+          "INSERT INTO events (contract_id, event_type, ledger_sequence, timestamp, data_json, event_id) VALUES (?,?,?,?,?,?)"
         )
-        .run("CONTRACT-ALPHA", "initialized", 400, 1234567890, '{"existing":true}');
+        .run("CONTRACT-ALPHA", "initialized", 400, 1234567890, '{"existing":true}', "CONTRACT-ALPHA:400:initialized");
 
       // Poll returns the same event again
       mockGetLatestLedger.mockResolvedValue({ sequence: 400 });

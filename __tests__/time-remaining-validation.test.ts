@@ -1,7 +1,8 @@
 import { jest } from "@jest/globals";
 import request from "supertest";
 import express from "express";
-import { autoAuth, TEST_API_KEY } from "./helpers/api-key-helper.js";
+import { autoAuth } from "./helpers/api-key-helper.js";
+import { nativeToScVal } from "@stellar/stellar-sdk";
 
 const VALID_CONTRACT = "CDD5WKK3WT3QVKXMXTJNDIXE4T73FK6GGXDSD6UTJAH6YYZU52SQ4MUH";
 
@@ -45,7 +46,7 @@ describe("GET /api/jobs/:contractId/milestones/:index/time-remaining", () => {
   it("returns 200 with secondsRemaining on valid input", async () => {
     mockSimulateTransaction.mockResolvedValue({
       result: {
-        retval: 120, // returns 120 seconds remaining
+        retval: nativeToScVal(120n, { type: "u64" }), // 120 seconds remaining
       },
     });
 
@@ -54,7 +55,8 @@ describe("GET /api/jobs/:contractId/milestones/:index/time-remaining", () => {
       .expect(200);
 
     expect(res.body).toEqual({ success: true, data: { secondsRemaining: 120 } });
-    expect(mockGetAccount).toHaveBeenCalled();
+    // Read-only simulation uses a local account: no getAccount RPC (#616).
+    expect(mockGetAccount).not.toHaveBeenCalled();
     expect(mockSimulateTransaction).toHaveBeenCalled();
   });
 
@@ -63,7 +65,7 @@ describe("GET /api/jobs/:contractId/milestones/:index/time-remaining", () => {
   it("returns 200 without an API key when API_KEY is not set", async () => {
     resetTimeRemainingCache();
     delete process.env.API_KEY;
-    mockSimulateTransaction.mockResolvedValue({ result: { retval: 120 } });
+    mockSimulateTransaction.mockResolvedValue({ result: { retval: nativeToScVal(120n, { type: "u64" }) } });
 
     const res = await request(buildApp())
       .get(`/api/jobs/${VALID_CONTRACT}/milestones/0/time-remaining`)

@@ -1,7 +1,7 @@
 import { jest } from "@jest/globals";
 import request from "supertest";
 import express from "express";
-import { autoAuth, TEST_API_KEY } from "./helpers/api-key-helper.js";
+import { autoAuth } from "./helpers/api-key-helper.js";
 import { resetByWalletRateLimitBuckets, walletLookupLimiter } from "../src/middleware/rateLimiter.js";
 
 const mockGetJobsByWallet = jest.fn();
@@ -9,11 +9,14 @@ const mockLogger = {
   info: jest.fn(),
   warn: jest.fn(),
   error: jest.fn(),
+  debug: jest.fn(),
 };
 
 jest.unstable_mockModule("../src/indexer/db.js", () => ({
   getJobsByWallet: mockGetJobsByWallet,
   getEventsByContract: jest.fn(),
+  saveJobDraft: jest.fn(),
+  getJobDraftById: jest.fn(),
 }));
 
 jest.unstable_mockModule("../src/utils/logger.js", () => ({
@@ -40,7 +43,7 @@ describe("GET /api/jobs/by-wallet/:address – hardening", () => {
     mockGetJobsByWallet.mockReturnValue({ total: 1, jobs: [{ contract_id: "C1" }], page: 1, limit: 10 });
   });
 
-  it("logs the address on success", async () => {
+  it("logs the masked address at info and the full one at debug on success", async () => {
     await request(buildApp())
       .get("/api/jobs/by-wallet/GAODBHVR63Z56MVQRBEJSYM2H5423LJ4WAPUUBOFG4JYY72S6ROKVZRX")
       .expect(200);
@@ -48,7 +51,10 @@ describe("GET /api/jobs/by-wallet/:address – hardening", () => {
     // Cast mock.calls to the expected tuple type to satisfy TypeScript
     const infoEntries = mockLogger.info.mock.calls as unknown as [string, Record<string, unknown>][];
     expect(infoEntries.some(([message]) => message === "Jobs lookup completed")).toBe(true);
-    expect(infoEntries.some(([, meta]) => (meta as any).address === "GAODBHVR63Z56MVQRBEJSYM2H5423LJ4WAPUUBOFG4JYY72S6ROKVZRX")).toBe(true);
+    // Info logs carry the masked address; the full one is debug-only (#683).
+    expect(infoEntries.some(([, meta]) => (meta as any).address === "GAOD\u2026VZRX")).toBe(true);
+    const debugEntries = mockLogger.debug.mock.calls as unknown as [string, Record<string, unknown>][];
+    expect(debugEntries.some(([, meta]) => (meta as any).address === "GAODBHVR63Z56MVQRBEJSYM2H5423LJ4WAPUUBOFG4JYY72S6ROKVZRX")).toBe(true);
   });
 
   it("logs the address on error", async () => {
