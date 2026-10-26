@@ -61,8 +61,10 @@ function normalizeEventTypes(
 /**
  * Subscribe a webhook URL to contract events. Emits pipeline telemetry.
  */
-export function dispatchSubscribe(input: SubscribeInput): SubscribeResult {
-  const traceId = randomUUID();
+export function dispatchSubscribe(
+  input: SubscribeInput,
+  traceId: string = randomUUID(),
+): SubscribeResult {
   const route = `${WEBHOOK_DISPATCHER_ROUTE_PREFIX}/subscribe`;
 
   logger.debug("webhook_dispatcher subscribe handler entered", {
@@ -201,8 +203,10 @@ export function dispatchSubscribe(input: SubscribeInput): SubscribeResult {
 /**
  * Unsubscribe a webhook URL. Emits pipeline telemetry.
  */
-export function dispatchUnsubscribe(input: UnsubscribeInput): UnsubscribeResult {
-  const traceId = randomUUID();
+export function dispatchUnsubscribe(
+  input: UnsubscribeInput,
+  traceId: string = randomUUID(),
+): UnsubscribeResult {
   const route = `${WEBHOOK_DISPATCHER_ROUTE_PREFIX}/unsubscribe`;
 
   logger.debug("webhook_dispatcher unsubscribe handler entered", {
