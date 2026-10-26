@@ -1,6 +1,7 @@
 import { getDb, eventDedupeId } from "./db.js";
 import logger from "../utils/logger.js";
 import { FailureMonitor } from "./failure-monitor.js";
+import { stringifyWithBigInt } from "../utils/safe-json.js";
 
 /** Index names used by sync-ranges lookups – validated via EXPLAIN QUERY PLAN (#250). */
 export const SYNC_RANGES_INDEXES = {
@@ -668,7 +669,7 @@ export async function ingestRpcEventNotifications(
     eventType: event.eventType,
     ledgerSequence: event.ledger,
     timestamp: event.timestamp ?? Math.floor(Date.now() / 1000),
-    dataJson: JSON.stringify(event.value),
+    dataJson: stringifyWithBigInt(event.value),
   }));
 
   return insertEventsWithDedupAsync(events, syncRange);
