@@ -6,6 +6,28 @@ const MAX_RETRIES = 3;
 const BACKOFF_MS = [500, 1500, 4500];
 
 /**
+ * Default per-attempt timeout for an outbound webhook POST (#606).
+ *
+ * Undici has no overall deadline of its own: a receiver that accepts the
+ * connection and then never writes a response would pin the attempt forever.
+ * Because delivery is sequential, one such subscriber would starve every
+ * other subscriber behind it. Override with WEBHOOK_TIMEOUT_MS.
+ */
+export const DEFAULT_WEBHOOK_TIMEOUT_MS = 5000;
+
+/**
+ * Read the timeout per attempt so a deployment (or a test) can change it
+ * without reloading the module. Invalid or non-positive values fall back to
+ * the default.
+ */
+function webhookTimeoutMs(): number {
+  const configured = Number.parseInt(process.env.WEBHOOK_TIMEOUT_MS ?? "", 10);
+  return Number.isFinite(configured) && configured > 0
+    ? configured
+    : DEFAULT_WEBHOOK_TIMEOUT_MS;
+}
+
+/**
  * Number of ledgers scanned per query inside deliverWebhooks (#690). Paging
  * the range keeps peak memory bounded even after long downtime, when the
  * range to deliver can span thousands of ledgers.
@@ -66,9 +88,19 @@ export function getFetchErrorCode(err: unknown): string {
       if (typeof code === "string" && code.length > 0) {
         return code;
       }
-      if (cause instanceof Error && cause.name) {
-        return cause.name;
+      // AbortSignal.timeout aborts with a DOMException named "TimeoutError".
+      // DOMException is not an Error instance, so accept the name from any
+      // object before falling back.
+      const causeName = (cause as { name?: unknown }).name;
+      if (typeof causeName === "string" && causeName.length > 0) {
+        return causeName;
       }
+    }
+    // Some rejections surface the DOMException directly (e.g. when the
+    // timeout signal aborts the fetch itself) rather than as `cause`.
+    const name = (err as { name?: unknown }).name;
+    if (typeof name === "string" && name.length > 0 && name !== "Error") {
+      return name;
     }
   }
   if (err instanceof Error && err.name) {
@@ -121,6 +153,9 @@ export async function deliverToUrl(
       // A public URL must not be able to bounce the request to an internal
       // one: any 3xx is a failed attempt, never followed (#605).
       redirect: "manual",
+      // Hard per-attempt deadline: a receiver that never answers must fail
+      // the attempt instead of stalling the sequential delivery loop (#606).
+      signal: AbortSignal.timeout(webhookTimeoutMs()),
     });
 
     if (response.status >= 300 && response.status < 400) {
