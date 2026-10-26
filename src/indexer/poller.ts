@@ -1,4 +1,3 @@
-import { Server } from "@stellar/stellar-sdk/rpc";
 import type { Api } from "@stellar/stellar-sdk/rpc";
 import { scValToNative } from "@stellar/stellar-sdk";
 import {
@@ -9,7 +8,6 @@ import {
   updateContractPointer,
   registerContract,
   adjustPollerInterval,
-  getCurrentPollIntervalMs as getDbPollIntervalMs,
   resetPollerThrottleState,
   verifySchemaUpToDate,
   assertSchemaValid,
@@ -147,9 +145,9 @@ export function toEventTimestamp(ledgerClosedAt: unknown): number | null {
 }
 
 /** Map an RPC event notification onto the row shape `events` stores. */
-function toEventRow(event: any, fallbackContractId: string): EventRow {
+function toEventRow(event: Api.EventResponse, fallbackContractId: string): EventRow {
   return {
-    contractId: event.contractId?.contractId?.() ?? fallbackContractId,
+    contractId: event.contractId?.contractId() ?? fallbackContractId,
     eventType: scValToNative(event.topic[0]) as string,
     ledgerSequence: event.ledger,
     timestamp: toEventTimestamp(event.ledgerClosedAt),
@@ -334,7 +332,7 @@ export async function fetchHistoricalEvents(
       : { startLedger, endLedger, contractIds, limit: HISTORICAL_PAGE_SIZE };
 
     const page = await rpcClient.getEvents(params);
-    const pageEvents: any[] = page?.events ?? [];
+    const pageEvents: Api.EventResponse[] = page?.events ?? [];
     if (pageEvents.length === 0) break;
 
     eventsFound += pageEvents.length;
