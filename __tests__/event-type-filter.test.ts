@@ -10,7 +10,7 @@ import {
 
 describe("EVENT_TYPES", () => {
   it("contains exactly the contract's emitted topics", () => {
-    expect(EVENT_TYPES.length).toBe(52);
+    expect(EVENT_TYPES.length).toBe(82);
   });
 
   it("contains the core lifecycle discriminators", () => {
@@ -24,6 +24,8 @@ describe("EVENT_TYPES", () => {
       "claim",
       "cancel",
       "arbsplit",
+      "wtok",
+      "wldel",
     ]) {
       expect(EVENT_TYPES).toContain(topic);
     }

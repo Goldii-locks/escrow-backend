@@ -105,6 +105,17 @@ A successful delivery resets the counter, and calling `POST
 /api/webhooks/subscribe` again for the same `(contract_id, webhook_url)` pair
 re-enables the subscription and clears the failure history.
 
+## Subscription event types
+
+Set `event_types` to a non-empty array of unique emitted topic names, such as
+`["approve", "fund"]`, or use `"*"` to subscribe to every event. Topic names
+are validated against the exported `EVENT_TYPES` constant in
+[`src/indexer/event_type_filter.ts`](../src/indexer/event_type_filter.ts),
+which is the source of truth and follows the contract's
+[`EVENTS.md`](https://github.com/Goldii-locks/escrow-contract/blob/main/EVENTS.md).
+Names not in that list, duplicate values, non-strings, empty arrays, and names
+longer than the contract's 9-character topic limit are rejected with HTTP 400.
+
 ## Event `data` shapes
 
 Shapes below mirror the contract's event structs

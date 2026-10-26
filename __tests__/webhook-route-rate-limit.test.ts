@@ -54,7 +54,7 @@ describe("webhook mutation rate limit (#604)", () => {
     const subscribeBody = {
       contract_id: CONTRACT,
       webhook_url: "https://example.com/hook",
-      event_types: ["funded"],
+      event_types: ["fund"],
     };
 
     // First two requests fit the budget.
