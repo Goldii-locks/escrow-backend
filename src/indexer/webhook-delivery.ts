@@ -1,5 +1,6 @@
 import { getDb, getSubscriptions, EventDbRow } from "./db.js";
 import logger from "../utils/logger.js";
+import { assertDeliveryTargetAllowed } from "../utils/webhook-url-guard.js";
 
 const MAX_RETRIES = 3;
 const BACKOFF_MS = [500, 1500, 4500];
@@ -85,6 +86,24 @@ export async function deliverToUrl(
   event: EventDbRow
 ): Promise<DeliveryOutcome> {
   const startedAt = Date.now();
+
+  // Re-check the target before every attempt (#605). The subscribe-time
+  // validation is not enough: DNS can be re-pointed at an internal address
+  // after the subscription exists.
+  const targetCheck = await assertDeliveryTargetAllowed(webhookUrl);
+  if (!targetCheck.ok) {
+    logger.warn("Webhook delivery blocked by URL guard", {
+      webhookUrl,
+      eventId: event.id,
+      reason: targetCheck.error,
+    });
+    return {
+      ok: false,
+      errorCode: "BLOCKED_URL",
+      durationMs: Date.now() - startedAt,
+    };
+  }
+
   const payload = {
     version: WEBHOOK_PAYLOAD_VERSION,
     event_type: event.event_type,
@@ -99,7 +118,20 @@ export async function deliverToUrl(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
+      // A public URL must not be able to bounce the request to an internal
+      // one: any 3xx is a failed attempt, never followed (#605).
+      redirect: "manual",
     });
+
+    if (response.status >= 300 && response.status < 400) {
+      return {
+        ok: false,
+        status: response.status,
+        errorCode: `REDIRECT_${response.status}`,
+        durationMs: Date.now() - startedAt,
+      };
+    }
+
     return {
       ok: response.ok,
       status: response.status,
