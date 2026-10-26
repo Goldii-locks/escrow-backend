@@ -31,7 +31,7 @@ import {
   initializeSyncRangesTable,
   getSyncedRanges,
   countEventsInRange,
-} from "../src/indexer/duplicate-prevention.js";
+} from "../src/indexer/db.js";
 
 describe("RpcPollerClient – exponential backoff retry", () => {
   describe("computeBackoffMs", () => {

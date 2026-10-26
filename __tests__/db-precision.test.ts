@@ -12,7 +12,6 @@ import {
   configureFormatColumns,
 } from "../src/utils/db-precision.js";
 import * as token from "../src/utils/token_decimals_converter.js";
-import { formatReportValueForDb } from "../src/utils/financial_report_exporter.js";
 import { formatLedgerValueForDb } from "../src/utils/audit_ledger_sum_checker.js";
 import { formatForDb } from "../src/utils/conversion_rate_math.js";
 import * as refund from "../src/utils/refund_ratio_helper.js";
@@ -56,12 +55,10 @@ describe("formatDecimalForDb", () => {
     ] as const) {
       const expected = formatDecimalForDb(value, decimals);
       expect(formatRefundValueForDb(value, decimals)).toBe(expected);
-      expect(formatReportValueForDb(value, decimals)).toBe(expected);
       expect(formatLedgerValueForDb(value, decimals)).toBe(expected);
       expect(formatForDb(value, decimals)).toBe(expected);
     }
     expect(() => formatRefundValueForDb(1n, -1)).toThrow(/^formatRefundValueForDb:/);
-    expect(() => formatReportValueForDb(1n, -1)).toThrow(/^formatReportValueForDb:/);
     expect(() => formatLedgerValueForDb(1n, -1)).toThrow(/^formatLedgerValueForDb:/);
     expect(() => formatForDb(1n, -1)).toThrow(/^formatForDb:/);
   });

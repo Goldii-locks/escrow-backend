@@ -6,7 +6,7 @@
   "scripts": {
     "test": "cross-env NODE_OPTIONS=--experimental-vm-modules jest",
     "test:e2e": "cross-env NODE_OPTIONS=--experimental-vm-modules jest --config jest.e2e.config.js --runInBand",
-    "lint": "eslint . --max-warnings=75",
+    "lint": "eslint . --max-warnings=68",
     "dev": "nodemon --exec \"node --loader ts-node/esm\" src/index.ts",
     "build": "tsc -p tsconfig.build.json",
     "start": "node dist/index.js"

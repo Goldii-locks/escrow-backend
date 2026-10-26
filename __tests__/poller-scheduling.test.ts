@@ -204,7 +204,9 @@ describe("startPoller() / stopPoller() scheduling", () => {
     const pending = jest.getTimerCount();
 
     stopPoller();
-    expect(jest.getTimerCount()).toBe(pending - 1);
+    // stopPoller() clears both the poll-loop timer and the maintenance
+    // scheduler timer that startPoller() sets up, so the count drops by 2.
+    expect(jest.getTimerCount()).toBe(pending - 2);
     jest.advanceTimersByTime(10 * 60_000);
     await flushPromises();
     expect(mockGetLatestLedger).toHaveBeenCalledTimes(1);

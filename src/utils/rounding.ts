@@ -9,7 +9,6 @@
  * | Call site | File | Mode used | Why |
  * |---|---|---|---|
  * | `divideHalfEven` | `utils/financial_report_math.ts` | `half-even` | report sums must not accumulate directional bias |
- * | `roundFinancialReportDivision` | `utils/financial_report_exporter.ts` | `half-even` | delegates to `divideHalfEven` |
  * | `divideRoundHalfEven` | `utils/conversion_rate_math.ts` | `half-even` | fractional rates without float bias |
  * | `roundIntegerDivision` | `utils/tax_deduction_estimator.ts` | caller-chosen | tax preview; default `truncate` matches prior behavior |
  * | `calculateFeeDeductionHalfEven` | `utils/fee-deduction-calculator.ts` | `half-even` | fee/net must reconcile exactly |
