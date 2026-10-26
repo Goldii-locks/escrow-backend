@@ -58,7 +58,8 @@ router.post(
   ),
   async (req: Request, res: Response) => {
     const { contractId, method, args, sourceAddress } = req.body;
-    const traceId = randomUUID();
+    // Reuse the request id (#773); a fresh one when mounted without it.
+    const traceId = req.id ?? randomUUID();
     const pathVars = { contractId, method, sourceAddress };
 
     logger.debug("Build-tx handler entered", {

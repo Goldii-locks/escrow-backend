@@ -59,7 +59,7 @@ router.post("/subscribe", webhookLimiter, requireAdmin, (req, res) => {
     contract_id: req.body?.contract_id,
     webhook_url: req.body?.webhook_url,
     event_types: req.body?.event_types,
-  });
+  }, req.id);
 
   if (!result.ok) {
     return sendError(res, result.status, result.error);
@@ -72,7 +72,7 @@ router.post("/unsubscribe", webhookLimiter, requireAdmin, (req, res) => {
   const result = dispatchUnsubscribe({
     contract_id: req.body?.contract_id,
     webhook_url: req.body?.webhook_url,
-  });
+  }, req.id);
 
   if (!result.ok) {
     return sendError(res, result.status, result.error);

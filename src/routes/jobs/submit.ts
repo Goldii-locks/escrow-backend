@@ -47,7 +47,8 @@ router.post(
   async (req: Request, res: Response) => {
     const { signedXdr, sourceAddress } = req.body as { signedXdr: string; sourceAddress?: string };
     const cacheKey = signedXdr;
-    const traceId = randomUUID();
+    // Reuse the request id (#773); a fresh one when mounted without it.
+    const traceId = req.id ?? randomUUID();
 
     logger.info("Submit transaction request received", {
       traceId,

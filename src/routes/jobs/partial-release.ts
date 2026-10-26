@@ -58,7 +58,8 @@ router.post(
     logger.warn("Invalid body for partial-release", rejectedRequestLogMeta(req, error)),
   ),
   async (req: Request, res: Response) => {
-    const traceId = randomUUID();
+    // Reuse the request id (#773); a fresh one when mounted without it.
+    const traceId = req.id ?? randomUUID();
     try {
       const { contractId, index } = req.params;
 

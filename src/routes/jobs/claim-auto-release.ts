@@ -55,7 +55,8 @@ router.post(
     const { index } = req.params;
     const { sourceAddress } = req.body;
     const cacheKey = `${contractId}:${index}:${sourceAddress}`;
-    const traceId = randomUUID();
+    // Reuse the request id (#773); a fresh one when mounted without it.
+    const traceId = req.id ?? randomUUID();
     const pathVars = { contractId, index, sourceAddress };
 
     logger.debug("Claim auto-release handler entered", {

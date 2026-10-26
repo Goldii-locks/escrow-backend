@@ -1,5 +1,4 @@
 import express from "express";
-import type { Request, Response, NextFunction } from "express";
 import helmet from "helmet";
 import jobRoutes from "./routes/jobs.js";
 import adminRoutes from "./routes/admin.js";
@@ -7,8 +6,8 @@ import webhookRoutes from "./routes/webhooks.js";
 import { generalLimiter } from "./middleware/rateLimiter.js";
 import { legacyApiDeprecation } from "./middleware/api-version.js";
 import { readinessHandler } from "./readiness.js";
-import logger from "./utils/logger.js";
 import { globalCors } from "./middleware/global-cors.js";
+import { requestIdMiddleware, requestLogger } from "./middleware/request-id.js";
 import { globalErrorHandler } from "./middleware/error-handler.js";
 import { resolveTrustProxy } from "./utils/trust-proxy.js";
 
@@ -66,24 +65,14 @@ export function createApp(): express.Express {
   // #600: key req.ip (and so every rate limiter) on the real client behind nginx.
   app.set("trust proxy", resolveTrustProxy());
 
+  // First, so every later middleware and log line can use req.id (#773).
+  app.use(requestIdMiddleware);
   app.use(globalCors());
   app.use(helmet());
   app.use(express.json());
 
-  // Structured HTTP request logging (#86)
-  app.use((req: Request, res: Response, next: NextFunction) => {
-    const start = Date.now();
-    res.on("finish", () => {
-      logger.info("HTTP request", {
-        method: req.method,
-        url: req.originalUrl,
-        status: res.statusCode,
-        durationMs: Date.now() - start,
-        ip: req.ip ?? req.socket?.remoteAddress,
-      });
-    });
-    next();
-  });
+  // Structured HTTP request logging (#86), tagged with the request id (#773).
+  app.use(requestLogger);
 
   app.get("/health", (_req, res) => {
     res.json({ status: "ok", contract: process.env.CONTRACT_ID });

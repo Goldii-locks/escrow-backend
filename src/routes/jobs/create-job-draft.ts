@@ -44,7 +44,8 @@ router.post(
   createJobDraftRateLimit,
   createJobDraftValidation,
   (req: Request, res: Response) => {
-    const traceId = randomUUID();
+    // Reuse the request id (#773); a fresh one when mounted without it.
+    const traceId = req.id ?? randomUUID();
     const pathVars = { route: "/api/jobs/create-job-draft" };
 
     logger.debug("Create-job-draft handler entered", {
