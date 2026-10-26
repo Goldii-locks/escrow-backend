@@ -63,7 +63,7 @@ function subscribe(webhookUrl: string) {
     .send({
       contract_id: CONTRACT,
       webhook_url: webhookUrl,
-      event_types: ["funded"],
+      event_types: ["fund"],
     });
 }
 

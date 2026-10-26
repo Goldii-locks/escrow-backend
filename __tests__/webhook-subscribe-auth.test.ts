@@ -113,7 +113,7 @@ describe("POST /api/webhooks/subscribe - credential required (#604)", () => {
       .send({
         contract_id: CONTRACT,
         webhook_url: SUBSCRIBED_URL,
-        event_types: ["funded"],
+        event_types: ["fund"],
       })
       .expect(200);
 

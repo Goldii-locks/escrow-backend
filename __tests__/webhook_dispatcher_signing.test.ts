@@ -55,7 +55,7 @@ describe("webhook_dispatcher telemetry (#520)", () => {
     const result = dispatchSubscribe({
       contract_id: CONTRACT_A,
       webhook_url: WEBHOOK_URL,
-      event_types: ["funded"],
+      event_types: ["fund"],
     });
 
     expect(result.ok).toBe(true);
@@ -111,7 +111,7 @@ describe("webhook_dispatcher telemetry (#520)", () => {
   });
 
   it("logs unsubscribe pipeline telemetry with matching traceId", () => {
-    addSubscription(CONTRACT_A, WEBHOOK_URL, ["funded"]);
+    addSubscription(CONTRACT_A, WEBHOOK_URL, ["fund"]);
 
     const result = dispatchUnsubscribe({
       contract_id: CONTRACT_A,
@@ -147,10 +147,10 @@ describe("webhook_dispatcher telemetry (#520)", () => {
     mockFetch.mockResolvedValue({ ok: true });
     (global as any).fetch = mockFetch;
 
-    addSubscription(CONTRACT_A, WEBHOOK_URL, ["funded"]);
+    addSubscription(CONTRACT_A, WEBHOOK_URL, ["fund"]);
     insertEvent(
       CONTRACT_A,
-      "funded",
+      "fund",
       100,
       1000,
       JSON.stringify({ client: "GCLIENT" })

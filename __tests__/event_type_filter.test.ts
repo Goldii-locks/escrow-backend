@@ -446,7 +446,7 @@ describe("event_type_filter – Transaction Isolation", () => {
         .send({
           contract_id: CONTRACT_A,
           webhook_url: WEBHOOK_URL_A,
-          event_types: ["funded"],
+          event_types: ["fund"],
         })
         .expect(500);
 
