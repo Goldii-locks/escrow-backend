@@ -451,6 +451,107 @@ describe("POST /api/jobs/build-tx — contract argument type mapping", () => {
     expect(leaves).toHaveLength(1);
     expect(scValToNative(leaves[0])).toBe(100n);
   });
+
+  function firstInvokedArgs() {
+    const tx = (mockPrepareTransaction.mock.calls[0] as unknown[])[0] as { toXDR: () => string };
+    const envelope = StellarXdr.TransactionEnvelope.fromXDR(tx.toXDR(), "base64");
+    const call = envelope.v1().tx().operations()[0].body().invokeHostFunctionOp().hostFunction()
+      .invokeContract();
+    return { method: call.functionName().toString(), args: call.args() };
+  }
+
+  it("encodes an enum arg as a single-symbol vec, like a #[contracttype] unit variant", async () => {
+    const body = { ...VALID_BODY, args: [{ type: "enum", value: "Upfront" }] };
+    await request(app).post("/api/jobs/build-tx").send(body).expect(200);
+
+    const [arg] = firstInvokedArgs().args;
+    expect(arg.switch().name).toBe("scvVec");
+    const items = arg.vec() ?? [];
+    expect(items).toHaveLength(1);
+    expect(items[0].sym().toString()).toBe("Upfront");
+  });
+
+  it("encodes a struct arg as a map with sorted symbol keys", async () => {
+    const body = {
+      ...VALID_BODY,
+      args: [
+        {
+          type: "struct",
+          value: {
+            funding_mode: { type: "enum", value: "Upfront" },
+            dispute_timeout_seconds: { type: "u64", value: "2592000" },
+            arbiter_fee_bps: { type: "u32", value: 0 },
+          },
+        },
+      ],
+    };
+    await request(app).post("/api/jobs/build-tx").send(body).expect(200);
+
+    const [arg] = firstInvokedArgs().args;
+    expect(arg.switch().name).toBe("scvMap");
+    const entries = arg.map() ?? [];
+    expect(entries.map((e) => e.key().sym().toString())).toEqual([
+      "arbiter_fee_bps",
+      "dispute_timeout_seconds",
+      "funding_mode",
+    ]);
+    expect(scValToNative(entries[0].val())).toBe(0);
+    expect(scValToNative(entries[1].val())).toBe(2592000n);
+    expect(entries[2].val().switch().name).toBe("scvVec");
+  });
+
+  it("builds an escrow-factory create_escrow call with all nine arguments", async () => {
+    const body = {
+      ...VALID_BODY,
+      method: "create_escrow",
+      args: [
+        { type: "address", value: VALID_ADDRESS },
+        { type: "address", value: SECOND_ADDRESS },
+        { type: "address", value: VALID_ADDRESS },
+        { type: "address", value: VALID_BODY.contractId },
+        { type: "u64", value: "604800" },
+        { type: "vec", value: [{ type: "i128", value: "10000000" }] },
+        { type: "vec", value: [{ type: "bytes", value: "00".repeat(32) }] },
+        {
+          type: "struct",
+          value: {
+            funding_mode: { type: "enum", value: "Upfront" },
+            dispute_timeout_seconds: { type: "u64", value: "2592000" },
+            arbiter_fee_bps: { type: "u32", value: 0 },
+          },
+        },
+        { type: "bytes", value: "ab".repeat(32) },
+      ],
+    };
+    await request(app).post("/api/jobs/build-tx").send(body).expect(200);
+
+    const { method, args } = firstInvokedArgs();
+    expect(method).toBe("create_escrow");
+    expect(args.map((a) => a.switch().name)).toEqual([
+      "scvAddress",
+      "scvAddress",
+      "scvAddress",
+      "scvAddress",
+      "scvU64",
+      "scvVec",
+      "scvVec",
+      "scvMap",
+      "scvBytes",
+    ]);
+  });
+
+  it.each([
+    ["enum with a space", { type: "enum", value: "Up front" }],
+    ["enum non-string", { type: "enum", value: 1 }],
+    ["empty struct", { type: "struct", value: {} }],
+    ["struct with a bad field name", { type: "struct", value: { "bad-name": { type: "u32", value: 1 } } }],
+    ["struct with a bad field value", { type: "struct", value: { ok: { type: "u32", value: -1 } } }],
+  ])("rejects a malformed %s with a 400 ValidationError", async (_label, arg) => {
+    const body = { ...VALID_BODY, args: [arg] };
+    const res = await request(app).post("/api/jobs/build-tx").send(body).expect(400);
+    expect(res.body.error).toBe("ValidationError");
+    expect(mockPrepareTransaction).not.toHaveBeenCalled();
+  });
 });
 
 describe("POST /api/jobs/build-tx — in-memory caching (duplicate network hits)", () => {

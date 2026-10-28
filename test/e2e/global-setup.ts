@@ -1,8 +1,9 @@
 /**
  * Jest globalSetup for the Soroban E2E suite (#684): bring up (or reuse) a
- * local quickstart network, deploy the native token SAC and an escrow
- * contract initialised through its constructor, have the freelancer and
- * arbiter accept the job, and persist the resulting ids/keys for the spec.
+ * local quickstart network, deploy the native token SAC, an escrow contract
+ * initialised through its constructor and an escrow factory, have the
+ * freelancer and arbiter accept the job, and persist the resulting ids/keys
+ * for the spec.
  */
 import { createHash } from "node:crypto";
 import fs from "node:fs";
@@ -10,12 +11,14 @@ import { Address, nativeToScVal, xdr } from "@stellar/stellar-sdk";
 import {
   STATE_FILE,
   deployEscrowContract,
+  deployFactoryContract,
   ensureNativeTokenContract,
   ensureQuickstart,
   fundedKeypair,
   invokeContract,
   loadConfig,
   rpcServer,
+  wasmHash,
   type E2EState,
 } from "./soroban-network.ts";
 
@@ -66,6 +69,17 @@ export default async function globalSetup(): Promise<void> {
     escrowSettings(),
   ]);
 
+  // The factory deploys new escrows from the Wasm the escrow above already
+  // uploaded; only allowed tokens can be used.
+  const factoryContractId = await deployFactoryContract(server, config, admin, [
+    address(admin.publicKey()),
+    xdr.ScVal.scvBytes(wasmHash(config.wasmPath)),
+  ]);
+  await invokeContract(server, config, admin, factoryContractId, "allow_token", [
+    address(admin.publicKey()),
+    address(tokenContractId),
+  ]);
+
   // Work on the job is gated on both acceptances.
   await invokeContract(server, config, freelancer, contractId, "accept_job", [
     address(freelancer.publicKey()),
@@ -85,6 +99,7 @@ export default async function globalSetup(): Promise<void> {
     freelancer: freelancer.publicKey(),
     arbiter: arbiter.publicKey(),
     milestoneAmounts: MILESTONE_AMOUNTS,
+    factoryContractId,
     deployLedger,
     startedContainer,
     containerName: config.containerName,

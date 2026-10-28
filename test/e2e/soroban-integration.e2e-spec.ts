@@ -14,7 +14,8 @@ import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { Keypair, TransactionBuilder, type Transaction } from "@stellar/stellar-sdk";
+import { randomBytes } from "node:crypto";
+import { Address, Keypair, TransactionBuilder, type Transaction } from "@stellar/stellar-sdk";
 import { Api } from "@stellar/stellar-sdk/rpc";
 import { STATE_FILE, rpcServer, waitFor, type E2EState } from "./soroban-network.js";
 
@@ -63,6 +64,7 @@ beforeAll(async () => {
       PORT: String(PORT),
       DB_PATH: path.join(dataDir, "escrow.db"),
       CONTRACT_ID: state.contractId,
+      FACTORY_CONTRACT_ID: state.factoryContractId,
       DEPLOYER_ADDRESS: admin.publicKey(),
       SOROBAN_RPC_URL: state.rpcUrl,
       SOROBAN_NETWORK_PASSPHRASE: state.networkPassphrase,
@@ -93,6 +95,8 @@ beforeAll(async () => {
 
 afterAll(() => {
   backend?.kill();
+  // Set E2E_BACKEND_LOG to keep the backend's output for debugging.
+  if (process.env.E2E_BACKEND_LOG) fs.writeFileSync(process.env.E2E_BACKEND_LOG, backendLog);
   fs.rmSync(dataDir, { recursive: true, force: true });
 });
 
@@ -224,5 +228,85 @@ describe("Soroban quickstart E2E: draft → index → build-tx → sign → subm
       1_000,
     );
     await expectJob(true);
+  });
+});
+
+describe("Soroban quickstart E2E: create an escrow through escrow-factory", () => {
+  let signedXdr: string;
+  let escrowId: string;
+
+  it("build-tx create_escrow → client signs → submit deploys and initialises a new escrow", async () => {
+    // The arguments the frontend's create page sends.
+    const built = await api("POST", "/api/jobs/build-tx", {
+      contractId: state.factoryContractId,
+      method: "create_escrow",
+      sourceAddress: client.publicKey(),
+      args: [
+        { type: "address", value: state.client },
+        { type: "address", value: state.freelancer },
+        { type: "address", value: state.arbiter },
+        { type: "address", value: state.tokenContractId },
+        { type: "u64", value: String(AUTO_RELEASE_DAYS * 86_400) },
+        { type: "vec", value: MILESTONE_AMOUNTS.map((value) => ({ type: "i128", value })) },
+        { type: "vec", value: MILESTONE_AMOUNTS.map(() => ({ type: "bytes", value: "00".repeat(32) })) },
+        {
+          type: "struct",
+          value: {
+            funding_mode: { type: "enum", value: "Upfront" },
+            dispute_timeout_seconds: { type: "u64", value: String(30 * 86_400) },
+            arbiter_fee_bps: { type: "u32", value: 0 },
+          },
+        },
+        { type: "bytes", value: randomBytes(32).toString("hex") },
+      ],
+    });
+    expect(built.status).toBe(200);
+
+    const tx = TransactionBuilder.fromXDR(built.body.data.xdr, state.networkPassphrase) as Transaction;
+    tx.sign(client);
+    signedXdr = tx.toXDR();
+
+    const submitted = await api("POST", "/api/jobs/submit", {
+      signedXdr,
+      sourceAddress: client.publicKey(),
+    });
+    expect(submitted.status).toBe(200);
+    expect(submitted.body.data.status).not.toBe("ERROR");
+
+    const result = await server.pollTransaction(submitted.body.data.hash, { attempts: 60 });
+    expect(result.status).toBe(Api.GetTransactionStatus.SUCCESS);
+    if (result.status !== Api.GetTransactionStatus.SUCCESS || !result.returnValue) {
+      throw new Error("create_escrow returned no escrow address");
+    }
+    escrowId = Address.fromScVal(result.returnValue).toString();
+    expect(escrowId).toMatch(/^C[A-Z2-7]{55}$/);
+    expect(escrowId).not.toBe(state.contractId);
+  });
+
+  it("the indexer registers the new escrow from the factory's created event", async () => {
+    const job = await waitFor(
+      "indexer to surface the factory-created escrow for the client wallet",
+      async () => {
+        const { body } = await api("GET", `/api/jobs/by-wallet/${state.client}`);
+        return body?.data?.jobs?.find((j: { contract_id: string }) => j.contract_id === escrowId);
+      },
+      90_000,
+      2_000,
+    );
+    expect(job).toMatchObject({ contract_id: escrowId, role: "client" });
+  });
+
+  it("GET /api/jobs/:contractId reads the new escrow's parties and milestones", async () => {
+    const { status, body } = await api("GET", `/api/jobs/${escrowId}`);
+    expect(status).toBe(200);
+    expect(body.data).toMatchObject({
+      id: escrowId,
+      client: state.client,
+      freelancer: state.freelancer,
+      arbiter: state.arbiter,
+      token: state.tokenContractId,
+      funded: false,
+      milestones: MILESTONE_AMOUNTS.map((amount, index) => ({ index, amount, status: "Pending" })),
+    });
   });
 });

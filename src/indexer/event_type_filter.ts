@@ -15,12 +15,8 @@ import type { Api } from "@stellar/stellar-sdk/rpc";
  *
  * Every entry fits `symbol_short!`'s 9-character limit and the list contains
  * no duplicates (see `__tests__/event-type-filter.test.ts`). The indexer
- * requests all topics with a wildcard filter (see `buildGetEventsRequest`)
- * because Soroban RPC caps filters at 5 topics per filter and 5 filters per
- * request (25 alternatives maximum), so 82 topics cannot be expressed as an
- * enumerated filter. `contractIds` already scopes each request, and the
- * indexer wants every event the contract emits, making the wildcard
- * semantically identical to an (unrepresentable) enumeration.
+ * sends no topic filter at all (see `buildGetEventsRequest`): `contractIds`
+ * already scopes each request, and it wants every event the contract emits.
  */
 export const EVENT_TYPES = [
   "acceptarb",
@@ -150,27 +146,17 @@ export interface RpcGetEventsResult {
 /**
  * Build the `Server.getEvents` request for a poll window (#688).
  *
- * All topics are requested with a wildcard filter. Soroban RPC requires each
- * topic segment to be either the wildcard `"*"` or a base64-encoded XDR
- * ScVal; sending raw ASCII topic strings is rejected with -32602
- * ("illegal base64 data").
+ * Filters by contract only, with no topic filter. `contractIds` already
+ * scopes every request to our own contracts, and the indexer wants every
+ * event they emit.
  *
- * The wildcard is the correct, permanent choice — not a placeholder pending
- * a narrower filter. Do not replace it with an enumerated topic filter: that
- * migration is structurally impossible, for two independent reasons.
- *
- *   1. It does not fit. The contract emits 52 distinct topic[0]
- *      discriminators (the `symbol_short!` literals across
- *      `milestone-escrow/src/lib.rs`, see `EVENT_TYPES`). Soroban RPC caps
- *      filters at 5 topics per filter and 5 filters per request — 25
- *      alternatives maximum. 52 cannot be expressed, neither as one filter
- *      nor split across filters (`maximum 5 topics per filter` /
- *      `maximum 5 filters per request`).
- *
- *   2. It would buy nothing. `contractIds` already scopes every request to
- *      our own contract, and the indexer wants every event that contract
- *      emits. Enumerating all 52 would be semantically identical to sending
- *      no topic filter at all.
+ * Do not add a topic filter. Soroban RPC topic filters are positional: the
+ * wildcard `"*"` matches exactly one topic segment, so `topics: [["*"]]`
+ * silently drops every event with more than one topic, which since #739 is
+ * most escrow events (init, fund, deliver, approve, dispute... carry party
+ * addresses as extra topics). Enumerating topic[0] values cannot work either:
+ * the contract emits more discriminators than the RPC's 5 topics per filter
+ * and 5 filters per request allow.
  *
  * Retry policy lives in exactly one place: `RpcPollerClient` (see
  * `rpc-poller-client.ts`). Callers must route the returned request through
@@ -184,7 +170,6 @@ export function buildGetEventsRequest(params: GetEventsParams): GetEventsRequest
       {
         type: "contract" as const,
         contractIds: params.contractIds ?? [],
-        topics: [["*"]],
       },
     ];
   const request: GetEventsRequest = {
