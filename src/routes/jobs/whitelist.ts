@@ -75,7 +75,12 @@ router.get(
         return;
       }
 
-      // Fetch whitelisted tokens from contract
+      // Fetch whitelisted tokens from contract. The escrow factory keeps its
+      // list under get_allowed_tokens: those are the tokens new escrows may use.
+      const tokensMethod =
+        contractId === process.env.FACTORY_CONTRACT_ID
+          ? "get_allowed_tokens"
+          : "get_whitelisted_tokens";
       const requestPromise = (async (): Promise<string[]> => {
         const contract = new Contract(contractId as string);
         const account = simulationSource();
@@ -83,7 +88,7 @@ router.get(
           fee: await getInclusionFee(server),
           networkPassphrase: NETWORK_PASSPHRASE,
         })
-          .addOperation(contract.call("get_whitelisted_tokens"))
+          .addOperation(contract.call(tokensMethod))
           .setTimeout(30)
           .build();
 

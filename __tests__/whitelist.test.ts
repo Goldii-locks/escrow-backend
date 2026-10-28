@@ -851,4 +851,36 @@ describe("GET /api/jobs/:contractId/whitelist", () => {
       expect(JSON.stringify(meta)).toContain(VALID_CONTRACT);
     });
   });
+
+  describe("escrow-factory allowlist", () => {
+    const FACTORY = "CAVM6I3Z7AEWISCCRIC3PPLURGINAIUB45EFJ5DUENQEH4334JBFS4Y3";
+    const calledMethod = () => {
+      const tx = (mockSimulateTransaction.mock.calls[0] as unknown[])[0] as {
+        operations: Array<{ func: { invokeContract: () => { functionName: () => unknown } } }>;
+      };
+      return String(tx.operations[0].func.invokeContract().functionName());
+    };
+
+    afterEach(() => {
+      delete process.env.FACTORY_CONTRACT_ID;
+    });
+
+    it("reads get_allowed_tokens when the contract is the configured factory", async () => {
+      process.env.FACTORY_CONTRACT_ID = FACTORY;
+      mockSimulateTransaction.mockResolvedValue({ result: { retval: tokenVecScVal() } });
+
+      await request(buildApp()).get(`/api/jobs/${FACTORY}/whitelist`).expect(200);
+
+      expect(calledMethod()).toBe("get_allowed_tokens");
+    });
+
+    it("keeps get_whitelisted_tokens for escrow contracts", async () => {
+      process.env.FACTORY_CONTRACT_ID = FACTORY;
+      mockSimulateTransaction.mockResolvedValue({ result: { retval: tokenVecScVal() } });
+
+      await request(buildApp()).get(`/api/jobs/${VALID_CONTRACT}/whitelist`).expect(200);
+
+      expect(calledMethod()).toBe("get_whitelisted_tokens");
+    });
+  });
 });
