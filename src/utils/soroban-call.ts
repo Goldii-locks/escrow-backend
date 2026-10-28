@@ -25,6 +25,7 @@ import {
 import type { xdr } from "@stellar/stellar-sdk";
 import { Server } from "@stellar/stellar-sdk/rpc";
 import { config } from "../config.js";
+import { rpcAllowHttp } from "./rpc-allow-http.js";
 
 export const RPC_URL =
   process.env.SOROBAN_RPC_URL || "https://soroban-testnet.stellar.org";
@@ -34,7 +35,10 @@ export const NETWORK_PASSPHRASE =
 // #691: Apply an explicit HTTP timeout so stalled RPC connections surface as
 // a 504 rather than hanging indefinitely. Default 10 s; override via env.
 const RPC_TIMEOUT_MS = config.rpcTimeoutMs;
-export const server = new Server(RPC_URL, { timeout: RPC_TIMEOUT_MS });
+export const server = new Server(RPC_URL, {
+  timeout: RPC_TIMEOUT_MS,
+  allowHttp: rpcAllowHttp(RPC_URL),
+});
 
 /** RPC URL the module-level Server was built with (#602). */
 export function getRpcUrl(): string {

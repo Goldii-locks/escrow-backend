@@ -3,8 +3,8 @@
  *
  * Everything here talks to a `stellar/quickstart --local --enable-soroban-rpc`
  * container. Contract deployment goes through the JS SDK rather than
- * stellar-cli, so the only host prerequisites are Docker and a compiled
- * escrow Wasm.
+ * stellar-cli, so the only host prerequisites are Docker and an escrow Wasm
+ * built with `stellar contract build`.
  */
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
@@ -40,9 +40,14 @@ export interface E2EState {
   contractId: string;
   tokenContractId: string;
   adminSecret: string;
+  /** The client signs `fund`, so the spec needs its secret. */
+  clientSecret: string;
   client: string;
   freelancer: string;
   arbiter: string;
+  milestoneAmounts: string[];
+  /** Ledger just before the deploy; the backend backfills from here. */
+  deployLedger: number;
   /** True when global-setup started the container and teardown owns it. */
   startedContainer: boolean;
   containerName: string;
@@ -60,7 +65,10 @@ export function loadConfig(): E2EConfig {
         "../escrow-contract/target/wasm32v1-none/release/milestone_escrow.wasm",
     ),
     containerName: process.env.E2E_DOCKER_CONTAINER ?? "escrow-backend-e2e-quickstart",
-    image: process.env.E2E_QUICKSTART_IMAGE ?? "stellar/quickstart:latest",
+    // Pinned to the same image as escrow-contract's scripts/e2e.sh: its
+    // protocol matches the soroban-sdk the contract builds with, while
+    // `latest` moves daily.
+    image: process.env.E2E_QUICKSTART_IMAGE ?? "stellar/quickstart:v678-b1525.1-latest",
     keepNetwork: process.env.E2E_KEEP_NETWORK === "1",
   };
 }
@@ -127,6 +135,9 @@ export async function ensureQuickstart(config: E2EConfig): Promise<boolean> {
         config.image,
         "--local",
         "--enable-soroban-rpc",
+        // The escrow Wasm is larger than the default contract size limit.
+        "--limits",
+        "unlimited",
       ],
       { stdio: "inherit" },
     );
@@ -193,11 +204,32 @@ async function invoke(
   return result.returnValue;
 }
 
-/** Upload the escrow Wasm and instantiate one contract from it. */
+/** Call one contract function, signed and paid for by `signer`. */
+export async function invokeContract(
+  server: Server,
+  config: E2EConfig,
+  signer: Keypair,
+  contractId: string,
+  method: string,
+  args: xdr.ScVal[],
+): Promise<xdr.ScVal | undefined> {
+  return invoke(
+    server,
+    config,
+    signer,
+    Operation.invokeContractFunction({ contract: contractId, function: method, args }),
+  );
+}
+
+/**
+ * Upload the escrow Wasm and instantiate one contract from it. The contract
+ * is initialised by its `__constructor`, so the arguments go in here.
+ */
 export async function deployEscrowContract(
   server: Server,
   config: E2EConfig,
   deployer: Keypair,
+  constructorArgs: xdr.ScVal[],
 ): Promise<string> {
   if (!fs.existsSync(config.wasmPath)) {
     throw new Error(
@@ -222,6 +254,7 @@ export async function deployEscrowContract(
       address: Address.fromString(deployer.publicKey()),
       wasmHash: wasmHash.bytes(),
       salt: randomBytes(32),
+      constructorArgs,
     }),
   );
   if (!contractAddress) throw new Error("createCustomContract returned no address");

@@ -3,7 +3,7 @@
  * container only if global-setup started it, unless E2E_KEEP_NETWORK=1.
  */
 import fs from "node:fs";
-import { STATE_FILE, loadConfig, stopQuickstart, type E2EState } from "./soroban-network.js";
+import { STATE_FILE, loadConfig, stopQuickstart, type E2EState } from "./soroban-network.ts";
 
 export default async function globalTeardown(): Promise<void> {
   if (!fs.existsSync(STATE_FILE)) return;

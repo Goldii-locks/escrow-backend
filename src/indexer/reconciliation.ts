@@ -25,6 +25,7 @@ import { Server } from "@stellar/stellar-sdk/rpc";
 import { getDb } from "./db.js";
 import { sumLedgerAmounts } from "../utils/audit_ledger_sum_checker.js";
 import logger from "../utils/logger.js";
+import { rpcAllowHttp } from "../utils/rpc-allow-http.js";
 
 const RPC_URL = process.env.SOROBAN_RPC_URL || "https://soroban-testnet.stellar.org";
 const NETWORK_PASSPHRASE =
@@ -150,7 +151,7 @@ function resolveToken(contractId: string): string | null {
  * keypair is used as the transaction source.
  */
 export const readOnChainBalance: BalanceReader = async (contractId, token) => {
-  const server = new Server(RPC_URL);
+  const server = new Server(RPC_URL, { allowHttp: rpcAllowHttp(RPC_URL) });
   const source = new Account(Keypair.random().publicKey(), "0");
   const tx = new TransactionBuilder(source, {
     fee: BASE_FEE,

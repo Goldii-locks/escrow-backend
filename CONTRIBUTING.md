@@ -71,9 +71,10 @@ Pull requests that cause global coverage to drop below these thresholds will fai
 
 `npm test` runs the unit suites under `__tests__/` with RPC mocked. A separate,
 opt-in suite under `test/e2e/` runs the real backend against a local Stellar
-network with the escrow contract deployed, covering
-`create-job-draft` → `build-tx initialize` → sign → `submit` → indexer poll →
-`GET /api/jobs/by-wallet/:address` → `GET /api/jobs/:contractId`.
+network with the escrow contract deployed, covering `create-job-draft` →
+indexer backfill of the constructor's `init` event →
+`GET /api/jobs/by-wallet/:address` → `GET /api/jobs/:contractId` →
+`build-tx fund` → sign → `submit` → `GET /api/jobs/:contractId` (funded).
 It runs nightly in CI ([e2e-nightly.yml](./.github/workflows/e2e-nightly.yml))
 and can be started manually from the Actions tab.
 
@@ -82,10 +83,11 @@ Prerequisites:
 - Docker, with port `8000` free
 - The compiled escrow contract Wasm. Clone
   [escrow-contract](https://github.com/Goldii-locks/escrow-contract) next to
-  this repo and build it:
+  this repo and build it with [stellar-cli](https://github.com/stellar/stellar-cli)
+  (soroban-sdk refuses a plain `cargo build`):
   ```bash
   cd ../escrow-contract
-  cargo build --release --target wasm32v1-none -p milestone-escrow
+  stellar contract build --manifest-path contracts/milestone-escrow/Cargo.toml
   ```
 
 Run it:
@@ -94,11 +96,12 @@ Run it:
 npm run test:e2e
 ```
 
-The suite starts `stellar/quickstart --local --enable-soroban-rpc` in Docker
-(or reuses one already answering on `E2E_RPC_URL`), deploys the Wasm and the
-native XLM token contract, then spawns the backend on port `3101` with a
-throwaway SQLite database. A container the suite started is stopped
-afterwards.
+The suite starts `stellar/quickstart --local --enable-soroban-rpc --limits
+unlimited` in Docker (or reuses one already answering on `E2E_RPC_URL`),
+deploys the native XLM token contract and the escrow Wasm with its
+constructor arguments, has the freelancer and arbiter accept the job, then
+spawns the backend on port `3101` with a throwaway SQLite database. A
+container the suite started is stopped afterwards.
 
 Optional overrides:
 
@@ -110,7 +113,7 @@ Optional overrides:
 | `E2E_NETWORK_PASSPHRASE` | `Standalone Network ; February 2017` |
 | `E2E_BACKEND_PORT` | `3101` |
 | `E2E_DOCKER_CONTAINER` | `escrow-backend-e2e-quickstart` |
-| `E2E_QUICKSTART_IMAGE` | `stellar/quickstart:latest` |
+| `E2E_QUICKSTART_IMAGE` | `stellar/quickstart:v678-b1525.1-latest` (the tag escrow-contract's E2E pins) |
 | `E2E_KEEP_NETWORK` | unset; `1` leaves the container running for debugging |
 
 ## Code Style

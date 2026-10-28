@@ -10,7 +10,11 @@ export default {
   extensionsToTreatAsEsm: [".ts"],
   moduleFileExtensions: ["ts", "js"],
   transform: {
-    "^.+\\.ts$": ["ts-jest", { useESM: true }]
+    // Keep `.ts` import specifiers as written: globalSetup/globalTeardown are
+    // loaded by Node, outside moduleNameMapper, and import siblings by their
+    // real `.ts` names (tsconfig's rewriteRelativeImportExtensions would turn
+    // them back into missing `.js` files).
+    "^.+\\.ts$": ["ts-jest", { useESM: true, tsconfig: { rewriteRelativeImportExtensions: false } }]
   },
   testMatch: ["<rootDir>/test/e2e/**/*.e2e-spec.ts"],
   testPathIgnorePatterns: ["/node_modules/"],

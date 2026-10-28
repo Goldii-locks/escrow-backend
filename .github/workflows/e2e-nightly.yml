@@ -32,6 +32,11 @@ jobs:
         with:
           targets: wasm32v1-none
 
+      # soroban-sdk refuses plain `cargo build` for contracts; it has to be
+      # `stellar contract build`. Same version as escrow-contract's E2E.
+      - name: Install stellar-cli
+        uses: stellar/stellar-cli@v28.0.0
+
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -43,12 +48,16 @@ jobs:
 
       - name: Build escrow contract Wasm
         working-directory: escrow-contract
-        run: cargo build --release --target wasm32v1-none -p milestone-escrow
+        run: stellar contract build --manifest-path contracts/milestone-escrow/Cargo.toml
 
       - name: Start Stellar quickstart
         run: |
           docker run -d --rm --name escrow-backend-e2e-quickstart -p 8000:8000 \
-            stellar/quickstart:latest --local --enable-soroban-rpc
+            "$E2E_QUICKSTART_IMAGE" --local --enable-soroban-rpc --limits unlimited
+        env:
+          # Pinned like escrow-contract's scripts/e2e.sh, and the escrow Wasm
+          # exceeds the default contract size limit, hence --limits.
+          E2E_QUICKSTART_IMAGE: stellar/quickstart:v678-b1525.1-latest
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
