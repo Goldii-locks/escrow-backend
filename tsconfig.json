@@ -9,7 +9,10 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "types": ["jest"],
-    "isolatedModules": true
+    "isolatedModules": true,
+    // test/e2e global setup/teardown run outside Jest's module mapping, so
+    // they import siblings by their real `.ts` names.
+    "rewriteRelativeImportExtensions": true
   },
   "include": ["src/**/*", "__tests__/**/*", "test/**/*", "jest.setup.ts"],
   "exclude": ["node_modules", "dist"],

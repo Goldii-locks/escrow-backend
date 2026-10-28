@@ -41,6 +41,7 @@ import { buildGetEventsRequest } from "./event_type_filter.js";
 import { invalidateJobStateForEvents } from "./job-state-cache.js";
 import { formatError } from "../utils/format-error.js";
 import { config } from "../config.js";
+import { rpcAllowHttp } from "../utils/rpc-allow-http.js";
 import logger from "../utils/logger.js";
 import { stringifyWithBigInt } from "../utils/safe-json.js";
 
@@ -85,7 +86,7 @@ let failoverNodeSelected = false;
 
 /** Pick the healthiest configured node and rebuild the client against it. */
 async function selectRpcNode(): Promise<void> {
-  const selected = await createFailoverServer(RPC_URLS, (url) => new Server(url));
+  const selected = await createFailoverServer(RPC_URLS, (url) => new Server(url, { allowHttp: rpcAllowHttp(url) }));
   failoverNodeSelected = true;
   if (!selected) return;
   if (selected.nodeUrl !== activeNodeUrl) {

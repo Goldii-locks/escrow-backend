@@ -32,6 +32,7 @@ import {
 import { Server } from "@stellar/stellar-sdk/rpc";
 import NodeCache from "node-cache";
 import logger from "./logger.js";
+import { rpcAllowHttp } from "./rpc-allow-http.js";
 
 /** Metadata resolved for a token contract. */
 export interface TokenMetadata {
@@ -138,7 +139,7 @@ export type TokenViewSimulator = (
  * need a funded source account, so a random keypair is used as the source.
  */
 const simulateTokenView: TokenViewSimulator = async (tokenAddress, method) => {
-  const server = new Server(RPC_URL);
+  const server = new Server(RPC_URL, { allowHttp: rpcAllowHttp(RPC_URL) });
   const source = new Account(Keypair.random().publicKey(), "0");
   const tx = new TransactionBuilder(source, {
     fee: BASE_FEE,

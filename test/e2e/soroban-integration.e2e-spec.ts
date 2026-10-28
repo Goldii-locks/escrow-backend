@@ -11,7 +11,6 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from "@jest/globals";
 import { spawn, type ChildProcess } from "node:child_process";
-import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -23,11 +22,12 @@ const PORT = Number(process.env.E2E_BACKEND_PORT ?? "3101");
 const BASE_URL = `http://127.0.0.1:${PORT}`;
 const ADMIN_API_KEY = "e2e-admin-key";
 
-const MILESTONE_AMOUNTS = ["1000", "2500"];
 const AUTO_RELEASE_DAYS = 7;
 
 const state = JSON.parse(fs.readFileSync(STATE_FILE, "utf8")) as E2EState;
 const admin = Keypair.fromSecret(state.adminSecret);
+const client = Keypair.fromSecret(state.clientSecret);
+const MILESTONE_AMOUNTS = state.milestoneAmounts;
 const server = rpcServer(state.rpcUrl);
 
 type ApiResult = { status: number; body: any };
@@ -52,6 +52,7 @@ let dataDir: string;
 
 beforeAll(async () => {
   dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "escrow-e2e-db-"));
+  const chainHead = (await server.getLatestLedger()).sequence;
 
   backend = spawn(process.execPath, ["--loader", "ts-node/esm", "src/index.ts"], {
     cwd: path.resolve(import.meta.dirname, "../.."),
@@ -69,6 +70,10 @@ beforeAll(async () => {
       // Index quickly, and never serve a stale empty by-wallet page.
       POLL_INTERVAL_MS: "1000",
       JOBS_BY_WALLET_CACHE_TTL_S: "1",
+      // The constructor's init event predates the backend; import it through
+      // the startup historical backfill.
+      LEDGER_RANGE_START: String(state.deployLedger),
+      LEDGER_RANGE_END: String(chainHead),
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -91,7 +96,29 @@ afterAll(() => {
   fs.rmSync(dataDir, { recursive: true, force: true });
 });
 
-describe("Soroban quickstart E2E: draft → build-tx → sign → submit → index → read", () => {
+/** GET /api/jobs/:contractId, with the parties and milestones it should report. */
+async function expectJob(funded: boolean): Promise<void> {
+  const { status, body } = await api("GET", `/api/jobs/${state.contractId}`);
+  expect(status).toBe(200);
+  expect(body).toEqual({
+    success: true,
+    data: {
+      id: state.contractId,
+      client: state.client,
+      freelancer: state.freelancer,
+      arbiter: state.arbiter,
+      token: state.tokenContractId,
+      funded,
+      milestones: MILESTONE_AMOUNTS.map((amount, index) => ({
+        index,
+        amount,
+        status: "Pending",
+      })),
+    },
+  });
+}
+
+describe("Soroban quickstart E2E: draft → index → build-tx → sign → submit → read", () => {
   let unsignedXdr: string;
   let signedXdr: string;
   let txHash: string;
@@ -117,59 +144,7 @@ describe("Soroban quickstart E2E: draft → build-tx → sign → submit → ind
     });
   });
 
-  it("POST /api/jobs/build-tx returns an initialize XDR in the data envelope", async () => {
-    const specHashes = MILESTONE_AMOUNTS.map((_, i) =>
-      createHash("sha256").update(`e2e milestone ${i}`).digest("hex"),
-    );
-
-    const { status, body } = await api("POST", "/api/jobs/build-tx", {
-      contractId: state.contractId,
-      method: "initialize",
-      sourceAddress: admin.publicKey(),
-      args: [
-        { type: "address", value: admin.publicKey() },
-        { type: "address", value: state.client },
-        { type: "address", value: state.freelancer },
-        { type: "address", value: state.arbiter },
-        { type: "address", value: state.tokenContractId },
-        { type: "u64", value: String(AUTO_RELEASE_DAYS * 86_400) },
-        { type: "vec", value: MILESTONE_AMOUNTS.map((value) => ({ type: "i128", value })) },
-        { type: "vec", value: specHashes.map((value) => ({ type: "bytes", value })) },
-      ],
-    });
-
-    expect(status).toBe(200);
-    expect(body).toEqual({ success: true, data: { xdr: expect.any(String) } });
-    unsignedXdr = body.data.xdr;
-  });
-
-  it("signs the transaction XDR with the admin test keypair", () => {
-    const tx = TransactionBuilder.fromXDR(unsignedXdr, state.networkPassphrase) as Transaction;
-    expect(tx.source).toBe(admin.publicKey());
-    tx.sign(admin);
-    signedXdr = tx.toXDR();
-    expect(tx.signatures).toHaveLength(1);
-  });
-
-  it("POST /api/jobs/submit relays the signed transaction", async () => {
-    const { status, body } = await api("POST", "/api/jobs/submit", {
-      signedXdr,
-      sourceAddress: admin.publicKey(),
-    });
-
-    expect(status).toBe(200);
-    expect(body.success).toBe(true);
-    expect(body.data.status).not.toBe("ERROR");
-    expect(typeof body.data.hash).toBe("string");
-    txHash = body.data.hash;
-  });
-
-  it("the transaction is applied on-chain", async () => {
-    const result = await server.pollTransaction(txHash, { attempts: 60 });
-    expect(result.status).toBe(Api.GetTransactionStatus.SUCCESS);
-  });
-
-  it("the poller indexes the initialization event and GET /by-wallet returns the job", async () => {
+  it("the poller indexes the constructor's init event and GET /by-wallet returns the job", async () => {
     const job = await waitFor(
       "indexer to surface the job for the client wallet",
       async () => {
@@ -192,25 +167,62 @@ describe("Soroban quickstart E2E: draft → build-tx → sign → submit → ind
     expect(body.data.totalEvents).toBeGreaterThan(0);
   });
 
-  it("GET /api/jobs/:contractId returns the on-chain parties, milestones and state", async () => {
-    const { status, body } = await api("GET", `/api/jobs/${state.contractId}`);
+  it("GET /api/jobs/:contractId returns the on-chain parties and an unfunded escrow", async () => {
+    await expectJob(false);
+  });
+
+  it("POST /api/jobs/build-tx returns a fund XDR in the data envelope", async () => {
+    const { status, body } = await api("POST", "/api/jobs/build-tx", {
+      contractId: state.contractId,
+      method: "fund",
+      sourceAddress: client.publicKey(),
+      args: [{ type: "address", value: client.publicKey() }],
+    });
 
     expect(status).toBe(200);
-    expect(body).toEqual({
-      success: true,
-      data: {
-        id: state.contractId,
-        client: state.client,
-        freelancer: state.freelancer,
-        arbiter: state.arbiter,
-        token: state.tokenContractId,
-        funded: false,
-        milestones: MILESTONE_AMOUNTS.map((amount, index) => ({
-          index,
-          amount,
-          status: "Pending",
-        })),
-      },
+    // build-tx also mirrors `xdr` at the top level for older clients.
+    expect(body).toMatchObject({ success: true, data: { xdr: expect.any(String) } });
+    unsignedXdr = body.data.xdr;
+  });
+
+  it("signs the transaction XDR with the client test keypair", () => {
+    const tx = TransactionBuilder.fromXDR(unsignedXdr, state.networkPassphrase) as Transaction;
+    expect(tx.source).toBe(client.publicKey());
+    tx.sign(client);
+    signedXdr = tx.toXDR();
+    expect(tx.signatures).toHaveLength(1);
+  });
+
+  it("POST /api/jobs/submit relays the signed transaction", async () => {
+    const { status, body } = await api("POST", "/api/jobs/submit", {
+      signedXdr,
+      sourceAddress: client.publicKey(),
     });
+
+    expect(status).toBe(200);
+    expect(body.success).toBe(true);
+    expect(body.data.status).not.toBe("ERROR");
+    expect(typeof body.data.hash).toBe("string");
+    txHash = body.data.hash;
+  });
+
+  it("the transaction is applied on-chain", async () => {
+    const result = await server.pollTransaction(txHash, { attempts: 60 });
+    expect(result.status).toBe(Api.GetTransactionStatus.SUCCESS);
+  });
+
+  it("GET /api/jobs/:contractId reports the escrow as funded once the fund event is indexed", async () => {
+    // Job state is cached until the poller indexes the `fund` event and
+    // invalidates it.
+    await waitFor(
+      "GET /api/jobs/:contractId to report funded",
+      async () => {
+        const { body } = await api("GET", `/api/jobs/${state.contractId}`);
+        return body?.data?.funded === true ? true : undefined;
+      },
+      60_000,
+      1_000,
+    );
+    await expectJob(true);
   });
 });
