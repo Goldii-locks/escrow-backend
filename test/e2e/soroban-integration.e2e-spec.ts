@@ -235,6 +235,12 @@ describe("Soroban quickstart E2E: create an escrow through escrow-factory", () =
   let signedXdr: string;
   let escrowId: string;
 
+  it("GET /api/jobs/:factoryId/whitelist lists the tokens the factory allows", async () => {
+    const { status, body } = await api("GET", `/api/jobs/${state.factoryContractId}/whitelist`);
+    expect(status).toBe(200);
+    expect(body.data.tokens).toEqual([state.tokenContractId]);
+  });
+
   it("build-tx create_escrow → client signs → submit deploys and initialises a new escrow", async () => {
     // The arguments the frontend's create page sends.
     const built = await api("POST", "/api/jobs/build-tx", {
