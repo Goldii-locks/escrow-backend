@@ -143,6 +143,8 @@ const stellarAccountField = (field: string) =>
  */
 export const BUILD_TX_ALLOWED_METHODS = [
   "initialize",
+  // escrow-factory: deploys and initialises a new escrow in one call.
+  "create_escrow",
   "fund",
   "mark_delivered",
   "approve_milestone",
@@ -215,6 +217,11 @@ const buildTxU32ValueSchema = z
  * rejected here so malformed input fails with a 400 ValidationError instead
  * of throwing inside the RPC promise and surfacing as a 500.
  */
+/** A Soroban symbol, as used for struct field names and enum variants. */
+const sorobanSymbolSchema = z
+  .string()
+  .regex(/^[A-Za-z0-9_]{1,32}$/, { message: "must be a Soroban symbol (A-Z, a-z, 0-9, _; up to 32)" });
+
 export const buildTxArgSchema: z.ZodTypeAny = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("address"),
@@ -240,6 +247,18 @@ export const buildTxArgSchema: z.ZodTypeAny = z.discriminatedUnion("type", [
     type: z.literal("vec"),
     value: z.array(z.lazy(() => buildTxArgSchema)),
   }),
+  // A #[contracttype] struct, e.g. the escrow's EscrowSettings: field name ->
+  // argument. Encoded as a map with symbol keys in sorted order.
+  z.object({
+    type: z.literal("struct"),
+    value: z
+      .record(sorobanSymbolSchema, z.lazy(() => buildTxArgSchema))
+      .refine((fields) => Object.keys(fields).length > 0, {
+        message: "struct needs at least one field",
+      }),
+  }),
+  // A unit variant of a #[contracttype] enum, e.g. FundingMode::Upfront.
+  z.object({ type: z.literal("enum"), value: sorobanSymbolSchema }),
 ]);
 
 /** POST /build-tx body schema validation */

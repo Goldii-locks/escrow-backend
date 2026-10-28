@@ -7,7 +7,7 @@
  * built with `stellar contract build`.
  */
 import { execFileSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -28,6 +28,7 @@ export interface E2EConfig {
   friendbotUrl: string;
   networkPassphrase: string;
   wasmPath: string;
+  factoryWasmPath: string;
   containerName: string;
   image: string;
   keepNetwork: boolean;
@@ -46,6 +47,8 @@ export interface E2EState {
   freelancer: string;
   arbiter: string;
   milestoneAmounts: string[];
+  /** escrow-factory instance, with the native token allowed. */
+  factoryContractId: string;
   /** Ledger just before the deploy; the backend backfills from here. */
   deployLedger: number;
   /** True when global-setup started the container and teardown owns it. */
@@ -63,6 +66,10 @@ export function loadConfig(): E2EConfig {
     wasmPath: path.resolve(
       process.env.ESCROW_WASM_PATH ??
         "../escrow-contract/target/wasm32v1-none/release/milestone_escrow.wasm",
+    ),
+    factoryWasmPath: path.resolve(
+      process.env.FACTORY_WASM_PATH ??
+        "../escrow-contract/target/wasm32v1-none/release/escrow_factory.wasm",
     ),
     containerName: process.env.E2E_DOCKER_CONTAINER ?? "escrow-backend-e2e-quickstart",
     // Pinned to the same image as escrow-contract's scripts/e2e.sh: its
@@ -222,19 +229,20 @@ export async function invokeContract(
 }
 
 /**
- * Upload the escrow Wasm and instantiate one contract from it. The contract
- * is initialised by its `__constructor`, so the arguments go in here.
+ * Upload a Wasm (if not already on the network) and instantiate one contract
+ * from it, running its `__constructor` with `constructorArgs`.
  */
-export async function deployEscrowContract(
+async function deployContract(
   server: Server,
   config: E2EConfig,
   deployer: Keypair,
+  wasmPath: string,
   constructorArgs: xdr.ScVal[],
 ): Promise<string> {
-  if (!fs.existsSync(config.wasmPath)) {
+  if (!fs.existsSync(wasmPath)) {
     throw new Error(
-      `Escrow Wasm not found at ${config.wasmPath}. Build escrow-contract ` +
-        "(stellar contract build) or set ESCROW_WASM_PATH.",
+      `Wasm not found at ${wasmPath}. Build escrow-contract ` +
+        "(stellar contract build) or set ESCROW_WASM_PATH / FACTORY_WASM_PATH.",
     );
   }
 
@@ -242,7 +250,7 @@ export async function deployEscrowContract(
     server,
     config,
     deployer,
-    Operation.uploadContractWasm({ wasm: fs.readFileSync(config.wasmPath) }),
+    Operation.uploadContractWasm({ wasm: fs.readFileSync(wasmPath) }),
   );
   if (!wasmHash) throw new Error("uploadContractWasm returned no wasm hash");
 
@@ -259,6 +267,31 @@ export async function deployEscrowContract(
   );
   if (!contractAddress) throw new Error("createCustomContract returned no address");
   return Address.fromScVal(contractAddress).toString();
+}
+
+/** Deploy one escrow directly, initialised by its constructor. */
+export function deployEscrowContract(
+  server: Server,
+  config: E2EConfig,
+  deployer: Keypair,
+  constructorArgs: xdr.ScVal[],
+): Promise<string> {
+  return deployContract(server, config, deployer, config.wasmPath, constructorArgs);
+}
+
+/** Deploy the escrow factory; its constructor takes (admin, escrow wasm hash). */
+export function deployFactoryContract(
+  server: Server,
+  config: E2EConfig,
+  deployer: Keypair,
+  constructorArgs: xdr.ScVal[],
+): Promise<string> {
+  return deployContract(server, config, deployer, config.factoryWasmPath, constructorArgs);
+}
+
+/** The hash the network stores a Wasm under: its SHA-256. */
+export function wasmHash(wasmPath: string): Buffer {
+  return createHash("sha256").update(fs.readFileSync(wasmPath)).digest();
 }
 
 /**

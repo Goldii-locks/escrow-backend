@@ -8,6 +8,7 @@ import {
   insertHistoricalEventBatch,
   recordUndecodableEvent,
   getActiveContractIds,
+  getAllContracts,
   getActiveContractsWithPointers,
   updateContractPointer,
   registerContract,
@@ -719,6 +720,9 @@ export function extractOldestLedger(source: unknown): number | undefined {
   if (source instanceof Error) {
     const m = source.message.match(/oldest[^0-9]{0,20}(\d+)/i);
     if (m) return parseInt(m[1], 10);
+    // stellar-rpc: "startLedger must be within the ledger range: 7 - 33".
+    const range = source.message.match(/ledger range:?\s*(\d+)\s*-\s*\d+/i);
+    if (range) return parseInt(range[1], 10);
   }
   return undefined;
 }
@@ -764,14 +768,19 @@ export async function pollEvents(): Promise<boolean> {
       registerContract(factoryContractId, "factory");
     }
 
-    let contractIds: string[] = getActiveContractIds();
-
-    // Fall back to the legacy single CONTRACT_ID env var so existing deployments
-    // keep working without any DB seed step.
-    if (contractIds.length === 0 && process.env.CONTRACT_ID) {
-      registerContract(process.env.CONTRACT_ID, "default");
-      contractIds = [process.env.CONTRACT_ID];
+    // The legacy single CONTRACT_ID env var keeps existing deployments working
+    // without a DB seed step, and stays indexed when FACTORY_CONTRACT_ID is
+    // added alongside it. Only register it when the DB has never seen it, so a
+    // contract an admin deactivated stays deactivated.
+    const legacyContractId = process.env.CONTRACT_ID;
+    if (
+      legacyContractId &&
+      !getAllContracts().some((c) => c.contract_id === legacyContractId)
+    ) {
+      registerContract(legacyContractId, "default");
     }
+
+    const contractIds: string[] = getActiveContractIds();
 
     if (contractIds.length === 0) {
       logger.debug("No CONTRACT_IDs configured – skipping indexer poll");
@@ -908,7 +917,10 @@ export async function pollEvents(): Promise<boolean> {
           let childContractId: string | null = null;
           try {
             const data = JSON.parse(ev.dataJson) as Record<string, unknown>;
+            // escrow-factory's EscrowCreatedEvent names it `escrow`; the
+            // other keys are kept for older event shapes.
             childContractId =
+              (typeof data.escrow === "string" ? data.escrow : null) ||
               (typeof data.contract_id === "string" ? data.contract_id : null) ||
               (typeof data.contractId === "string" ? data.contractId : null) ||
               (typeof data.address === "string" ? data.address : null) ||

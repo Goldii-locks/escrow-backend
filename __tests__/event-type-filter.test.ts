@@ -58,7 +58,7 @@ describe("EVENT_TYPES", () => {
 // ---------------------------------------------------------------------------
 
 describe("buildGetEventsRequest", () => {
-  it("sends a wildcard topic filter, never an EVENT_TYPES enumeration", () => {
+  it("filters by contract only, with no topic filter", () => {
     const request = buildGetEventsRequest({
       startLedger: 42,
       contractIds: ["CONTRACT-ALPHA"],
@@ -68,10 +68,9 @@ describe("buildGetEventsRequest", () => {
     expect(request.filters).toHaveLength(1);
     expect(request.filters[0].type).toBe("contract");
     expect(request.filters[0].contractIds).toEqual(["CONTRACT-ALPHA"]);
-    expect(request.filters[0].topics).toEqual([["*"]]);
-    for (const eventType of EVENT_TYPES) {
-      expect(request.filters[0].topics?.flat()).not.toContain(eventType);
-    }
+    // A positional ["*"] would match one-topic events only, dropping every
+    // event that carries party addresses as extra topics (#739).
+    expect(request.filters[0].topics).toBeUndefined();
   });
 
   it("passes startLedger and limit through, defaulting limit to 100", () => {

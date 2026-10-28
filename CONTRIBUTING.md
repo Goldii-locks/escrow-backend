@@ -74,20 +74,24 @@ opt-in suite under `test/e2e/` runs the real backend against a local Stellar
 network with the escrow contract deployed, covering `create-job-draft` →
 indexer backfill of the constructor's `init` event →
 `GET /api/jobs/by-wallet/:address` → `GET /api/jobs/:contractId` →
-`build-tx fund` → sign → `submit` → `GET /api/jobs/:contractId` (funded).
+`build-tx fund` → sign → `submit` → `GET /api/jobs/:contractId` (funded),
+and creating an escrow through escrow-factory: `build-tx create_escrow` →
+sign → `submit` → the indexer registers it from the factory's `created`
+event → `GET /api/jobs/by-wallet/:address`.
 It runs nightly in CI ([e2e-nightly.yml](./.github/workflows/e2e-nightly.yml))
 and can be started manually from the Actions tab.
 
 Prerequisites:
 
 - Docker, with port `8000` free
-- The compiled escrow contract Wasm. Clone
+- The compiled escrow and escrow-factory Wasm. Clone
   [escrow-contract](https://github.com/Goldii-locks/escrow-contract) next to
-  this repo and build it with [stellar-cli](https://github.com/stellar/stellar-cli)
+  this repo and build both with [stellar-cli](https://github.com/stellar/stellar-cli)
   (soroban-sdk refuses a plain `cargo build`):
   ```bash
   cd ../escrow-contract
   stellar contract build --manifest-path contracts/milestone-escrow/Cargo.toml
+  stellar contract build --manifest-path contracts/escrow-factory/Cargo.toml
   ```
 
 Run it:
@@ -98,8 +102,9 @@ npm run test:e2e
 
 The suite starts `stellar/quickstart --local --enable-soroban-rpc --limits
 unlimited` in Docker (or reuses one already answering on `E2E_RPC_URL`),
-deploys the native XLM token contract and the escrow Wasm with its
-constructor arguments, has the freelancer and arbiter accept the job, then
+deploys the native XLM token contract, the escrow Wasm with its constructor
+arguments and an escrow factory that allows the token, has the freelancer
+and arbiter accept the job, then
 spawns the backend on port `3101` with a throwaway SQLite database. A
 container the suite started is stopped afterwards.
 
@@ -108,6 +113,8 @@ Optional overrides:
 | Variable | Default |
 |---|---|
 | `ESCROW_WASM_PATH` | `../escrow-contract/target/wasm32v1-none/release/milestone_escrow.wasm` |
+| `FACTORY_WASM_PATH` | `../escrow-contract/target/wasm32v1-none/release/escrow_factory.wasm` |
+| `E2E_BACKEND_LOG` | unset; a file path to keep the spawned backend's output |
 | `E2E_RPC_URL` | `http://localhost:8000/soroban/rpc` |
 | `E2E_FRIENDBOT_URL` | `http://localhost:8000/friendbot` |
 | `E2E_NETWORK_PASSPHRASE` | `Standalone Network ; February 2017` |

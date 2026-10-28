@@ -180,10 +180,20 @@ router.post(
             if (a.type === "u64") return nativeToScVal(BigInt(a.value), { type: "u64" });
             if (a.type === "bool") return nativeToScVal(a.value, { type: "bool" });
             // Hex-encoded bytes, e.g. the BytesN<32> milestone spec hashes
-            // `initialize` takes.
+            // and the salt `create_escrow` takes.
             if (a.type === "bytes") return nativeToScVal(Buffer.from(String(a.value), "hex"));
             if (a.type === "vec") {
               return nativeToScVal(a.value.map((item: any) => toScVal(item)));
+            }
+            // A unit enum variant is a one-symbol vec.
+            if (a.type === "enum") return nativeToScVal([a.value], { type: "symbol" });
+            if (a.type === "struct") {
+              // #[contracttype] structs are maps keyed by field symbol, sorted.
+              const fields = Object.keys(a.value).sort();
+              return nativeToScVal(
+                Object.fromEntries(fields.map((f) => [f, toScVal(a.value[f])])),
+                { type: Object.fromEntries(fields.map((f) => [f, ["symbol", null]])) },
+              );
             }
             return nativeToScVal(a.value);
           };

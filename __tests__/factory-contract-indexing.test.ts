@@ -190,4 +190,77 @@ describe("Factory contract indexing and child contract registration (#660)", () 
     expect(returnedContractIds).toContain(CHILD_CONTRACT_1);
     expect(returnedContractIds).toContain(CHILD_CONTRACT_2);
   });
+
+  it("registers the child from escrow-factory's real EscrowCreatedEvent, which names it `escrow`", async () => {
+    process.env.FACTORY_CONTRACT_ID = FACTORY_ID;
+    mockGetLatestLedger.mockResolvedValue({ sequence: 100 });
+    mockGetEvents.mockImplementation(async (params: any) => {
+      const contractIds = params.filters?.[0]?.contractIds ?? params.contractIds ?? [];
+      if (contractIds.includes(FACTORY_ID)) {
+        return {
+          events: [
+            {
+              contractId: { contractId: () => FACTORY_ID },
+              topic: ["created"],
+              ledger: 50,
+              ledgerClosedAt: new Date(50 * 1000).toISOString(),
+              // EscrowCreatedEvent in escrow-contract/contracts/escrow-factory.
+              value: {
+                escrow: CHILD_CONTRACT_1,
+                client: CLIENT_WALLET,
+                freelancer: "GFREELANCER1",
+                arbiter: "GARBITER1",
+                token: "CTOKEN1",
+              },
+            },
+          ],
+        };
+      }
+      if (contractIds.includes(CHILD_CONTRACT_1)) {
+        return {
+          events: [
+            {
+              contractId: { contractId: () => CHILD_CONTRACT_1 },
+              topic: ["init"],
+              ledger: 50,
+              ledgerClosedAt: new Date(50 * 1000).toISOString(),
+              value: { client: CLIENT_WALLET, freelancer: "GFREELANCER1", arbiter: "GARBITER1" },
+            },
+          ],
+        };
+      }
+      return { events: [] };
+    });
+
+    await pollEvents();
+
+    expect(getActiveContractIds()).toContain(CHILD_CONTRACT_1);
+    const jobsResult = await getJobsByWallet(CLIENT_WALLET);
+    expect(jobsResult.jobs.map((j) => j.contract_id)).toEqual([CHILD_CONTRACT_1]);
+  });
+
+  it("keeps indexing the legacy CONTRACT_ID when FACTORY_CONTRACT_ID is set too", async () => {
+    const LEGACY_ID = "CLEGACY0000000000000000000000000000000000000000000000001";
+    process.env.CONTRACT_ID = LEGACY_ID;
+    process.env.FACTORY_CONTRACT_ID = FACTORY_ID;
+    mockGetLatestLedger.mockResolvedValue({ sequence: 100 });
+
+    await pollEvents();
+
+    expect(getActiveContractIds()).toEqual(expect.arrayContaining([LEGACY_ID, FACTORY_ID]));
+  });
+
+  it("does not reactivate a legacy CONTRACT_ID an admin deactivated", async () => {
+    const LEGACY_ID = "CLEGACY0000000000000000000000000000000000000000000000001";
+    testDb
+      .prepare("INSERT INTO monitored_contracts (contract_id, label, active, start_ledger) VALUES (?, ?, 0, 0)")
+      .run(LEGACY_ID, "default");
+    process.env.CONTRACT_ID = LEGACY_ID;
+    process.env.FACTORY_CONTRACT_ID = FACTORY_ID;
+    mockGetLatestLedger.mockResolvedValue({ sequence: 100 });
+
+    await pollEvents();
+
+    expect(getActiveContractIds()).not.toContain(LEGACY_ID);
+  });
 });

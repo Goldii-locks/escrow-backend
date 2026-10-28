@@ -46,9 +46,11 @@ jobs:
             escrow-contract/target
           key: ${{ runner.os }}-e2e-cargo-${{ hashFiles('escrow-contract/**/Cargo.lock') }}
 
-      - name: Build escrow contract Wasm
+      - name: Build escrow and escrow-factory Wasm
         working-directory: escrow-contract
-        run: stellar contract build --manifest-path contracts/milestone-escrow/Cargo.toml
+        run: |
+          stellar contract build --manifest-path contracts/milestone-escrow/Cargo.toml
+          stellar contract build --manifest-path contracts/escrow-factory/Cargo.toml
 
       - name: Start Stellar quickstart
         run: |
@@ -72,6 +74,7 @@ jobs:
         run: npm run test:e2e
         env:
           ESCROW_WASM_PATH: escrow-contract/target/wasm32v1-none/release/milestone_escrow.wasm
+          FACTORY_WASM_PATH: escrow-contract/target/wasm32v1-none/release/escrow_factory.wasm
 
       - name: Quickstart logs on failure
         if: failure()

@@ -1455,6 +1455,10 @@ function recordJobParticipants(
   eventType: string,
   dataJson: string,
 ): void {
+  // escrow-factory's `created` event names the parties too, but the job is the
+  // new escrow, whose own init event records them under the escrow's id; the
+  // factory itself is not anyone's job.
+  if (eventType.toLowerCase() === "created") return;
   try {
     const data = JSON.parse(dataJson) as Record<string, unknown>;
     const insertStmt = db.prepare(
