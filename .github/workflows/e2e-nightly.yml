@@ -35,7 +35,7 @@ jobs:
       # soroban-sdk refuses plain `cargo build` for contracts; it has to be
       # `stellar contract build`. Same version as escrow-contract's E2E.
       - name: Install stellar-cli
-        uses: stellar/stellar-cli@v28.0.0
+        uses: stellar/stellar-cli@v28.1.0
 
       - name: Cache cargo
         uses: actions/cache@v4
