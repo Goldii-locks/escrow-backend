@@ -28,7 +28,7 @@ jobs:
           path: escrow-contract
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@1.96.0
+        uses: dtolnay/rust-toolchain@1.120.0
         with:
           targets: wasm32v1-none
 
