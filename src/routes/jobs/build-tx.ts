@@ -178,7 +178,8 @@ router.post(
             if (a.type === "i128") return nativeToScVal(BigInt(a.value), { type: "i128" });
             if (a.type === "u32") return nativeToScVal(a.value, { type: "u32" });
             if (a.type === "u64") return nativeToScVal(BigInt(a.value), { type: "u64" });
-            if (a.type === "bool") return nativeToScVal(a.value, { type: "bool" });
+            // A JS boolean always becomes scvBool; SDK v16 no longer types `type: "bool"`.
+            if (a.type === "bool") return nativeToScVal(a.value);
             // Hex-encoded bytes, e.g. the BytesN<32> milestone spec hashes
             // and the salt `create_escrow` takes.
             if (a.type === "bytes") return nativeToScVal(Buffer.from(String(a.value), "hex"));
