@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backend-config
+  namespace: milestone
+  labels:
+    app.kubernetes.io/name: backend-config
+    app.kubernetes.io/part-of: milestone
+    app.kubernetes.io/component: backend
+data:
+  PORT: "3001"
+  DB_PATH: /app/data/escrow.db
+  TRUST_PROXY_HOPS: "1"
+  LOG_LEVEL: info
+  SOROBAN_RPC_URL: https://soroban-testnet.stellar.org
+  SOROBAN_NETWORK_PASSPHRASE: "Test SDF Network ; September 2015"
+  # Comma-separated list of origins (src/middleware/job-contract-security.ts).
+  ALLOWED_ORIGINS: http://localhost:8080
+  # Public testnet contract; see escrow-contract/README.md "Deployed Contract".
+  CONTRACT_ID: CARZQMYKDGA4TTIE2XBDJ42EX27VYLLJGGG4WGUIXXWIVHPDTX3UCLJA
