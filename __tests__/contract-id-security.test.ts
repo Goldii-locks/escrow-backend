@@ -1,11 +1,19 @@
+import { jest } from "@jest/globals";
 import request from "supertest";
 import express from "express";
 import Database from "better-sqlite3";
 import { initSchema, setDb } from "../src/indexer/db.js";
 import { getAllowedOrigins } from "../src/middleware/job-contract-security.js";
+import { server } from "../src/utils/soroban-call.js";
 
 const VALID_CONTRACT =
   "CDD5WKK3WT3QVKXMXTJNDIXE4T73FK6GGXDSD6UTJAH6YYZU52SQ4MUH";
+
+// No live RPC in unit tests: the contract call fails the way a missing job does.
+const stubSimulation = () =>
+  jest.spyOn(server, "simulateTransaction").mockResolvedValue({
+    error: "HostError: Error(Contract, #2)",
+  } as never);
 
 let testDb: Database.Database;
 let app: express.Express;
@@ -49,10 +57,12 @@ describe("GET /api/jobs/:contractId – CORS and security headers", () => {
   const originalAllowedOrigins = process.env.ALLOWED_ORIGINS;
 
   beforeEach(() => {
+    stubSimulation();
     process.env.ALLOWED_ORIGINS = "https://trusted.example.com";
   });
 
   afterEach(() => {
+    jest.restoreAllMocks();
     if (originalAllowedOrigins === undefined) {
       delete process.env.ALLOWED_ORIGINS;
     } else {

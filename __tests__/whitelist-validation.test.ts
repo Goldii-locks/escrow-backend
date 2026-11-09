@@ -1,7 +1,9 @@
 // __tests__/whitelist-validation.test.ts
+import { jest } from "@jest/globals";
 import request from "supertest";
 import express from "express";
 import router from "../src/routes/jobs.js";
+import { server } from "../src/utils/soroban-call.js";
 
 const app = express();
 app.use(express.json());
@@ -27,9 +29,14 @@ describe('GET /api/jobs/:contractId/whitelist – address validation', () => {
   });
 
   it('does not return 400 for a syntactically valid contractId', async () => {
+    // No live RPC in unit tests: the contract call fails the way a missing job does.
+    jest.spyOn(server, "simulateTransaction").mockResolvedValue({
+      error: "HostError: Error(Contract, #2)",
+    } as never);
     const VALID_CONTRACT = "CDD5WKK3WT3QVKXMXTJNDIXE4T73FK6GGXDSD6UTJAH6YYZU52SQ4MUH";
     const res = await request(app)
       .get(`/api/jobs/${VALID_CONTRACT}/whitelist`);
     expect(res.status).not.toBe(400);
+    jest.restoreAllMocks();
   });
 });
