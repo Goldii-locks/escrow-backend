@@ -1,10 +1,18 @@
+import { jest } from "@jest/globals";
 import request from "supertest";
 import express from "express";
 import router from "../src/routes/jobs.js";
 import { resetJobContractRateLimitBuckets } from "../src/middleware/job-contract-rate-limit.js";
+import { server } from "../src/utils/soroban-call.js";
 
 const VALID_CONTRACT =
   "CDD5WKK3WT3QVKXMXTJNDIXE4T73FK6GGXDSD6UTJAH6YYZU52SQ4MUH";
+
+// No live RPC in unit tests: the contract call fails the way a missing job does.
+const stubSimulation = () =>
+  jest.spyOn(server, "simulateTransaction").mockResolvedValue({
+    error: "HostError: Error(Contract, #2)",
+  } as never);
 
 const app = express();
 app.use(express.json());
@@ -15,12 +23,14 @@ describe("GET /api/jobs/:contractId – rate limiting", () => {
   const originalWindow = process.env.JOB_CONTRACT_RATE_WINDOW_MS;
 
   beforeEach(() => {
+    stubSimulation();
     resetJobContractRateLimitBuckets();
     process.env.JOB_CONTRACT_RATE_MAX = "3";
     process.env.JOB_CONTRACT_RATE_WINDOW_MS = "60000";
   });
 
   afterEach(() => {
+    jest.restoreAllMocks();
     resetJobContractRateLimitBuckets();
     if (originalMax === undefined) {
       delete process.env.JOB_CONTRACT_RATE_MAX;
