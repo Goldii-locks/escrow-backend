@@ -381,7 +381,9 @@ function readEventType(raw: Api.EventResponse): string {
   if (typeof topic === "string") return topic;
   if (topic === undefined || topic === null) return "unknown";
   try {
-    return String(scValToNative(topic));
+    // SDK v17 returns undefined for a malformed ScVal instead of throwing.
+    const native = scValToNative(topic);
+    return native === undefined || native === null ? "unknown" : String(native);
   } catch {
     return "unknown";
   }

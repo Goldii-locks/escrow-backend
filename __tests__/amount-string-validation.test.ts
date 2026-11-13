@@ -57,12 +57,14 @@ const PARTIAL_RELEASE = `/api/jobs/${VALID_CONTRACT}/milestones/0/partial-releas
 
 /** Decodes the contract-call arguments from a returned XDR as native values. */
 function decodeInvokeArgs(envelope: string): unknown[] {
-  const tx = TransactionBuilder.fromXDR(envelope, Networks.TESTNET) as Transaction;
-  const op = tx.operations[0] as any;
-  return op.func
-    .invokeContract()
-    .args()
-    .map((arg: any) => scValToNative(arg));
+  const tx = TransactionBuilder.fromXdr(envelope, Networks.TESTNET) as Transaction;
+  const op = tx.operations[0];
+  // SDK v17 XDR unions are discriminated classes: narrow on `.type`, then read
+  // the arm as a property.
+  if (op.type !== "invokeHostFunction" || op.func.type !== "hostFunctionTypeInvokeContract") {
+    throw new Error(`expected an invokeContract operation, got ${op.type}`);
+  }
+  return op.func.invokeContract.args.map((arg) => scValToNative(arg));
 }
 
 beforeEach(() => {

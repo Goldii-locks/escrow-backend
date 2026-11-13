@@ -22,7 +22,7 @@
     "axios": "^1.18.1"
   },
   "dependencies": {
-    "@stellar/stellar-sdk": "^16.4.1",
+    "@stellar/stellar-sdk": "^17.4.0",
     "better-sqlite3": "^12.11.1",
     "cors": "^2.8.6",
     "dotenv": "^18.0.8",

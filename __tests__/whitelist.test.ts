@@ -856,9 +856,10 @@ describe("GET /api/jobs/:contractId/whitelist", () => {
     const FACTORY = "CAVM6I3Z7AEWISCCRIC3PPLURGINAIUB45EFJ5DUENQEH4334JBFS4Y3";
     const calledMethod = () => {
       const tx = (mockSimulateTransaction.mock.calls[0] as unknown[])[0] as {
-        operations: Array<{ func: { invokeContract: () => { functionName: () => unknown } } }>;
+        operations: Array<{ func: { invokeContract: { functionName: unknown } } }>;
       };
-      return String(tx.operations[0].func.invokeContract().functionName());
+      // SDK v17: union arms and struct fields are properties, not methods.
+      return String(tx.operations[0].func.invokeContract.functionName);
     };
 
     afterEach(() => {

@@ -407,19 +407,11 @@ describe("POST /api/jobs/build-tx — contract argument type mapping", () => {
     const res = await request(app).post("/api/jobs/build-tx").send(body).expect(200);
     expect(res.body).toEqual({ success: true, data: { xdr: "AAAAAQ==" }, xdr: "AAAAAQ==" });
 
-    const tx = (mockPrepareTransaction.mock.calls[0] as unknown[])[0] as { toXDR: () => string };
-    const envelope = StellarXdr.TransactionEnvelope.fromXDR(tx.toXDR(), "base64");
-    const hostFn = envelope
-      .v1()
-      .tx()
-      .operations()[0].body()
-      .invokeHostFunctionOp()
-      .hostFunction();
-    const vecArg = hostFn.invokeContract().args()[0];
-    expect(vecArg.switch().name).toBe("scvVec");
-    const elements = vecArg.vec() ?? [];
+    const [vecArg] = firstInvokedArgs().args;
+    expect(vecArg.type).toBe("scvVec");
+    const elements = vecItems(vecArg);
     expect(elements).toHaveLength(1);
-    expect(elements[0].switch().name).toBe("scvAddress");
+    expect(elements[0].type).toBe("scvAddress");
   });
 
   it("encodes a nested vec of i128 correctly (#619)", async () => {
@@ -435,29 +427,44 @@ describe("POST /api/jobs/build-tx — contract argument type mapping", () => {
     const res = await request(app).post("/api/jobs/build-tx").send(body).expect(200);
     expect(res.body).toEqual({ success: true, data: { xdr: "AAAAAQ==" }, xdr: "AAAAAQ==" });
 
-    const tx = (mockPrepareTransaction.mock.calls[0] as unknown[])[0] as { toXDR: () => string };
-    const envelope = StellarXdr.TransactionEnvelope.fromXDR(tx.toXDR(), "base64");
-    const hostFn = envelope
-      .v1()
-      .tx()
-      .operations()[0].body()
-      .invokeHostFunctionOp()
-      .hostFunction();
-    const outer = hostFn.invokeContract().args()[0];
-    expect(outer.switch().name).toBe("scvVec");
-    const inner = (outer.vec() ?? [])[0];
-    expect(inner.switch().name).toBe("scvVec");
-    const leaves = inner.vec() ?? [];
+    const [outer] = firstInvokedArgs().args;
+    expect(outer.type).toBe("scvVec");
+    const [inner] = vecItems(outer);
+    expect(inner.type).toBe("scvVec");
+    const leaves = vecItems(inner);
     expect(leaves).toHaveLength(1);
     expect(scValToNative(leaves[0])).toBe(100n);
   });
 
+  // SDK v17 XDR unions are discriminated classes: narrow on `.type`, then read
+  // the arm as a property.
   function firstInvokedArgs() {
-    const tx = (mockPrepareTransaction.mock.calls[0] as unknown[])[0] as { toXDR: () => string };
-    const envelope = StellarXdr.TransactionEnvelope.fromXDR(tx.toXDR(), "base64");
-    const call = envelope.v1().tx().operations()[0].body().invokeHostFunctionOp().hostFunction()
-      .invokeContract();
-    return { method: call.functionName().toString(), args: call.args() };
+    const tx = (mockPrepareTransaction.mock.calls[0] as unknown[])[0] as { toXdr: () => string };
+    const envelope = StellarXdr.TransactionEnvelope.fromXdr(tx.toXdr(), "base64");
+    if (envelope.type !== "envelopeTypeTx") throw new Error(`unexpected envelope ${envelope.type}`);
+    const body = envelope.v1.tx.operations[0].body;
+    if (body.type !== "invokeHostFunction") throw new Error(`unexpected operation ${body.type}`);
+    const hostFn = body.invokeHostFunctionOp.hostFunction;
+    if (hostFn.type !== "hostFunctionTypeInvokeContract") {
+      throw new Error(`unexpected host function ${hostFn.type}`);
+    }
+    const call = hostFn.invokeContract;
+    return { method: call.functionName.toString(), args: call.args };
+  }
+
+  function vecItems(val: StellarXdr.ScVal): StellarXdr.ScVal[] {
+    if (val.type !== "scvVec") throw new Error(`expected scvVec, got ${val.type}`);
+    return val.vec ?? [];
+  }
+
+  function mapEntries(val: StellarXdr.ScVal): StellarXdr.ScMapEntry[] {
+    if (val.type !== "scvMap") throw new Error(`expected scvMap, got ${val.type}`);
+    return val.map ?? [];
+  }
+
+  function symbolText(val: StellarXdr.ScVal): string {
+    if (val.type !== "scvSymbol") throw new Error(`expected scvSymbol, got ${val.type}`);
+    return val.sym.toString();
   }
 
   it("encodes an enum arg as a single-symbol vec, like a #[contracttype] unit variant", async () => {
@@ -465,10 +472,10 @@ describe("POST /api/jobs/build-tx — contract argument type mapping", () => {
     await request(app).post("/api/jobs/build-tx").send(body).expect(200);
 
     const [arg] = firstInvokedArgs().args;
-    expect(arg.switch().name).toBe("scvVec");
-    const items = arg.vec() ?? [];
+    expect(arg.type).toBe("scvVec");
+    const items = vecItems(arg);
     expect(items).toHaveLength(1);
-    expect(items[0].sym().toString()).toBe("Upfront");
+    expect(symbolText(items[0])).toBe("Upfront");
   });
 
   it("encodes a struct arg as a map with sorted symbol keys", async () => {
@@ -488,16 +495,16 @@ describe("POST /api/jobs/build-tx — contract argument type mapping", () => {
     await request(app).post("/api/jobs/build-tx").send(body).expect(200);
 
     const [arg] = firstInvokedArgs().args;
-    expect(arg.switch().name).toBe("scvMap");
-    const entries = arg.map() ?? [];
-    expect(entries.map((e) => e.key().sym().toString())).toEqual([
+    expect(arg.type).toBe("scvMap");
+    const entries = mapEntries(arg);
+    expect(entries.map((e) => symbolText(e.key))).toEqual([
       "arbiter_fee_bps",
       "dispute_timeout_seconds",
       "funding_mode",
     ]);
-    expect(scValToNative(entries[0].val())).toBe(0);
-    expect(scValToNative(entries[1].val())).toBe(2592000n);
-    expect(entries[2].val().switch().name).toBe("scvVec");
+    expect(scValToNative(entries[0].val)).toBe(0);
+    expect(scValToNative(entries[1].val)).toBe(2592000n);
+    expect(entries[2].val.type).toBe("scvVec");
   });
 
   it("builds an escrow-factory create_escrow call with all nine arguments", async () => {
@@ -527,7 +534,7 @@ describe("POST /api/jobs/build-tx — contract argument type mapping", () => {
 
     const { method, args } = firstInvokedArgs();
     expect(method).toBe("create_escrow");
-    expect(args.map((a) => a.switch().name)).toEqual([
+    expect(args.map((a) => a.type)).toEqual([
       "scvAddress",
       "scvAddress",
       "scvAddress",
