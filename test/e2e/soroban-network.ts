@@ -252,7 +252,8 @@ async function deployContract(
     deployer,
     Operation.uploadContractWasm({ wasm: fs.readFileSync(wasmPath) }),
   );
-  if (!wasmHash) throw new Error("uploadContractWasm returned no wasm hash");
+  // SDK v17: narrow the ScVal union on `.type`; the bytes arm is a property.
+  if (wasmHash?.type !== "scvBytes") throw new Error("uploadContractWasm returned no wasm hash");
 
   const contractAddress = await invoke(
     server,
@@ -260,7 +261,7 @@ async function deployContract(
     deployer,
     Operation.createCustomContract({
       address: Address.fromString(deployer.publicKey()),
-      wasmHash: wasmHash.bytes(),
+      wasmHash: wasmHash.bytes.toBytes(),
       salt: randomBytes(32),
       constructorArgs,
     }),
