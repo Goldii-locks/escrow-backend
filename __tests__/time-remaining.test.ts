@@ -6,7 +6,7 @@ import { resetTimeRemainingRateLimitBuckets } from "../src/middleware/job-contra
 
 
 const VALID_CONTRACT =
-  "CDD5WKK3WT3QVKXMXTJNDIXE4T73FK6GGXDSD6UTJAH6YYZU52SQ4MUH";
+  "CARZQMYKDGA4TTIE2XBDJ42EX27VYLLJGGG4WGUIXXWIVHPDTX3UCLJA";
 
 let testDb: Database.Database;
 let app: express.Express;

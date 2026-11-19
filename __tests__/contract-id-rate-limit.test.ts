@@ -6,7 +6,7 @@ import { resetJobContractRateLimitBuckets } from "../src/middleware/job-contract
 import { server } from "../src/utils/soroban-call.js";
 
 const VALID_CONTRACT =
-  "CDD5WKK3WT3QVKXMXTJNDIXE4T73FK6GGXDSD6UTJAH6YYZU52SQ4MUH";
+  "CARZQMYKDGA4TTIE2XBDJ42EX27VYLLJGGG4WGUIXXWIVHPDTX3UCLJA";
 
 // No live RPC in unit tests: the contract call fails the way a missing job does.
 const stubSimulation = () =>

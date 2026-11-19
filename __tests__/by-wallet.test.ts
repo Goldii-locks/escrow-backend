@@ -524,7 +524,7 @@ describe("GET /api/jobs/by-wallet/:address – Zod middleware", () => {
   it("returns 400 for a contract address (C…) used as wallet", async () => {
     const res = await request(app)
       .get(
-        "/api/jobs/by-wallet/CDD5WKK3WT3QVKXMXTJNDIXE4T73FK6GGXDSD6UTJAH6YYZU52SQ4MUH",
+        "/api/jobs/by-wallet/CARZQMYKDGA4TTIE2XBDJ42EX27VYLLJGGG4WGUIXXWIVHPDTX3UCLJA",
       )
       .expect(400);
 

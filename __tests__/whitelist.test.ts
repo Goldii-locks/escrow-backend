@@ -13,7 +13,7 @@ const TOKEN_B = testAddress(18);
 const TOKEN_C = testAddress(19);
 const TOKEN_X = testAddress(20);
 const VALID_CONTRACT =
-  "CDD5WKK3WT3QVKXMXTJNDIXE4T73FK6GGXDSD6UTJAH6YYZU52SQ4MUH";
+  "CARZQMYKDGA4TTIE2XBDJ42EX27VYLLJGGG4WGUIXXWIVHPDTX3UCLJA";
 
 const mockGetAccount = jest.fn<() => Promise<unknown>>();
 const mockSimulateTransaction = jest.fn<() => Promise<unknown>>();
@@ -531,7 +531,9 @@ describe("GET /api/jobs/:contractId/whitelist", () => {
     });
 
     it("returns 400 for a contractId with an invalid Stellar checksum", async () => {
-      const invalidChecksum = VALID_CONTRACT.slice(0, -1) + "A";
+      // Change the last character; it must differ from the original.
+      const last = VALID_CONTRACT.slice(-1);
+      const invalidChecksum = VALID_CONTRACT.slice(0, -1) + (last === "A" ? "B" : "A");
       const res = await request(buildApp())
         .get(`/api/jobs/${invalidChecksum}/whitelist`)
         .expect(400);

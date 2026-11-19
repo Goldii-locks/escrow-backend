@@ -27,7 +27,7 @@ const {
 } = await import("../src/utils/webhook_dispatcher.js");
 
 const CONTRACT_A =
-  "CDD5WKK3WT3QVKXMXTJNDIXE4T73FK6GGXDSD6UTJAH6YYZU52SQ4MUH";
+  "CARZQMYKDGA4TTIE2XBDJ42EX27VYLLJGGG4WGUIXXWIVHPDTX3UCLJA";
 const WEBHOOK_URL = "https://example.com/webhook";
 
 let testDb: Database.Database;

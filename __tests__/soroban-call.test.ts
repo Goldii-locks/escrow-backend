@@ -2,7 +2,7 @@ import { jest } from "@jest/globals";
 import { nativeToScVal } from "@stellar/stellar-sdk";
 
 const VALID_CONTRACT =
-  "CDD5WKK3WT3QVKXMXTJNDIXE4T73FK6GGXDSD6UTJAH6YYZU52SQ4MUH";
+  "CARZQMYKDGA4TTIE2XBDJ42EX27VYLLJGGG4WGUIXXWIVHPDTX3UCLJA";
 const SOURCE = "GAODBHVR63Z56MVQRBEJSYM2H5423LJ4WAPUUBOFG4JYY72S6ROKVZRX";
 
 const mockGetAccount = jest.fn<(address: string) => Promise<unknown>>();

@@ -11,6 +11,7 @@ import {
 } from "./ledger-range-tracker.js";
 import logger from "../utils/logger.js";
 import { rpcAllowHttp } from "../utils/rpc-allow-http.js";
+import { config } from "../config.js";
 
 /**
  * RpcPollerClient wraps the Stellar RPC Server with exponential backoff retry
@@ -742,7 +743,12 @@ export class RpcPollerClient {
   private readonly queue: RpcEventQueue;
 
   constructor(rpcUrl: string, options: RpcPollerClientOptions = {}) {
-    this.server = options.server ?? new Server(rpcUrl, { allowHttp: rpcAllowHttp(rpcUrl) });
+    this.server =
+      options.server ??
+      new Server(rpcUrl, {
+        allowHttp: rpcAllowHttp(rpcUrl),
+        timeout: config.rpcTimeoutMs,
+      });
     this.config = {
       maxRetries: options.maxRetries ?? DEFAULT_CONFIG.maxRetries,
       initialBackoffMs:
