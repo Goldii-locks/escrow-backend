@@ -4,6 +4,7 @@ import type { AddressInfo } from "net";
 import {
   shutdown,
   closeHttpServer,
+  registerShutdownHandlers,
   type ShutdownDeps,
 } from "../src/shutdown.js";
 
@@ -77,5 +78,114 @@ describe("graceful shutdown (#623)", () => {
     expect(await res.json()).toEqual({ ok: true });
     expect(d.closeDb).toHaveBeenCalledTimes(1);
     expect(d.exit).toHaveBeenCalledWith(0);
+  });
+});
+
+describe("registerShutdownHandlers (#950)", () => {
+  function register(overrides: Partial<ShutdownDeps> = {}) {
+    const beforeTerm = process.listeners("SIGTERM") as Array<() => void>;
+    const beforeInt = process.listeners("SIGINT") as Array<() => void>;
+    registerShutdownHandlers({} as any, overrides);
+    const sigterm = (process.listeners("SIGTERM") as Array<() => void>).find(
+      (listener) => !beforeTerm.includes(listener)
+    );
+    const sigint = (process.listeners("SIGINT") as Array<() => void>).find(
+      (listener) => !beforeInt.includes(listener)
+    );
+    if (!sigterm || !sigint) throw new Error("shutdown listeners were not registered");
+    return {
+      sigterm,
+      sigint,
+      cleanup: () => {
+        process.off("SIGTERM", sigterm);
+        process.off("SIGINT", sigint);
+      },
+    };
+  }
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+  });
+
+  afterEach(() => {
+    jest.clearAllTimers();
+    jest.useRealTimers();
+  });
+
+  it("drains on SIGTERM using injected dependencies", async () => {
+    const d = deps();
+    const { sigterm, cleanup } = register(d);
+    try {
+      sigterm();
+      await jest.advanceTimersByTimeAsync(0);
+      expect(d.stopPoller).toHaveBeenCalledTimes(1);
+      expect(d.closeServer).toHaveBeenCalledTimes(1);
+      expect(d.closeDb).toHaveBeenCalledTimes(1);
+      expect(d.exit).toHaveBeenCalledWith(0);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("ignores a second signal while shutting down", async () => {
+    const d = deps();
+    const { sigterm, cleanup } = register(d);
+    try {
+      sigterm();
+      await jest.advanceTimersByTimeAsync(0);
+      sigterm();
+      await jest.advanceTimersByTimeAsync(0);
+      expect(d.stopPoller).toHaveBeenCalledTimes(1);
+      expect(d.exit).toHaveBeenCalledTimes(1);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("exits 1 when closeServer rejects", async () => {
+    const d = deps({
+      closeServer: jest.fn(async () => {
+        throw new Error("close failed");
+      }),
+    });
+    const { sigterm, cleanup } = register(d);
+    try {
+      sigterm();
+      await jest.advanceTimersByTimeAsync(0);
+      expect(d.exit).toHaveBeenCalledWith(1);
+      expect(d.closeDb).not.toHaveBeenCalled();
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("force-exits 1 after timeoutMs when the drain never settles", async () => {
+    const d = deps({
+      timeoutMs: 1000,
+      closeServer: jest.fn(() => new Promise<void>(() => {})),
+    });
+    const { sigterm, cleanup } = register(d);
+    try {
+      sigterm();
+      await jest.advanceTimersByTimeAsync(999);
+      expect(d.exit).not.toHaveBeenCalled();
+      await jest.advanceTimersByTimeAsync(1);
+      expect(d.exit).toHaveBeenCalledWith(1);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("handles SIGINT as well as SIGTERM", async () => {
+    const d = deps();
+    const { sigint, cleanup } = register(d);
+    try {
+      sigint();
+      await jest.advanceTimersByTimeAsync(0);
+      expect(d.stopPoller).toHaveBeenCalledTimes(1);
+      expect(d.exit).toHaveBeenCalledWith(0);
+    } finally {
+      cleanup();
+    }
   });
 });
