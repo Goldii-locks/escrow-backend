@@ -1,12 +1,21 @@
+import { jest } from "@jest/globals";
 import request from "supertest";
 import express from "express";
-import {
+
+// The strict limiter is configured with max 0 under NODE_ENV=test, which
+// rejects every request; bypass it like the other route suites do.
+jest.unstable_mockModule("../src/middleware/rateLimiter.js", () => ({
+  strictLimiter: (_req: any, _res: any, next: any) => next(),
+  generalLimiter: (_req: any, _res: any, next: any) => next(),
+}));
+
+const {
   resolveTokenMetadata,
   setTokenMetadataSimulatorForTests,
   clearTokenMetadataCache,
   getTokenLabel,
-} from "../src/utils/token-metadata.js";
-import tokenRoutes from "../src/routes/tokens.js";
+} = await import("../src/utils/token-metadata.js");
+const { default: tokenRoutes } = await import("../src/routes/tokens.js");
 
 const TOKEN = "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC";
 const NON_TOKEN = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4";

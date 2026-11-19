@@ -30,7 +30,9 @@ function tmpDbPath(): string {
 afterEach(() => {
   try {
     closeDb();
-  } catch {}
+  } catch {
+    // already closed by the test
+  }
   delete process.env.DB_PATH;
 });
 

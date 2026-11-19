@@ -100,7 +100,9 @@ function createPreMigrationBackup(database: Database.Database, nextVersion: numb
   }
   const backupPath = `${dbPath}.pre-v${nextVersion}.bak`;
   try {
-    database.backup(backupPath);
+    // Synchronous snapshot: better-sqlite3's backup() is async and would race
+    // the migrations it is meant to protect.
+    fs.writeFileSync(backupPath, database.serialize());
     lastPreMigrationBackupPath = backupPath;
     logger.info("Created pre-migration SQLite backup", {
       backupPath,
@@ -805,6 +807,24 @@ export function runMigrations(
 
   try {
   const database = getDb();
+  lastPreMigrationBackupPath = null;
+
+  // Snapshot the database before any pending migration touches it. This runs
+  // outside the migration transaction so the backup holds the committed,
+  // pre-migration state.
+  const hasMigrationsTable = database
+    .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations'")
+    .get();
+  const pendingBeforeRun = MIGRATIONS.filter(
+    (migration) =>
+      !hasMigrationsTable ||
+      !database
+        .prepare("SELECT 1 FROM schema_migrations WHERE version = ?")
+        .get(migration.version),
+  );
+  if (pendingBeforeRun.length > 0) {
+    createPreMigrationBackup(database, pendingBeforeRun[0].version);
+  }
 
   const runAll = database.transaction(() => {
   // Bootstrap: create the migrations tracking table if it doesn't exist yet
@@ -824,16 +844,6 @@ export function runMigrations(
       UNIQUE(contract_id, webhook_url)
     );
   `);
-
-  const pending = MIGRATIONS.filter(
-    (migration) =>
-      !database
-        .prepare("SELECT 1 FROM schema_migrations WHERE version = ?")
-        .get(migration.version),
-  );
-  if (pending.length > 0) {
-    createPreMigrationBackup(database, pending[0].version);
-  }
 
   for (const migration of MIGRATIONS) {
     const applied = database
