@@ -9,7 +9,7 @@ import { Keypair, nativeToScVal, xdr } from "@stellar/stellar-sdk";
  * frontend calls (read-only query, whitelisted-tokens alias, auto-release).
  */
 
-const VALID_CONTRACT = "CDD5WKK3WT3QVKXMXTJNDIXE4T73FK6GGXDSD6UTJAH6YYZU52SQ4MUH";
+const VALID_CONTRACT = "CARZQMYKDGA4TTIE2XBDJ42EX27VYLLJGGG4WGUIXXWIVHPDTX3UCLJA";
 
 const mockGetAccount = jest.fn<() => Promise<unknown>>();
 const mockSimulateTransaction = jest.fn<() => Promise<unknown>>();

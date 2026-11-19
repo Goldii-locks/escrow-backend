@@ -9,7 +9,7 @@ import {
 } from "../src/middleware/job-contract-rate-limit.js";
 
 const VALID_CONTRACT =
-  "CDD5WKK3WT3QVKXMXTJNDIXE4T73FK6GGXDSD6UTJAH6YYZU52SQ4MUH";
+  "CARZQMYKDGA4TTIE2XBDJ42EX27VYLLJGGG4WGUIXXWIVHPDTX3UCLJA";
 
 // Valid Stellar account addresses (G...) and contract address (C...)
 const VALID_STELLAR_ADDRESS_1 =

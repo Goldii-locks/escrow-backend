@@ -9,7 +9,7 @@ import { jobScVal, CLIENT, FREELANCER, ARBITER, TOKEN } from "./helpers/scval-fi
 const masked = (address: string): string => `${address.slice(0, 4)}\u2026${address.slice(-4)}`;
 
 const VALID_CONTRACT =
-  "CDD5WKK3WT3QVKXMXTJNDIXE4T73FK6GGXDSD6UTJAH6YYZU52SQ4MUH";
+  "CARZQMYKDGA4TTIE2XBDJ42EX27VYLLJGGG4WGUIXXWIVHPDTX3UCLJA";
 
 const mockGetAccount = jest.fn<() => Promise<unknown>>();
 const mockSimulateTransaction = jest.fn<() => Promise<unknown>>();

@@ -33,7 +33,7 @@ describe('GET /api/jobs/:contractId/whitelist – address validation', () => {
     jest.spyOn(server, "simulateTransaction").mockResolvedValue({
       error: "HostError: Error(Contract, #2)",
     } as never);
-    const VALID_CONTRACT = "CDD5WKK3WT3QVKXMXTJNDIXE4T73FK6GGXDSD6UTJAH6YYZU52SQ4MUH";
+    const VALID_CONTRACT = "CARZQMYKDGA4TTIE2XBDJ42EX27VYLLJGGG4WGUIXXWIVHPDTX3UCLJA";
     const res = await request(app)
       .get(`/api/jobs/${VALID_CONTRACT}/whitelist`);
     expect(res.status).not.toBe(400);

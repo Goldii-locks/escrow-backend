@@ -87,7 +87,9 @@ let failoverNodeSelected = false;
 
 /** Pick the healthiest configured node and rebuild the client against it. */
 async function selectRpcNode(): Promise<void> {
-  const selected = await createFailoverServer(RPC_URLS, (url) => new Server(url, { allowHttp: rpcAllowHttp(url) }));
+  const selected = await createFailoverServer(RPC_URLS, (url) =>
+    new Server(url, { allowHttp: rpcAllowHttp(url), timeout: config.rpcTimeoutMs })
+  );
   failoverNodeSelected = true;
   if (!selected) return;
   if (selected.nodeUrl !== activeNodeUrl) {
@@ -727,7 +729,28 @@ export function extractOldestLedger(source: unknown): number | undefined {
   return undefined;
 }
 
+/**
+ * Poll-cycle generation (#954). The watchdog abandons a cycle that overruns
+ * its deadline and the loop starts the next one, but the abandoned
+ * pollEvents() keeps running in the background. It checks this counter after
+ * each RPC response and before writing, so it stops instead of racing the
+ * newer cycle on events, ledger pointers and webhook delivery.
+ */
+let pollCycleGeneration = 0;
+
+/** Thrown inside pollEvents() when its cycle was abandoned by the watchdog. */
+class AbandonedPollCycleError extends Error {
+  constructor() {
+    super("Poll cycle was abandoned by the watchdog; stopping before writing");
+    this.name = "AbandonedPollCycleError";
+  }
+}
+
 export async function pollEvents(): Promise<boolean> {
+  const generation = pollCycleGeneration;
+  const ensureCurrentCycle = (): void => {
+    if (generation !== pollCycleGeneration) throw new AbandonedPollCycleError();
+  };
   const pollStartedAt = performance.now();
   const pollStart = performance.now();
 
@@ -902,6 +925,7 @@ export async function pollEvents(): Promise<boolean> {
       let lastStoredLedger = pointer;
       for (let page = 0; page < maxPagesPerPoll; page++) {
         const events = await fetchPageRetentionAware(startLedger, cursor);
+        ensureCurrentCycle();
 
         const pageEvents: any[] = (events as any).events ?? [];
         // Build the batch to be written atomically (#84)
@@ -944,6 +968,7 @@ export async function pollEvents(): Promise<boolean> {
                 limit: pageLimit,
               }),
             );
+            ensureCurrentCycle();
             const childPage: any[] = (childEvents as any).events ?? [];
             const childBatch: EventRow[] = decodeEventsIsolated(
               childPage,
@@ -961,6 +986,7 @@ export async function pollEvents(): Promise<boolean> {
                   );
             updateContractPointer(childContractId, childLedger);
           } catch (childErr) {
+            if (childErr instanceof AbandonedPollCycleError) throw childErr;
             logger.warn("Failed immediate poll for new child contract, will catch up next cycle", {
               childContractId,
               error: formatError(childErr),
@@ -985,6 +1011,7 @@ export async function pollEvents(): Promise<boolean> {
 
         // Persist the page and advance both pointers atomically per page.
         // Called even with an empty batch so the global pointer advances.
+        ensureCurrentCycle();
         await enqueueEventInsert(batch, newLedger);
 
         // Advance each contract in the group to the stored ledger (#720).
@@ -1001,6 +1028,7 @@ export async function pollEvents(): Promise<boolean> {
     }
 
     // Record success for any poll that completes without throwing, even idle cycles.
+    ensureCurrentCycle();
     const totalElapsed = performance.now() - pollStart;
     failureMonitor.recordSuccess();
     await recordActiveNodeSuccess();
@@ -1037,6 +1065,12 @@ export async function pollEvents(): Promise<boolean> {
 
     return true;
   } catch (err) {
+    // The watchdog already recorded this cycle's failure, and a newer cycle
+    // owns the pointers and interval now.
+    if (err instanceof AbandonedPollCycleError) {
+      logger.warn("Abandoned poll cycle stopped before writing", { generation });
+      return false;
+    }
     const totalElapsed = performance.now() - pollStart;
     const consecutiveFailures = failureMonitor.recordFailure("poll", {
       error: formatError(err),
@@ -1075,6 +1109,39 @@ let pollerTimeout: NodeJS.Timeout | null = null;
 let pollerRunning = false;
 
 /**
+ * Deadline for a single poll cycle (#954). Five RPC timeouts is enough for a
+ * getEvents → backfill → verification sequence, while still bounding a hung
+ * connection that the transport timeout did not abort (half-open TCP, stuck
+ * load balancer).
+ */
+export const POLL_CYCLE_WATCHDOG_FACTOR = 5;
+
+export function pollCycleWatchdogMs(): number {
+  return Math.max(config.rpcTimeoutMs * POLL_CYCLE_WATCHDOG_FACTOR, 1_000);
+}
+
+/**
+ * Reject if `work` has not settled by the cycle deadline. The timer is
+ * unref'd so it never keeps the process (or a Jest worker) alive on its own,
+ * and is always cleared on settlement.
+ */
+export function withPollCycleWatchdog<T>(
+  work: Promise<T>,
+  timeoutMs: number = pollCycleWatchdogMs()
+): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error(`Poll cycle exceeded ${timeoutMs}ms watchdog deadline`));
+    }, timeoutMs);
+    timer.unref?.();
+  });
+  return Promise.race([work, deadline]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
+/**
  * One poll cycle (#689); pollEvents() applies the interval adjustment.
  *
  * Never rejects: `pollEvents` already converts failures to a `false`
@@ -1084,9 +1151,12 @@ let pollerRunning = false;
 async function runPollCycle(): Promise<void> {
   try {
     // pollEvents() adjusts the interval itself, so the logged and scheduled
-    // delays match (#639).
-    await pollEvents();
+    // delays match (#639). The watchdog bounds a hung RPC that never settles.
+    await withPollCycleWatchdog(pollEvents());
   } catch (err) {
+    // Abandon the overrunning cycle: if it ever resumes it stops before
+    // writing, so it cannot race the next cycle (#954).
+    pollCycleGeneration++;
     const consecutiveFailures = failureMonitor.recordFailure("poll", {
       error: formatError(err),
       operation: "run_poll_cycle",
@@ -1103,6 +1173,8 @@ async function pollLoop() {
   await runPollCycle();
   if (!pollerRunning) return;
   pollerTimeout = setTimeout(pollLoop, currentPollIntervalMs);
+  // A pending poll must never keep a process or Jest worker alive (#951).
+  pollerTimeout.unref?.();
 }
 
 export function startPoller() {
@@ -1136,6 +1208,7 @@ export function startPoller() {
     .then(() => {
       if (pollerRunning) {
         pollerTimeout = setTimeout(pollLoop, currentPollIntervalMs);
+        pollerTimeout.unref?.();
       }
     });
 
@@ -1233,6 +1306,8 @@ function scheduleNextMaintenance(intervalMs: number): void {
       Number.isFinite(next) && next > 0 ? next : DEFAULT_DB_MAINTENANCE_INTERVAL_MS,
     );
   }, intervalMs);
+  // The maintenance interval is hours; it must not hold a worker open (#951).
+  maintenanceTimeout.unref?.();
 }
 
 /** Start the maintenance scheduler and run the first cycle immediately. */

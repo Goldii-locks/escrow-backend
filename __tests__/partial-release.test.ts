@@ -3,7 +3,7 @@ import request from "supertest";
 import express from "express";
 import { autoAuth } from "./helpers/api-key-helper.js";
 
-const VALID_CONTRACT = "CDD5WKK3WT3QVKXMXTJNDIXE4T73FK6GGXDSD6UTJAH6YYZU52SQ4MUH";
+const VALID_CONTRACT = "CARZQMYKDGA4TTIE2XBDJ42EX27VYLLJGGG4WGUIXXWIVHPDTX3UCLJA";
 const VALID_ADDRESS = "GAODBHVR63Z56MVQRBEJSYM2H5423LJ4WAPUUBOFG4JYY72S6ROKVZRX";
 
 const mockGetAccount = jest.fn<() => Promise<unknown>>();

@@ -8,7 +8,7 @@ import { Account, Networks, TransactionBuilder, type Transaction } from "@stella
  * configurable as a fixed fee or derived from RPC fee stats.
  */
 
-const VALID_CONTRACT = "CDD5WKK3WT3QVKXMXTJNDIXE4T73FK6GGXDSD6UTJAH6YYZU52SQ4MUH";
+const VALID_CONTRACT = "CARZQMYKDGA4TTIE2XBDJ42EX27VYLLJGGG4WGUIXXWIVHPDTX3UCLJA";
 const VALID_ADDRESS = "GAODBHVR63Z56MVQRBEJSYM2H5423LJ4WAPUUBOFG4JYY72S6ROKVZRX";
 
 const mockGetAccount = jest.fn<() => Promise<unknown>>();

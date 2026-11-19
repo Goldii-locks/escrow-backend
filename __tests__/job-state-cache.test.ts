@@ -11,7 +11,7 @@ import { jobScVal } from "./helpers/scval-fixtures.js";
  * stores a new event for that contract.
  */
 
-const CONTRACT_A = "CDD5WKK3WT3QVKXMXTJNDIXE4T73FK6GGXDSD6UTJAH6YYZU52SQ4MUH";
+const CONTRACT_A = "CARZQMYKDGA4TTIE2XBDJ42EX27VYLLJGGG4WGUIXXWIVHPDTX3UCLJA";
 const CONTRACT_B = "CA3D5K7UXYZ123456789012345678901234567890123456789012345678901";
 
 const mockGetAccount = jest.fn<() => Promise<unknown>>();

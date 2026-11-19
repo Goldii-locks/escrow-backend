@@ -13,7 +13,7 @@ import { tokenVecScVal } from "./helpers/scval-fixtures.js";
  * the failed result was not cached (a follow-up request reaches the RPC again).
  */
 
-const VALID_CONTRACT = "CDD5WKK3WT3QVKXMXTJNDIXE4T73FK6GGXDSD6UTJAH6YYZU52SQ4MUH";
+const VALID_CONTRACT = "CARZQMYKDGA4TTIE2XBDJ42EX27VYLLJGGG4WGUIXXWIVHPDTX3UCLJA";
 const TOKEN_CONTRACT = StrKey.encodeContract(Buffer.alloc(32, 7));
 const ADMIN = Keypair.random().publicKey();
 const SOURCE = Keypair.random().publicKey();
