@@ -6,6 +6,7 @@ import {
   getSubscriptions,
   getActiveSubscriptions,
   getDisabledSubscriptions,
+  getAdminJobs,
 } from "../indexer/db.js";
 import { getIndexerUptimeSeconds } from "../indexer/status.js";
 import { getLatestReconciliationResults } from "../indexer/reconciliation.js";
@@ -258,6 +259,23 @@ router.get("/metrics", (_req, res) => {
     res
       .status(500)
       .json({ success: false, error: "Failed to collect indexer metrics" });
+  }
+});
+
+
+router.get("/jobs", (req, res) => {
+  const status = typeof req.query.status === "string" ? req.query.status : undefined;
+  const cursor = typeof req.query.cursor === "string" ? req.query.cursor : undefined;
+  const limit = typeof req.query.limit === "string" ? parseInt(req.query.limit, 10) : undefined;
+  if (status && !["disputed", "active", "completed"].includes(status)) {
+    return res.status(400).json({ success: false, error: "status must be disputed, active, or completed" });
+  }
+  try {
+    const result = getAdminJobs({ status: status as "disputed" | "active" | "completed" | undefined, cursor, limit });
+    res.json({ success: true, ...result });
+  } catch (err) {
+    logger.error("Failed to list admin jobs", { error: formatError(err) });
+    res.status(500).json({ success: false, error: "Internal server error" });
   }
 });
 

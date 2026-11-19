@@ -307,7 +307,7 @@ describe("POST /api/jobs/:contractId/milestones/:index/partial-release", () => {
       .post(ENDPOINT)
       .send(VALID_BODY)
       .expect(200);
-    expect(res.body).toEqual({ success: true, data: { xdr: "AAAAAQ==" } });
+    expect(res.body.success).toBe(true); expect(res.body.data.xdr).toBe("AAAAAQ=="); expect(typeof res.body.data.hash).toBe('string');
   });
 
   it("rejects amount provided as a JSON number (#678)", async () => {
@@ -412,7 +412,7 @@ describe("POST /api/jobs/:contractId/milestones/:index/partial-release", () => {
         .post(ENDPOINT)
         .send(VALID_BODY)
         .expect(200);
-      expect(res.body).toEqual({ success: true, data: { xdr: "AAAAAQ==" } });
+      expect(res.body.success).toBe(true); expect(res.body.data.xdr).toBe("AAAAAQ=="); expect(typeof res.body.data.hash).toBe('string');
     });
 
     it("ignores a wrong x-api-key header instead of rejecting it", async () => {
@@ -421,7 +421,7 @@ describe("POST /api/jobs/:contractId/milestones/:index/partial-release", () => {
         .set("x-api-key", "wrong-key")
         .send(VALID_BODY)
         .expect(200);
-      expect(res.body).toEqual({ success: true, data: { xdr: "AAAAAQ==" } });
+      expect(res.body.success).toBe(true); expect(res.body.data.xdr).toBe("AAAAAQ=="); expect(typeof res.body.data.hash).toBe('string');
     });
 
     it("returns 200 when API_KEY is set and correct key is provided", async () => {
@@ -439,7 +439,7 @@ describe("POST /api/jobs/:contractId/milestones/:index/partial-release", () => {
         .post(ENDPOINT)
         .send(VALID_BODY)
         .expect(200);
-      expect(res.body).toEqual({ success: true, data: { xdr: "AAAAAQ==" } });
+      expect(res.body.success).toBe(true); expect(res.body.data.xdr).toBe("AAAAAQ=="); expect(typeof res.body.data.hash).toBe('string');
     });
   });
 
@@ -527,8 +527,8 @@ describe("POST /api/jobs/:contractId/milestones/:index/partial-release", () => {
 
       expect(res1.status).toBe(200);
       expect(res2.status).toBe(200);
-      expect(res1.body).toEqual({ success: true, data: { xdr: "AAAAAQ==" } });
-      expect(res2.body).toEqual({ success: true, data: { xdr: "AAAAAQ==" } });
+      expect(res1.body.success).toBe(true); expect(res1.body.data.xdr).toBe("AAAAAQ=="); expect(typeof res1.body.data.hash).toBe("string");
+      expect(res2.body.success).toBe(true); expect(res2.body.data.xdr).toBe("AAAAAQ=="); expect(typeof res2.body.data.hash).toBe("string");
       expect(mockPrepareTransaction).toHaveBeenCalledTimes(1);
     });
 

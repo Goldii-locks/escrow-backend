@@ -47,7 +47,7 @@ describe("POST /api/jobs/build-tx – rate limiting", () => {
       sequenceNumber: () => "1",
       incrementSequenceNumber: () => {},
     });
-    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==" });
+    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==", hash: () => Buffer.from("aa".repeat(32), "hex"), fee: "100" });
   });
 
   afterEach(() => {

@@ -53,7 +53,7 @@ describe("POST /api/jobs/build-tx – Stellar address validation", () => {
   });
 
   it("accepts a valid Stellar address", async () => {
-    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==" });
+    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==", hash: () => Buffer.from("aa".repeat(32), "hex"), fee: "100" });
 
     const res = await request(buildApp())
       .post("/api/jobs/build-tx")

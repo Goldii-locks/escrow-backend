@@ -1950,6 +1950,270 @@ export function getEventsByContract(
   };
 }
 
+/**
+ * Streams every indexed event for a contract in chronological order (#959).
+ * Uses `iterate()` so callers can emit rows without buffering the full set.
+ */
+export function iterateEventsByContract(
+  contractId: string,
+): IterableIterator<EventDbRow> {
+  const db = getDb();
+  return db
+    .prepare(
+      `SELECT * FROM events
+       WHERE contract_id = ?
+       ORDER BY ledger_sequence ASC, id ASC`
+    )
+    .iterate(contractId) as IterableIterator<EventDbRow>;
+}
+
+export interface PlatformStats {
+  escrows: number;
+  funded: Record<string, string>;
+  released: Record<string, string>;
+  openDisputes: number;
+  updatedAt: string;
+}
+
+let platformStatsCache: { value: PlatformStats; expiresAt: number } | null = null;
+
+function resolveEventToken(contractId: string, data: Record<string, unknown>): string {
+  const token = data.token;
+  if (typeof token === "string" && token.length > 0) return token;
+  const row = getDb()
+    .prepare(
+      `SELECT data_json FROM events
+       WHERE contract_id = ? AND event_type IN ('init', 'fund', 'msfund')
+         AND json_extract(data_json, '$.token') IS NOT NULL
+       ORDER BY ledger_sequence ASC, id ASC
+       LIMIT 1`
+    )
+    .get(contractId) as { data_json: string } | undefined;
+  if (!row) return "unknown";
+  try {
+    const t = (JSON.parse(row.data_json) as { token?: unknown }).token;
+    return typeof t === "string" && t.length > 0 ? t : "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+function extractEventAmount(data: Record<string, unknown>): bigint {
+  for (const key of ["amount", "total_amount", "amount_released", "value"]) {
+    const v = data[key];
+    if (typeof v === "string" && /^-?\d+$/.test(v.trim())) return BigInt(v.trim());
+    if (typeof v === "number" && Number.isInteger(v)) return BigInt(v);
+    if (typeof v === "bigint") return v;
+  }
+  return 0n;
+}
+
+export function getPlatformStats(nowMs = Date.now()): PlatformStats {
+  if (platformStatsCache && platformStatsCache.expiresAt > nowMs) {
+    return platformStatsCache.value;
+  }
+  const db = getDb();
+
+  const escrowsRow = db
+    .prepare("SELECT COUNT(*) AS cnt FROM events WHERE event_type = 'created'")
+    .get() as { cnt: number };
+
+  const funded: Record<string, bigint> = {};
+  for (const row of db
+    .prepare(
+      "SELECT contract_id, data_json FROM events WHERE event_type IN ('fund', 'msfund')"
+    )
+    .iterate() as IterableIterator<{ contract_id: string; data_json: string }>) {
+    try {
+      const data = JSON.parse(row.data_json) as Record<string, unknown>;
+      const token = resolveEventToken(row.contract_id, data);
+      funded[token] = (funded[token] ?? 0n) + extractEventAmount(data);
+    } catch {
+      // skip malformed
+    }
+  }
+
+  const released: Record<string, bigint> = {};
+  for (const row of db
+    .prepare(
+      "SELECT contract_id, data_json FROM events WHERE event_type IN ('approve', 'claim')"
+    )
+    .iterate() as IterableIterator<{ contract_id: string; data_json: string }>) {
+    try {
+      const data = JSON.parse(row.data_json) as Record<string, unknown>;
+      const token = resolveEventToken(row.contract_id, data);
+      released[token] = (released[token] ?? 0n) + extractEventAmount(data);
+    } catch {
+      // skip malformed
+    }
+  }
+
+  const openDisputesRow = db
+    .prepare(
+      `WITH dispute_marks AS (
+         SELECT
+           contract_id,
+           COALESCE(CAST(json_extract(data_json, '$.milestone_index') AS TEXT), '') AS milestone_key,
+           MAX(CASE WHEN event_type = 'dispute' THEN id ELSE 0 END) AS last_dispute_id,
+           MAX(CASE WHEN event_type IN ('resolve', 'arbsplit', 'dispescal') THEN id ELSE 0 END) AS last_resolve_id
+         FROM events
+         WHERE event_type IN ('dispute', 'resolve', 'arbsplit', 'dispescal')
+         GROUP BY contract_id, milestone_key
+       )
+       SELECT COUNT(*) AS cnt FROM dispute_marks
+       WHERE last_dispute_id > last_resolve_id`
+    )
+    .get() as { cnt: number };
+
+  const value: PlatformStats = {
+    escrows: escrowsRow?.cnt ?? 0,
+    funded: Object.fromEntries(Object.entries(funded).map(([k, v]) => [k, v.toString()])),
+    released: Object.fromEntries(Object.entries(released).map(([k, v]) => [k, v.toString()])),
+    openDisputes: openDisputesRow?.cnt ?? 0,
+    updatedAt: new Date(nowMs).toISOString(),
+  };
+  platformStatsCache = { value, expiresAt: nowMs + 60_000 };
+  return value;
+}
+
+export function resetPlatformStatsCache(): void {
+  platformStatsCache = null;
+}
+
+
+export const TERMINAL_JOB_EVENT_TYPES = [
+  "adminexc",
+  "adtxrfd",
+  "adtxrls",
+  "arbsplit",
+  "cancel",
+  "cxlappr",
+  "cxlspref",
+  "msadmref",
+  "msadmrel",
+  "resolve",
+  "sprefnet",
+  "splitref",
+  "sweep",
+  "twspltref",
+  "unaccref",
+  "withdraw",
+] as const;
+
+export interface AdminJobSummary {
+  contractId: string;
+  client: string | null;
+  freelancer: string | null;
+  arbiter: string | null;
+  latestEventType: string;
+  latestLedger: number;
+  hasOpenDispute: boolean;
+}
+
+export interface PaginatedAdminJobs {
+  jobs: AdminJobSummary[];
+  nextCursor: string | null;
+}
+
+export function getAdminJobs(
+  options: { status?: "disputed" | "active" | "completed"; cursor?: string; limit?: number } = {},
+): PaginatedAdminJobs {
+  const db = getDb();
+  const limit = Math.max(1, Math.min(100, options.limit ?? 20));
+  const cursorRaw = options.cursor ? Number(options.cursor) : NaN;
+  const cursorId = Number.isFinite(cursorRaw) && cursorRaw >= 0 ? cursorRaw : null;
+  const factoryId = process.env.FACTORY_CONTRACT_ID || null;
+  const status = options.status ?? null;
+  const terminalList = TERMINAL_JOB_EVENT_TYPES.map((t) => `'${t}'`).join(",");
+
+  const rows = db
+    .prepare(
+      `WITH latest AS (
+         SELECT contract_id, MAX(id) AS latest_id
+         FROM events
+         GROUP BY contract_id
+       ),
+       latest_events AS (
+         SELECT e.contract_id, e.id AS latest_id, e.event_type, e.ledger_sequence
+         FROM events e
+         JOIN latest l ON l.contract_id = e.contract_id AND l.latest_id = e.id
+       ),
+       disputes AS (
+         SELECT contract_id,
+           MAX(CASE
+             WHEN event_type = 'dispute' THEN 1
+             ELSE 0 END) AS has_open_dispute
+         FROM (
+           SELECT contract_id,
+             COALESCE(CAST(json_extract(data_json, '$.milestone_index') AS TEXT), '') AS milestone_key,
+             event_type,
+             ROW_NUMBER() OVER (
+               PARTITION BY contract_id, COALESCE(CAST(json_extract(data_json, '$.milestone_index') AS TEXT), '')
+               ORDER BY id DESC
+             ) AS rn
+           FROM events
+           WHERE event_type IN ('dispute','resolve','arbsplit','dispescal')
+         )
+         WHERE rn = 1
+         GROUP BY contract_id
+       ),
+       participants AS (
+         SELECT contract_id,
+           MAX(CASE WHEN role = 'client' THEN address END) AS client,
+           MAX(CASE WHEN role = 'freelancer' THEN address END) AS freelancer,
+           MAX(CASE WHEN role = 'arbiter' THEN address END) AS arbiter
+         FROM job_participants
+         GROUP BY contract_id
+       ),
+       base AS (
+         SELECT le.contract_id, le.latest_id, le.event_type, le.ledger_sequence,
+                p.client, p.freelancer, p.arbiter,
+                COALESCE(d.has_open_dispute, 0) AS has_open_dispute,
+                CASE WHEN le.event_type IN (${terminalList}) THEN 1 ELSE 0 END AS is_completed
+         FROM latest_events le
+         JOIN monitored_contracts mc ON mc.contract_id = le.contract_id AND mc.active = 1
+         LEFT JOIN participants p ON p.contract_id = le.contract_id
+         LEFT JOIN disputes d ON d.contract_id = le.contract_id
+         WHERE (?1 IS NULL OR le.contract_id != ?1)
+       )
+       SELECT contract_id, latest_id, event_type, ledger_sequence, client, freelancer, arbiter, has_open_dispute
+       FROM base
+       WHERE (?2 IS NULL OR latest_id < ?2)
+         AND (?3 IS NULL
+              OR (?3 = 'disputed' AND has_open_dispute = 1)
+              OR (?3 = 'completed' AND is_completed = 1)
+              OR (?3 = 'active' AND has_open_dispute = 0 AND is_completed = 0))
+       ORDER BY latest_id DESC
+       LIMIT ?4`
+    )
+    .all(factoryId, cursorId, status, limit + 1) as Array<{
+      contract_id: string;
+      latest_id: number;
+      event_type: string;
+      ledger_sequence: number;
+      client: string | null;
+      freelancer: string | null;
+      arbiter: string | null;
+      has_open_dispute: number;
+    }>;
+
+  const hasMore = rows.length > limit;
+  const pageRows = hasMore ? rows.slice(0, limit) : rows;
+  const nextCursor = hasMore ? String(pageRows[pageRows.length - 1].latest_id) : null;
+  return {
+    jobs: pageRows.map((r) => ({
+      contractId: r.contract_id,
+      client: r.client,
+      freelancer: r.freelancer,
+      arbiter: r.arbiter,
+      latestEventType: r.event_type,
+      latestLedger: r.ledger_sequence,
+      hasOpenDispute: r.has_open_dispute === 1,
+    })),
+    nextCursor,
+  };
+}
+
 export interface IndexerStatusData {
   lastIndexedLedger: number;
   totalEvents: number;

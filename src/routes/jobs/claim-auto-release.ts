@@ -27,8 +27,9 @@ import {
   CLAIM_AUTO_RELEASE_TTL,
   UNSIGNED_TX_TIMEOUT_S,
   unsignedTxValidUntil,
-  getFreshCachedXdr,
-  setCachedXdr,
+  getFreshCachedBuildTx,
+  setCachedBuildTx,
+  type BuildTxPayload,
 } from "./caches.js";
 import { formatError } from "../../utils/format-error.js";
 
@@ -73,20 +74,19 @@ router.post(
 
     try {
       logger.debug("Checking claim auto-release cache", { traceId, ...pathVars, cacheKey });
-      const cached = getFreshCachedXdr(claimAutoReleaseCache, cacheKey);
+      const cached = getFreshCachedBuildTx(claimAutoReleaseCache, cacheKey);
       if (cached !== undefined) {
         logger.info("Claim auto-release XDR served from cache", {
           traceId,
           ...pathVars,
           source: "cache",
-          xdrLength: cached.length,
+          xdrLength: cached.xdr.length,
         });
-        const responseBody = { xdr: cached };
         logger.debug("Claim auto-release response body prepared", {
           traceId,
           ...pathVars,
           success: true,
-          xdrLength: responseBody.xdr.length,
+          xdrLength: cached.xdr.length,
         });
         logger.info("Claim auto-release response sent", {
           traceId,
@@ -94,28 +94,21 @@ router.post(
           status: 200,
           success: true,
           cached: true,
-          xdrLength: cached.length,
+          xdrLength: cached.xdr.length,
         });
-        sendSuccess(res, responseBody);
+        res.status(200).json({ success: true, data: cached, xdr: cached.xdr });
         return;
       }
 
       logger.debug("Checking in-flight claim auto-release requests", { traceId, ...pathVars, cacheKey });
       const inFlight = inFlightClaimAutoReleaseRequests.get(cacheKey);
       if (inFlight) {
-        const xdr = await inFlight;
+        const payload = await inFlight;
         logger.info("Claim auto-release XDR served from in-flight cache", {
           traceId,
           ...pathVars,
           source: "in-flight",
-          xdrLength: xdr.length,
-        });
-        const responseBody = { xdr };
-        logger.debug("Claim auto-release response body prepared", {
-          traceId,
-          ...pathVars,
-          success: true,
-          xdrLength: responseBody.xdr.length,
+          xdrLength: payload.xdr.length,
         });
         logger.info("Claim auto-release response sent", {
           traceId,
@@ -124,9 +117,9 @@ router.post(
           success: true,
           cached: true,
           inFlight: true,
-          xdrLength: xdr.length,
+          xdrLength: payload.xdr.length,
         });
-        sendSuccess(res, responseBody);
+        res.status(200).json({ success: true, data: payload, xdr: payload.xdr });
         return;
       }
 
@@ -135,12 +128,12 @@ router.post(
         ...pathVars,
       });
 
-      const requestPromise = (async (): Promise<string> => {
-        const fee = await getInclusionFee(server);
+      const requestPromise = (async (): Promise<BuildTxPayload> => {
+        const inclusionFee = await getInclusionFee(server);
         logger.debug("Building Stellar transaction for claim auto-release", {
           traceId,
           ...pathVars,
-          fee,
+          fee: inclusionFee,
           timeout: UNSIGNED_TX_TIMEOUT_S,
         });
         const contract = new Contract(contractId);
@@ -149,7 +142,7 @@ router.post(
         logger.debug("Stellar account fetched", { traceId, ...pathVars });
 
         const tx = new TransactionBuilder(account, {
-          fee,
+          fee: inclusionFee,
           networkPassphrase: NETWORK_PASSPHRASE,
         })
           .addOperation(
@@ -165,28 +158,34 @@ router.post(
         logger.debug("Calling prepareTransaction on Stellar RPC", { traceId, ...pathVars });
         const prepared = await server.prepareTransaction(tx);
         const xdr = prepared.toXDR();
-        logger.debug("Storing claim auto-release XDR in cache", {
+        const totalFee = String(prepared.fee);
+        const resourceFee = String(
+          BigInt(totalFee) >= BigInt(inclusionFee)
+            ? BigInt(totalFee) - BigInt(inclusionFee)
+            : 0n,
+        );
+        const payload: BuildTxPayload = {
+          xdr,
+          hash: Buffer.from(prepared.hash()).toString("hex"),
+          validUntil: unsignedTxValidUntil(tx),
+          fee: { total: totalFee, inclusion: String(inclusionFee), resource: resourceFee },
+        };
+        logger.debug("Storing claim auto-release payload in cache", {
           traceId,
           ...pathVars,
           cacheKey,
           xdrLength: xdr.length,
           ttlSeconds: CLAIM_AUTO_RELEASE_TTL,
         });
-        setCachedXdr(
-          claimAutoReleaseCache,
-          cacheKey,
-          xdr,
-          unsignedTxValidUntil(tx),
-          CLAIM_AUTO_RELEASE_TTL,
-        );
-        return xdr;
+        setCachedBuildTx(claimAutoReleaseCache, cacheKey, payload, CLAIM_AUTO_RELEASE_TTL);
+        return payload;
       })();
 
       inFlightClaimAutoReleaseRequests.set(cacheKey, requestPromise);
       logger.debug("In-flight promise registered", { traceId, ...pathVars, cacheKey });
-      let xdr: string;
+      let payload: BuildTxPayload;
       try {
-        xdr = await requestPromise;
+        payload = await requestPromise;
       } catch (err: unknown) {
         logger.debug("RPC promise rejected, clearing cache entry", {
           traceId,
@@ -204,14 +203,7 @@ router.post(
       logger.info("Claim auto-release XDR built successfully", {
         traceId,
         ...pathVars,
-        xdrLength: xdr.length,
-      });
-      const responseBody = { xdr };
-      logger.debug("Claim auto-release response body prepared", {
-        traceId,
-        ...pathVars,
-        success: true,
-        xdrLength: responseBody.xdr.length,
+        xdrLength: payload.xdr.length,
       });
       logger.info("Claim auto-release response sent", {
         traceId,
@@ -219,10 +211,10 @@ router.post(
         status: 200,
         success: true,
         cached: false,
-        xdrLength: xdr.length,
+        xdrLength: payload.xdr.length,
       });
 
-      sendSuccess(res, responseBody);
+      res.status(200).json({ success: true, data: payload, xdr: payload.xdr });
     } catch (err: unknown) {
       const message = formatError(err);
       const stack = err instanceof Error ? err.stack : undefined;
