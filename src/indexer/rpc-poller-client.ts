@@ -29,7 +29,15 @@ export interface RpcRetryConfig {
   backoffMultiplier: number;
   /** Ceiling delay in ms (default: 30000) */
   maxBackoffMs: number;
+  /**
+   * Injectable source of jitter, returning a value in [0, 1). Defaults to
+   * Math.random in production; tests pass a seeded function for determinism.
+   */
+  random?: () => number;
 }
+
+/** A source of backoff jitter, returning a value in [0, 1). */
+export type BackoffRandom = () => number;
 
 const DEFAULT_CONFIG: RpcRetryConfig = {
   maxRetries: 5,
@@ -191,19 +199,30 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
- * Compute the backoff delay for a given attempt number.
- * attempt 0 → initialBackoffMs
- * attempt 1 → initialBackoffMs * multiplier
+ * Compute the backoff delay for a given attempt number using full jitter:
+ * `random() * min(initial * multiplier^attempt, max)`.
+ *
+ * attempt 0 → up to initialBackoffMs
+ * attempt 1 → up to initialBackoffMs * multiplier
  * etc., capped at maxBackoffMs.
+ *
+ * Jitter de-synchronises retries from callers that hit a 429/503 at the same
+ * time (the poller, admin backfills, reconciliation and other instances).
+ * The random source is injectable; it defaults to `() => 1` so callers that
+ * want the deterministic upper bound (and the existing tests) keep it.
  */
 export function computeBackoffMs(
   attempt: number,
-  config: Pick<RpcRetryConfig, "initialBackoffMs" | "backoffMultiplier" | "maxBackoffMs">
+  config: Pick<RpcRetryConfig, "initialBackoffMs" | "backoffMultiplier" | "maxBackoffMs">,
+  random: BackoffRandom = () => 1
 ): number {
-  return Math.min(
+  const cap = Math.min(
     config.initialBackoffMs * Math.pow(config.backoffMultiplier, attempt),
     config.maxBackoffMs
   );
+  const sample = random();
+  const fraction = Number.isFinite(sample) ? Math.min(1, Math.max(0, sample)) : 1;
+  return cap * fraction;
 }
 
 /**
@@ -240,7 +259,7 @@ export async function withRetry<T>(
         throw lastError;
       }
 
-      const backoff = computeBackoffMs(attempt, cfg);
+      const backoff = computeBackoffMs(attempt, cfg, cfg.random ?? Math.random);
       const retryAfter = getRetryAfterMs(err);
       const delay =
         retryAfter !== null
@@ -731,6 +750,7 @@ export class RpcPollerClient {
       backoffMultiplier:
         options.backoffMultiplier ?? DEFAULT_CONFIG.backoffMultiplier,
       maxBackoffMs: options.maxBackoffMs ?? DEFAULT_CONFIG.maxBackoffMs,
+      random: options.random,
     };
     this.historicalPageSize = validatePositiveInt(
       "historicalPageSize",
