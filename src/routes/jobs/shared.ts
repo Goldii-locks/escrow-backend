@@ -11,6 +11,7 @@ import {
 import {
   getJobsByWallet,
   getEventsByContract,
+  iterateEventsByContract,
   saveJobDraft,
   getJobDraftById,
 } from "../../indexer/db.js";
@@ -208,7 +209,7 @@ export function convertScValToNativeStrings(value: unknown): unknown {
 
 export {
   Contract, Networks, TransactionBuilder, BASE_FEE, nativeToScVal, scValToNative, Address,
-  getJobsByWallet, getEventsByContract, saveJobDraft, getJobDraftById,
+  getJobsByWallet, getEventsByContract, iterateEventsByContract, saveJobDraft, getJobDraftById,
   jobContractRateLimit, jobWhitelistRateLimit, whitelistUpdateRateLimit, partialReleaseRateLimit,
   buildTxRateLimit, timeRemainingRateLimit, createJobDraftRateLimit, claimAutoReleaseRateLimit,
   submitRateLimit,

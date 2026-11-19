@@ -278,9 +278,9 @@ describe("POST /:contractId/milestones/:index/partial-release", () => {
     expect(partialReleaseCache.keys()).toHaveLength(0);
 
     // The failure was not cached: a retry reaches the RPC again and succeeds.
-    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAA" });
+    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAA", hash: () => Buffer.alloc(32, 0xaa), fee: "100" });
     const retry = await request(app).post(url).send(body).expect(200);
-    expect(retry.body).toEqual({ success: true, data: { xdr: "AAAA" } });
+    expect(retry.body).toEqual({ success: true, data: expect.objectContaining({ xdr: "AAAA" }) });
     expect(mockPrepareTransaction).toHaveBeenCalledTimes(2);
   });
 
@@ -295,11 +295,11 @@ describe("POST /:contractId/milestones/:index/partial-release", () => {
     const first = request(app).post(url).send(body).then((r) => r);
     const second = request(app).post(url).send(body).then((r) => r);
     await new Promise((r) => setTimeout(r, 50));
-    release({ toXDR: () => "AAAA" });
+    release({ toXDR: () => "AAAA", hash: () => Buffer.alloc(32, 0xaa), fee: "100" });
 
     const [r1, r2] = await Promise.all([first, second]);
-    expect(r1.body).toEqual({ success: true, data: { xdr: "AAAA" } });
-    expect(r2.body).toEqual({ success: true, data: { xdr: "AAAA" } });
+    expect(r1.body).toEqual({ success: true, data: expect.objectContaining({ xdr: "AAAA" }) });
+    expect(r2.body).toEqual({ success: true, data: expect.objectContaining({ xdr: "AAAA" }) });
     expect(mockPrepareTransaction).toHaveBeenCalledTimes(1);
   });
 

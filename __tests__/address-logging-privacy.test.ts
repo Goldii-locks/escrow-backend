@@ -82,6 +82,8 @@ jest.unstable_mockModule("@stellar/stellar-sdk/rpc", () => ({
 }));
 
 jest.unstable_mockModule("@stellar/stellar-sdk", () => ({
+  // Loaded transitively via the token-metadata helper.
+  Keypair: { random: jest.fn(() => ({ publicKey: () => "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF" })) },
   Account: class {},
   Contract: jest.fn().mockImplementation(() => ({ call: jest.fn().mockReturnValue({}) })),
   TransactionBuilder: jest.fn().mockImplementation(() => ({

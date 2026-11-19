@@ -84,12 +84,14 @@ Legend:
 | `src/routes/jobs/create-job-draft.ts` | live | — |
 | `src/routes/jobs/errors.ts` | live | — |
 | `src/routes/jobs/get-job.ts` | live | — |
+| `src/routes/jobs/history-csv.ts` | live | — |
 | `src/routes/jobs/history.ts` | live | — |
 | `src/routes/jobs/partial-release.ts` | live | — |
 | `src/routes/jobs/shared.ts` | live | — |
 | `src/routes/jobs/submit.ts` | live | — |
 | `src/routes/jobs/time-remaining.ts` | live | — |
 | `src/routes/jobs/whitelist.ts` | live | — |
+| `src/routes/stats.ts` | live | — |
 | `src/routes/tokens.ts` | live | — |
 | `src/routes/webhooks.ts` | live | — |
 | `src/routes/whitelist.test.ts` | unwired | [#718](https://github.com/Goldii-locks/escrow-backend/issues/718) |
