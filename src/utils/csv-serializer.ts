@@ -32,7 +32,14 @@ export function escapeCsvField(value: unknown, delimiter = ","): string {
   if (value === null || value === undefined) {
     return "";
   }
-  const str = typeof value === "string" ? value : String(value);
+  let str = typeof value === "string" ? value : String(value);
+
+  // Neutralise spreadsheet formula injection when a text cell begins with a
+  // formula trigger character. Prefixed with a single quote so the cell is
+  // treated as a literal by spreadsheet software.
+  if (typeof value === "string" && /^[=+\-@\t\r]/.test(str)) {
+    str = `'${str}`;
+  }
 
   const needsQuotes =
     str.includes(delimiter) ||

@@ -36,6 +36,7 @@ Express + TypeScript backend for the Soroban milestone escrow platform.
   - [Admin API](#admin-api)
     - [GET /api/admin/indexer-status](#get-apiadminindexer-status)
     - [GET /api/admin/metrics](#get-apiadminmetrics)
+    - [GET /api/admin/jobs](#get-apiadminjobs)
     - [GET /api/admin/webhook-subscriptions](#get-apiadminwebhook-subscriptions)
     - [POST /api/admin/backfill](#post-apiadminbackfill)
     - [GET /api/admin/backfill](#get-apiadminbackfill)
@@ -227,6 +228,13 @@ Retrieve indexer health, current ledger, event counters, uptime, and reconciliat
 Snapshot of the indexer metrics collector.
 - **Auth**: Admin API Key
 - **Response**: `{ success: true, metrics }`; `500` if the metrics cannot be collected
+
+#### GET /api/admin/jobs
+
+Monitored jobs with their participants, latest event and open-dispute flag, newest activity first (#961).
+- **Auth**: Admin API Key
+- **Query**: `status` (`disputed`, `active` or `completed`, optional), `limit` (1–100, default 20), `cursor` (the previous page's `nextCursor`)
+- **Response**: `{ success: true, jobs, nextCursor }`; `400` for an unknown `status`
 
 #### GET /api/admin/webhook-subscriptions
 

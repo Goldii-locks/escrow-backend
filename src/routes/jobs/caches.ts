@@ -9,12 +9,25 @@ export function resetWhitelistCache(): void {
   inFlightWhitelistRequests.clear();
 }
 
+export interface BuildTxFee {
+  total: string;
+  inclusion: string;
+  resource: string;
+}
+
+export interface BuildTxPayload {
+  xdr: string;
+  hash: string;
+  validUntil: number;
+  fee: BuildTxFee;
+}
+
 export const CLAIM_AUTO_RELEASE_TTL = config.claimAutoReleaseCacheTtlS;
 export const claimAutoReleaseCache = new NodeCache({
   stdTTL: CLAIM_AUTO_RELEASE_TTL,
   useClones: false,
 });
-export const inFlightClaimAutoReleaseRequests = new Map<string, Promise<string>>();
+export const inFlightClaimAutoReleaseRequests = new Map<string, Promise<BuildTxPayload>>();
 export function resetClaimAutoReleaseCache(): void {
   claimAutoReleaseCache.flushAll();
   inFlightClaimAutoReleaseRequests.clear();
@@ -36,7 +49,7 @@ export const buildTxCache = new NodeCache({
   stdTTL: BUILD_TX_CACHE_TTL,
   useClones: false,
 });
-export const inFlightBuildTxRequests = new Map<string, Promise<string>>();
+export const inFlightBuildTxRequests = new Map<string, Promise<BuildTxPayload>>();
 export function resetBuildTxCache(): void {
   buildTxCache.flushAll();
   inFlightBuildTxRequests.clear();
@@ -66,7 +79,7 @@ export const partialReleaseCache = new NodeCache({
   stdTTL: PARTIAL_RELEASE_CACHE_TTL,
   useClones: false,
 });
-export const inFlightPartialReleaseRequests = new Map<string, Promise<string>>();
+export const inFlightPartialReleaseRequests = new Map<string, Promise<BuildTxPayload>>();
 export function resetPartialReleaseCache(): void {
   partialReleaseCache.flushAll();
   inFlightPartialReleaseRequests.clear();
@@ -125,8 +138,7 @@ export const UNSIGNED_TX_MIN_REMAINING_S = Number.isNaN(parsedMinRemaining)
   ? 20
   : Math.max(0, parsedMinRemaining);
 
-interface CachedUnsignedXdr {
-  xdr: string;
+interface CachedUnsignedXdr extends BuildTxPayload {
   /** Unix seconds: the transaction's timeBounds.maxTime. */
   validUntil: number;
 }
@@ -139,10 +151,13 @@ export function unsignedTxValidUntil(tx: { timeBounds?: { maxTime: string } }): 
 }
 
 /**
- * Returns the cached XDR only if it still has the minimum signing window
- * left. Stale entries are evicted so the caller rebuilds.
+ * Returns the cached build-tx payload only if it still has the minimum signing
+ * window left. Stale entries are evicted so the caller rebuilds.
  */
-export function getFreshCachedXdr(cache: NodeCache, key: string): string | undefined {
+export function getFreshCachedBuildTx(
+  cache: NodeCache,
+  key: string,
+): BuildTxPayload | undefined {
   const entry = cache.get<CachedUnsignedXdr>(key);
   if (entry === undefined) return undefined;
   const remaining = entry.validUntil - Date.now() / 1000;
@@ -150,24 +165,28 @@ export function getFreshCachedXdr(cache: NodeCache, key: string): string | undef
     cache.del(key);
     return undefined;
   }
-  return entry.xdr;
+  return {
+    xdr: entry.xdr,
+    hash: entry.hash,
+    validUntil: entry.validUntil,
+    fee: entry.fee,
+  };
 }
 
 /**
- * Stores an unsigned XDR with a TTL that never outlives the point at which
+ * Stores a build-tx payload with a TTL that never outlives the point at which
  * it would stop being servable, regardless of the configured cache TTL.
  */
-export function setCachedXdr(
+export function setCachedBuildTx(
   cache: NodeCache,
   key: string,
-  xdr: string,
-  validUntil: number,
+  payload: BuildTxPayload,
   ttlSeconds: number,
 ): void {
   const servableFor = Math.floor(
-    validUntil - Date.now() / 1000 - UNSIGNED_TX_MIN_REMAINING_S,
+    payload.validUntil - Date.now() / 1000 - UNSIGNED_TX_MIN_REMAINING_S,
   );
   const ttl = Math.min(ttlSeconds, servableFor);
   if (ttl <= 0) return;
-  cache.set<CachedUnsignedXdr>(key, { xdr, validUntil }, ttl);
+  cache.set<CachedUnsignedXdr>(key, payload, ttl);
 }

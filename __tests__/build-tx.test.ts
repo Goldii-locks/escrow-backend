@@ -72,10 +72,15 @@ describe("POST /api/jobs/build-tx — error sanitization (#70)", () => {
   });
 
   it("returns 200 with xdr on success", async () => {
-    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==" });
+    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==", hash: () => Buffer.from("aa".repeat(32), "hex"), fee: "100" });
 
     const res = await request(app).post("/api/jobs/build-tx").send(VALID_BODY).expect(200);
-    expect(res.body).toEqual({ success: true, data: { xdr: "AAAAAQ==" }, xdr: "AAAAAQ==" });
+    expect(res.body.success).toBe(true);
+    expect(res.body.xdr).toBe("AAAAAQ==");
+    expect(res.body.data.xdr).toBe("AAAAAQ==");
+    expect(res.body.data.hash).toBe(Buffer.from("aa".repeat(32), "hex").toString("hex"));
+    expect(typeof res.body.data.validUntil).toBe("number");
+    expect(res.body.data.fee).toEqual({ total: "100", inclusion: "100", resource: "0" });
   });
 
   it("returns 500 without leaking internal error message", async () => {
@@ -240,7 +245,7 @@ describe("POST /api/jobs/build-tx — whitelist management argument validation",
       sequenceNumber: () => "1",
       incrementSequenceNumber: () => {},
     });
-    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==" });
+    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==", hash: () => Buffer.from("aa".repeat(32), "hex"), fee: "100" });
   });
 
   it("returns 400 for add_whitelisted_token when no address args are provided", async () => {
@@ -286,7 +291,9 @@ describe("POST /api/jobs/build-tx — whitelist management argument validation",
     };
     const res = await request(app).post("/api/jobs/build-tx").send(body).expect(200);
 
-    expect(res.body).toEqual({ success: true, data: { xdr: "AAAAAQ==" }, xdr: "AAAAAQ==" });
+    expect(res.body.success).toBe(true);
+    expect(res.body.data.xdr).toBe("AAAAAQ==");
+    expect(res.body.xdr).toBe("AAAAAQ==");
   });
 
   it("returns 200 for remove_whitelisted_token when both admin and token address args are provided", async () => {
@@ -300,7 +307,9 @@ describe("POST /api/jobs/build-tx — whitelist management argument validation",
     };
     const res = await request(app).post("/api/jobs/build-tx").send(body).expect(200);
 
-    expect(res.body).toEqual({ success: true, data: { xdr: "AAAAAQ==" }, xdr: "AAAAAQ==" });
+    expect(res.body.success).toBe(true);
+    expect(res.body.data.xdr).toBe("AAAAAQ==");
+    expect(res.body.xdr).toBe("AAAAAQ==");
   });
 });
 
@@ -316,37 +325,37 @@ describe("POST /api/jobs/build-tx — contract argument type mapping", () => {
       sequenceNumber: () => "1",
       incrementSequenceNumber: () => {},
     });
-    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==" });
+    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==", hash: () => Buffer.from("aa".repeat(32), "hex"), fee: "100" });
   });
 
   it("builds a tx for an address-typed argument", async () => {
     const body = { ...VALID_BODY, args: [{ type: "address", value: VALID_ADDRESS }] };
     const res = await request(app).post("/api/jobs/build-tx").send(body).expect(200);
-    expect(res.body).toEqual({ success: true, data: { xdr: "AAAAAQ==" }, xdr: "AAAAAQ==" });
+    expect(res.body.success).toBe(true); expect(res.body.data.xdr).toBe("AAAAAQ=="); expect(res.body.xdr).toBe("AAAAAQ==");
   });
 
   it("builds a tx for an i128-typed argument", async () => {
     const body = { ...VALID_BODY, args: [{ type: "i128", value: "1000000000" }] };
     const res = await request(app).post("/api/jobs/build-tx").send(body).expect(200);
-    expect(res.body).toEqual({ success: true, data: { xdr: "AAAAAQ==" }, xdr: "AAAAAQ==" });
+    expect(res.body.success).toBe(true); expect(res.body.data.xdr).toBe("AAAAAQ=="); expect(res.body.xdr).toBe("AAAAAQ==");
   });
 
   it("builds a tx for a u32-typed argument", async () => {
     const body = { ...VALID_BODY, args: [{ type: "u32", value: 5 }] };
     const res = await request(app).post("/api/jobs/build-tx").send(body).expect(200);
-    expect(res.body).toEqual({ success: true, data: { xdr: "AAAAAQ==" }, xdr: "AAAAAQ==" });
+    expect(res.body.success).toBe(true); expect(res.body.data.xdr).toBe("AAAAAQ=="); expect(res.body.xdr).toBe("AAAAAQ==");
   });
 
   it("builds a tx for a u64-typed argument", async () => {
     const body = { ...VALID_BODY, args: [{ type: "u64", value: "123456789" }] };
     const res = await request(app).post("/api/jobs/build-tx").send(body).expect(200);
-    expect(res.body).toEqual({ success: true, data: { xdr: "AAAAAQ==" }, xdr: "AAAAAQ==" });
+    expect(res.body.success).toBe(true); expect(res.body.data.xdr).toBe("AAAAAQ=="); expect(res.body.xdr).toBe("AAAAAQ==");
   });
 
   it("builds a tx for a bool-typed argument", async () => {
     const body = { ...VALID_BODY, args: [{ type: "bool", value: true }] };
     const res = await request(app).post("/api/jobs/build-tx").send(body).expect(200);
-    expect(res.body).toEqual({ success: true, data: { xdr: "AAAAAQ==" }, xdr: "AAAAAQ==" });
+    expect(res.body.success).toBe(true); expect(res.body.data.xdr).toBe("AAAAAQ=="); expect(res.body.xdr).toBe("AAAAAQ==");
   });
 
   it("builds a tx for a vec argument containing i128/u32/u64/default elements", async () => {
@@ -365,7 +374,7 @@ describe("POST /api/jobs/build-tx — contract argument type mapping", () => {
       ],
     };
     const res = await request(app).post("/api/jobs/build-tx").send(body).expect(200);
-    expect(res.body).toEqual({ success: true, data: { xdr: "AAAAAQ==" }, xdr: "AAAAAQ==" });
+    expect(res.body.success).toBe(true); expect(res.body.data.xdr).toBe("AAAAAQ=="); expect(res.body.xdr).toBe("AAAAAQ==");
   });
 
   it("rejects an unknown argument type with a 400 ValidationError (#618)", async () => {
@@ -405,7 +414,7 @@ describe("POST /api/jobs/build-tx — contract argument type mapping", () => {
       args: [{ type: "vec", value: [{ type: "address", value: VALID_ADDRESS }] }],
     };
     const res = await request(app).post("/api/jobs/build-tx").send(body).expect(200);
-    expect(res.body).toEqual({ success: true, data: { xdr: "AAAAAQ==" }, xdr: "AAAAAQ==" });
+    expect(res.body.success).toBe(true); expect(res.body.data.xdr).toBe("AAAAAQ=="); expect(res.body.xdr).toBe("AAAAAQ==");
 
     const [vecArg] = firstInvokedArgs().args;
     expect(vecArg.type).toBe("scvVec");
@@ -425,7 +434,7 @@ describe("POST /api/jobs/build-tx — contract argument type mapping", () => {
       ],
     };
     const res = await request(app).post("/api/jobs/build-tx").send(body).expect(200);
-    expect(res.body).toEqual({ success: true, data: { xdr: "AAAAAQ==" }, xdr: "AAAAAQ==" });
+    expect(res.body.success).toBe(true); expect(res.body.data.xdr).toBe("AAAAAQ=="); expect(res.body.xdr).toBe("AAAAAQ==");
 
     const [outer] = firstInvokedArgs().args;
     expect(outer.type).toBe("scvVec");
@@ -576,18 +585,18 @@ describe("POST /api/jobs/build-tx — in-memory caching (duplicate network hits)
   });
 
   it("serves a second identical request from cache without hitting the RPC again", async () => {
-    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==" });
+    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==", hash: () => Buffer.from("aa".repeat(32), "hex"), fee: "100" });
 
     await request(app).post("/api/jobs/build-tx").send(VALID_BODY).expect(200);
     const second = await request(app).post("/api/jobs/build-tx").send(VALID_BODY).expect(200);
 
-    expect(second.body).toEqual({ success: true, data: { xdr: "AAAAAQ==" }, xdr: "AAAAAQ==" });
+    expect(second.body.success).toBe(true); expect(second.body.data.xdr).toBe("AAAAAQ=="); expect(second.body.xdr).toBe("AAAAAQ==");
     expect(mockGetAccount).toHaveBeenCalledTimes(1);
     expect(mockPrepareTransaction).toHaveBeenCalledTimes(1);
   });
 
   it("deduplicates concurrent identical requests into a single RPC round-trip", async () => {
-    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==" });
+    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==", hash: () => Buffer.from("aa".repeat(32), "hex"), fee: "100" });
 
     const results = await Promise.all([
       request(app).post("/api/jobs/build-tx").send(VALID_BODY),
@@ -597,7 +606,7 @@ describe("POST /api/jobs/build-tx — in-memory caching (duplicate network hits)
 
     for (const res of results) {
       expect(res.status).toBe(200);
-      expect(res.body).toEqual({ success: true, data: { xdr: "AAAAAQ==" }, xdr: "AAAAAQ==" });
+      expect(res.body.success).toBe(true); expect(res.body.data.xdr).toBe("AAAAAQ=="); expect(res.body.xdr).toBe("AAAAAQ==");
     }
     expect(mockGetAccount).toHaveBeenCalledTimes(1);
     expect(mockPrepareTransaction).toHaveBeenCalledTimes(1);
@@ -605,8 +614,8 @@ describe("POST /api/jobs/build-tx — in-memory caching (duplicate network hits)
 
   it("treats requests with different method/args/sourceAddress as distinct cache entries", async () => {
     mockPrepareTransaction
-      .mockResolvedValueOnce({ toXDR: () => "AAAA_FIRST" })
-      .mockResolvedValueOnce({ toXDR: () => "AAAA_SECOND" });
+      .mockResolvedValueOnce({ toXDR: () => "AAAA_FIRST", hash: () => Buffer.from("11".repeat(32), "hex"), fee: "100" })
+      .mockResolvedValueOnce({ toXDR: () => "AAAA_SECOND", hash: () => Buffer.from("22".repeat(32), "hex"), fee: "100" });
 
     const first = await request(app).post("/api/jobs/build-tx").send(VALID_BODY).expect(200);
     const second = await request(app)
@@ -622,13 +631,13 @@ describe("POST /api/jobs/build-tx — in-memory caching (duplicate network hits)
   it("does not cache a failed build, so the next identical request retries the RPC", async () => {
     mockPrepareTransaction
       .mockRejectedValueOnce(new Error("simulation failed"))
-      .mockResolvedValueOnce({ toXDR: () => "AAAAAQ==" });
+      .mockResolvedValueOnce({ toXDR: () => "AAAAAQ==", hash: () => Buffer.from("aa".repeat(32), "hex"), fee: "100" });
 
     const first = await request(app).post("/api/jobs/build-tx").send(VALID_BODY).expect(500);
     expect(first.body).toEqual({ success: false, error: "Internal server error" });
 
     const second = await request(app).post("/api/jobs/build-tx").send(VALID_BODY).expect(200);
-    expect(second.body).toEqual({ success: true, data: { xdr: "AAAAAQ==" }, xdr: "AAAAAQ==" });
+    expect(second.body.success).toBe(true); expect(second.body.data.xdr).toBe("AAAAAQ=="); expect(second.body.xdr).toBe("AAAAAQ==");
 
     expect(mockPrepareTransaction).toHaveBeenCalledTimes(2);
   });
@@ -652,7 +661,7 @@ describe("POST /api/jobs/build-tx — Winston traces (#109)", () => {
   });
 
   it("logs Build-tx request received with path vars and traceId", async () => {
-    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==" });
+    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==", hash: () => Buffer.from("aa".repeat(32), "hex"), fee: "100" });
 
     await request(app).post("/api/jobs/build-tx").send(VALID_BODY).expect(200);
 
@@ -666,7 +675,7 @@ describe("POST /api/jobs/build-tx — Winston traces (#109)", () => {
   });
 
   it("logs Build-tx handler entered with path vars, params, and bodyKeys", async () => {
-    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==" });
+    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==", hash: () => Buffer.from("aa".repeat(32), "hex"), fee: "100" });
 
     await request(app).post("/api/jobs/build-tx").send(VALID_BODY).expect(200);
 
@@ -683,7 +692,7 @@ describe("POST /api/jobs/build-tx — Winston traces (#109)", () => {
   });
 
   it("logs Build-tx response sent with status=200 and path vars on success", async () => {
-    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==" });
+    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==", hash: () => Buffer.from("aa".repeat(32), "hex"), fee: "100" });
 
     await request(app).post("/api/jobs/build-tx").send(VALID_BODY).expect(200);
 
@@ -699,7 +708,7 @@ describe("POST /api/jobs/build-tx — Winston traces (#109)", () => {
   });
 
   it("logs Build-tx response body prepared with success and xdrLength on success", async () => {
-    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==" });
+    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==", hash: () => Buffer.from("aa".repeat(32), "hex"), fee: "100" });
 
     await request(app).post("/api/jobs/build-tx").send(VALID_BODY).expect(200);
 
@@ -742,7 +751,7 @@ describe("POST /api/jobs/build-tx — Winston traces (#109)", () => {
   });
 
   it("traceId is consistent across request received and success logs", async () => {
-    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==" });
+    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==", hash: () => Buffer.from("aa".repeat(32), "hex"), fee: "100" });
 
     await request(app).post("/api/jobs/build-tx").send(VALID_BODY).expect(200);
 
@@ -764,7 +773,7 @@ describe("POST /api/jobs/build-tx — Winston traces (#109)", () => {
   });
 
   it("logs cache-hit served with source=cache and path vars", async () => {
-    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==" });
+    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==", hash: () => Buffer.from("aa".repeat(32), "hex"), fee: "100" });
 
     await request(app).post("/api/jobs/build-tx").send(VALID_BODY).expect(200);
     (mockLogger.info as ReturnType<typeof jest.fn>).mockClear();
@@ -807,7 +816,7 @@ describe("POST /api/jobs/build-tx — Winston traces (#109)", () => {
   });
 
   it("logs Build-tx XDR built successfully with xdrLength on success", async () => {
-    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==" });
+    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==", hash: () => Buffer.from("aa".repeat(32), "hex"), fee: "100" });
 
     await request(app).post("/api/jobs/build-tx").send(VALID_BODY).expect(200);
 
@@ -821,7 +830,7 @@ describe("POST /api/jobs/build-tx — Winston traces (#109)", () => {
   });
 
   it("logs Building Stellar transaction with method, fee, and timeout", async () => {
-    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==" });
+    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==", hash: () => Buffer.from("aa".repeat(32), "hex"), fee: "100" });
 
     await request(app).post("/api/jobs/build-tx").send(VALID_BODY).expect(200);
 
@@ -903,18 +912,18 @@ describe("POST /api/jobs/build-tx — contract method allowlist (#709)", () => {
     "admin_pause_escrow",
     "admin_resume_escrow",
   ])("accepts allowlisted method %s", async (method) => {
-    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==" });
+    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==", hash: () => Buffer.from("aa".repeat(32), "hex"), fee: "100" });
     const res = await request(app)
       .post("/api/jobs/build-tx")
       .send({ ...VALID_BODY, method })
       .expect(200);
-    expect(res.body).toEqual({ success: true, data: { xdr: "AAAAAQ==" }, xdr: "AAAAAQ==" });
+    expect(res.body.success).toBe(true); expect(res.body.data.xdr).toBe("AAAAAQ=="); expect(res.body.xdr).toBe("AAAAAQ==");
   });
 
   it.each(["add_whitelisted_token", "remove_whitelisted_token"])(
     "accepts allowlisted whitelist method %s with admin+token args",
     async (method) => {
-      mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==" });
+      mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==", hash: () => Buffer.from("aa".repeat(32), "hex"), fee: "100" });
       const res = await request(app)
         .post("/api/jobs/build-tx")
         .send({
@@ -926,7 +935,7 @@ describe("POST /api/jobs/build-tx — contract method allowlist (#709)", () => {
           ],
         })
         .expect(200);
-      expect(res.body).toEqual({ success: true, data: { xdr: "AAAAAQ==" }, xdr: "AAAAAQ==" });
+      expect(res.body.success).toBe(true); expect(res.body.data.xdr).toBe("AAAAAQ=="); expect(res.body.xdr).toBe("AAAAAQ==");
     },
   );
 });

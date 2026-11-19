@@ -26,19 +26,20 @@ import {
   BUILD_TX_CACHE_TTL,
   UNSIGNED_TX_TIMEOUT_S,
   unsignedTxValidUntil,
-  getFreshCachedXdr,
-  setCachedXdr,
+  getFreshCachedBuildTx,
+  setCachedBuildTx,
+  type BuildTxPayload,
 } from "./caches.js";
 import { formatError } from "../../utils/format-error.js";
 
 
 /**
- * build-tx answers with the standard `{ success, data: { xdr } }` envelope
- * (#772). The top-level `xdr` is kept, deprecated, because the deployed
- * frontend still reads it; drop it once escrow-frontend reads `data.xdr`.
+ * build-tx answers with the standard envelope and, additively, the prepared
+ * transaction metadata (#962). The top-level `xdr` is kept, deprecated, because
+ * the deployed frontend still reads it; drop it once it reads `data.xdr`.
  */
-function sendBuildTxSuccess(res: Response, xdr: string): void {
-  res.status(200).json({ success: true, data: { xdr }, xdr });
+function sendBuildTxSuccess(res: Response, payload: BuildTxPayload): void {
+  res.status(200).json({ success: true, data: payload, xdr: payload.xdr });
 }
 
 const router = Router();
@@ -112,19 +113,19 @@ router.post(
       const cacheKey = buildTxCacheKey(contractId, method, sourceAddress, args || []);
 
       logger.debug("Checking build-tx cache", { traceId, ...pathVars, cacheKey });
-      const cached = getFreshCachedXdr(buildTxCache, cacheKey);
+      const cached = getFreshCachedBuildTx(buildTxCache, cacheKey);
       if (cached !== undefined) {
         logger.info("Build-tx XDR served from cache", {
           traceId,
           ...pathVars,
           source: "cache",
-          xdrLength: cached.length,
+          xdrLength: cached.xdr.length,
         });
         logger.debug("Build-tx response body prepared", {
           traceId,
           ...pathVars,
           success: true,
-          xdrLength: cached.length,
+          xdrLength: cached.xdr.length,
         });
         logger.info("Build-tx response sent", {
           traceId,
@@ -132,7 +133,7 @@ router.post(
           status: 200,
           success: true,
           cached: true,
-          xdrLength: cached.length,
+          xdrLength: cached.xdr.length,
         });
         sendBuildTxSuccess(res, cached);
         return;
@@ -148,18 +149,18 @@ router.post(
       });
 
       if (!requestPromise) {
-        requestPromise = (async (): Promise<string> => {
+        requestPromise = (async (): Promise<BuildTxPayload> => {
           logger.info("Fetching build-tx XDR from Stellar RPC", {
             traceId,
             ...pathVars,
           });
 
-          const fee = await getInclusionFee(server);
+          const inclusionFee = await getInclusionFee(server);
           logger.debug("Building Stellar transaction for build-tx", {
             traceId,
             ...pathVars,
             method,
-            fee,
+            fee: inclusionFee,
             timeout: UNSIGNED_TX_TIMEOUT_S,
           });
           const contract = new Contract(contractId as string);
@@ -201,7 +202,7 @@ router.post(
           const scArgs = (args || []).map((a: any) => toScVal(a));
 
           const tx = new TransactionBuilder(account, {
-            fee,
+            fee: inclusionFee,
             networkPassphrase: NETWORK_PASSPHRASE,
           })
             .addOperation(contract.call(method, ...scArgs))
@@ -214,15 +215,27 @@ router.post(
           });
           const prepared = await server.prepareTransaction(tx);
           const xdr = prepared.toXDR();
-          logger.debug("Storing build-tx XDR in cache", {
+          const totalFee = String(prepared.fee);
+          const resourceFee = String(
+            BigInt(totalFee) >= BigInt(inclusionFee)
+              ? BigInt(totalFee) - BigInt(inclusionFee)
+              : 0n,
+          );
+          const payload: BuildTxPayload = {
+            xdr,
+            hash: Buffer.from(prepared.hash()).toString("hex"),
+            validUntil: unsignedTxValidUntil(tx),
+            fee: { total: totalFee, inclusion: String(inclusionFee), resource: resourceFee },
+          };
+          logger.debug("Storing build-tx payload in cache", {
             traceId,
             ...pathVars,
             cacheKey,
             xdrLength: xdr.length,
             ttlSeconds: BUILD_TX_CACHE_TTL,
           });
-          setCachedXdr(buildTxCache, cacheKey, xdr, unsignedTxValidUntil(tx), BUILD_TX_CACHE_TTL);
-          return xdr;
+          setCachedBuildTx(buildTxCache, cacheKey, payload, BUILD_TX_CACHE_TTL);
+          return payload;
         })();
 
         inFlightBuildTxRequests.set(cacheKey, requestPromise);
@@ -233,9 +246,9 @@ router.post(
         });
       }
 
-      let xdr: string;
+      let payload: BuildTxPayload;
       try {
-        xdr = await requestPromise;
+        payload = await requestPromise;
       } catch (err: unknown) {
         logger.debug("RPC promise rejected for build-tx, clearing cache entry", {
           traceId,
@@ -259,20 +272,20 @@ router.post(
           traceId,
           ...pathVars,
           source: "in-flight",
-          xdrLength: xdr.length,
+          xdrLength: payload.xdr.length,
         });
       }
 
       logger.info("Build-tx XDR built successfully", {
         traceId,
         ...pathVars,
-        xdrLength: xdr.length,
+        xdrLength: payload.xdr.length,
       });
       logger.debug("Build-tx response body prepared", {
         traceId,
         ...pathVars,
         success: true,
-        xdrLength: xdr.length,
+        xdrLength: payload.xdr.length,
       });
       logger.info("Build-tx response sent", {
         traceId,
@@ -280,10 +293,10 @@ router.post(
         status: 200,
         success: true,
         cached: false,
-        xdrLength: xdr.length,
+        xdrLength: payload.xdr.length,
       });
 
-      sendBuildTxSuccess(res, xdr);
+      sendBuildTxSuccess(res, payload);
     } catch (err: unknown) {
       const message = formatError(err);
       const stack = err instanceof Error ? err.stack : undefined;

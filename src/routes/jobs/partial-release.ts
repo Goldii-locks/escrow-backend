@@ -27,9 +27,10 @@ import {
   inFlightPartialReleaseRequests,
   UNSIGNED_TX_TIMEOUT_S,
   unsignedTxValidUntil,
-  getFreshCachedXdr,
-  setCachedXdr,
+  getFreshCachedBuildTx,
+  setCachedBuildTx,
   PARTIAL_RELEASE_CACHE_TTL,
+  type BuildTxPayload,
 } from "./caches.js";
 import {
   classifySimError,
@@ -111,16 +112,16 @@ router.post(
       );
 
       logger.debug("Checking partial-release cache", { traceId, contractId, index, cacheKey });
-      const cachedXdr = getFreshCachedXdr(partialReleaseCache, cacheKey);
-      if (cachedXdr !== undefined) {
+      const cached = getFreshCachedBuildTx(partialReleaseCache, cacheKey);
+      if (cached !== undefined) {
         logger.info("Partial-release XDR served from cache", {
           traceId,
           contractId,
           index,
           source: "cache",
-          xdrLength: cachedXdr.length,
+          xdrLength: cached.xdr.length,
         });
-        sendSuccess(res, { xdr: cachedXdr });
+        sendSuccess(res, cached);
         return;
       }
 
@@ -128,12 +129,13 @@ router.post(
       const servedFromInFlight = Boolean(requestPromise);
 
       if (!requestPromise) {
-        requestPromise = (async (): Promise<string> => {
+        requestPromise = (async (): Promise<BuildTxPayload> => {
           const contract = new Contract(contractId as string);
           const amountNum = BigInt(amount);
+          const inclusionFee = await getInclusionFee(server);
 
           const tx = new TransactionBuilder(account, {
-            fee: await getInclusionFee(server),
+            fee: inclusionFee,
             networkPassphrase: NETWORK_PASSPHRASE,
           })
             .addOperation(contract.call(
@@ -161,22 +163,28 @@ router.post(
           }
 
           const xdr = prepared.toXDR();
-          setCachedXdr(
-            partialReleaseCache,
-            cacheKey,
-            xdr,
-            unsignedTxValidUntil(tx),
-            PARTIAL_RELEASE_CACHE_TTL,
+          const totalFee = String(prepared.fee);
+          const resourceFee = String(
+            BigInt(totalFee) >= BigInt(inclusionFee)
+              ? BigInt(totalFee) - BigInt(inclusionFee)
+              : 0n,
           );
-          return xdr;
+          const payload: BuildTxPayload = {
+            xdr,
+            hash: Buffer.from(prepared.hash()).toString("hex"),
+            validUntil: unsignedTxValidUntil(tx),
+            fee: { total: totalFee, inclusion: String(inclusionFee), resource: resourceFee },
+          };
+          setCachedBuildTx(partialReleaseCache, cacheKey, payload, PARTIAL_RELEASE_CACHE_TTL);
+          return payload;
         })();
 
         inFlightPartialReleaseRequests.set(cacheKey, requestPromise);
       }
 
-      let xdr: string;
+      let payload: BuildTxPayload;
       try {
-        xdr = await requestPromise;
+        payload = await requestPromise;
       } catch (err: unknown) {
         partialReleaseCache.del(cacheKey);
         if (
@@ -198,7 +206,7 @@ router.post(
         logger.info("Partial-release XDR served from in-flight cache", { contractId, index });
       }
 
-      sendSuccess(res, { xdr });
+      sendSuccess(res, payload);
     } catch (err: unknown) {
       const errMsg = formatError(err);
       // Structured, server-side-only error detail – the client receives a clean

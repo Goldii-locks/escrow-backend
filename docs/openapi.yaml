@@ -706,6 +706,68 @@ paths:
         '500':
           description: Metrics could not be collected
 
+  /api/admin/jobs:
+    get:
+      summary: List monitored jobs for the admin dashboard
+      description: >
+        Monitored jobs joined with their participants, latest event and
+        whether any milestone has an open dispute, newest activity first,
+        with cursor pagination (#961).
+      security:
+        - AdminApiKeyAuth: []
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [disputed, active, completed]
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: cursor
+          in: query
+          required: false
+          description: The `nextCursor` value from the previous page.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: A page of jobs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  jobs:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        contractId: { type: string }
+                        client: { type: string, nullable: true }
+                        freelancer: { type: string, nullable: true }
+                        arbiter: { type: string, nullable: true }
+                        latestEventType: { type: string }
+                        latestLedger: { type: integer }
+                        hasOpenDispute: { type: boolean }
+                  nextCursor:
+                    type: string
+                    nullable: true
+        '400':
+          description: Unknown status filter
+        '401':
+          description: Unauthorized (missing or invalid admin API key)
+        '500':
+          description: Jobs could not be listed
+
   /api/admin/webhook-subscriptions:
     get:
       summary: List webhook subscriptions, including auto-disabled ones

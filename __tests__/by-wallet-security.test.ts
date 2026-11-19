@@ -5,6 +5,8 @@ import { jest } from "@jest/globals";
 
 // Mock the indexer DB so we don't need a real SQLite connection for security tests
 jest.unstable_mockModule("../src/indexer/db.js", () => ({
+  iterateEventsByContract: jest.fn(),
+  getDb: jest.fn(),
   getJobsByWallet: jest.fn().mockReturnValue({
     data: [],
     pagination: { page: 1, limit: 10, totalPages: 0, totalItems: 0 },

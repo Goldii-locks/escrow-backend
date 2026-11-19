@@ -1,6 +1,7 @@
 import { Router } from "express";
 import byWalletRouter from "./jobs/by-wallet.js";
 import createJobDraftRouter from "./jobs/create-job-draft.js";
+import historyCsvRouter from "./jobs/history-csv.js";
 import historyRouter from "./jobs/history.js";
 import whitelistRouter from "./jobs/whitelist.js";
 import buildTxRouter from "./jobs/build-tx.js";
@@ -17,6 +18,7 @@ const router = Router();
 // so static paths are never swallowed by the contract-ID param route.
 router.use(byWalletRouter);
 router.use(createJobDraftRouter);
+router.use(historyCsvRouter);
 router.use(historyRouter);
 router.use(whitelistRouter);
 router.use(buildTxRouter);
