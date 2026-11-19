@@ -703,3 +703,100 @@ describe("RpcPollerClient – database transaction isolation", () => {
     });
   });
 });
+
+describe("RPC retry jitter (#947)", () => {
+  const config = {
+    initialBackoffMs: 1000,
+    backoffMultiplier: 2,
+    maxBackoffMs: 30000,
+  };
+
+  function seeded(values: number[]): () => number {
+    let index = 0;
+    return () => values[index++ % values.length];
+  }
+
+  it("applies full jitter within [0, deterministic cap]", () => {
+    for (const attempt of [0, 1, 2, 5, 10]) {
+      const cap = Math.min(1000 * Math.pow(2, attempt), 30000);
+      expect(computeBackoffMs(attempt, config, seeded([0]))).toBe(0);
+      expect(computeBackoffMs(attempt, config, seeded([0.5]))).toBe(cap / 2);
+      expect(computeBackoffMs(attempt, config, seeded([1]))).toBe(cap);
+      expect(computeBackoffMs(attempt, config, seeded([0.999999]))).toBeLessThanOrEqual(cap);
+    }
+  });
+
+  it("clamps out-of-range and non-finite samples", () => {
+    expect(computeBackoffMs(0, config, () => -1)).toBe(0);
+    expect(computeBackoffMs(0, config, () => 2)).toBe(1000);
+    expect(computeBackoffMs(0, config, () => Number.NaN)).toBe(1000);
+  });
+
+  it("keeps the deterministic upper bound by default", () => {
+    expect(computeBackoffMs(0, config)).toBe(1000);
+    expect(computeBackoffMs(1, config)).toBe(2000);
+    expect(computeBackoffMs(6, config)).toBe(30000);
+  });
+
+  it("uses the injected random source in withRetry", async () => {
+    jest.useFakeTimers();
+    try {
+      const samples: number[] = [];
+      let calls = 0;
+      const result = withRetry(
+        async () => {
+          calls++;
+          if (calls === 1) throw new Error("status 429");
+          return "ok";
+        },
+        {
+          maxRetries: 1,
+          initialBackoffMs: 1000,
+          maxBackoffMs: 5000,
+          random: () => {
+            samples.push(0.25);
+            return 0.25;
+          },
+        },
+        "jitter-test"
+      );
+      await jest.advanceTimersByTimeAsync(250);
+      expect(await result).toBe("ok");
+      expect(samples).toEqual([0.25]);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it("keeps Retry-After as a lower bound even when jitter returns zero", async () => {
+    jest.useFakeTimers();
+    try {
+      let calls = 0;
+      const throttled = Object.assign(new Error("status 429"), {
+        status: 429,
+        response: { headers: { "Retry-After": "1" } },
+      });
+      const result = withRetry(
+        async () => {
+          calls++;
+          if (calls === 1) throw throttled;
+          return "ok";
+        },
+        {
+          maxRetries: 1,
+          initialBackoffMs: 1000,
+          maxBackoffMs: 5000,
+          random: () => 0,
+        },
+        "jitter-retry-after-test"
+      );
+      await jest.advanceTimersByTimeAsync(999);
+      expect(calls).toBe(1);
+      await jest.advanceTimersByTimeAsync(1);
+      expect(await result).toBe("ok");
+      expect(calls).toBe(2);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+});

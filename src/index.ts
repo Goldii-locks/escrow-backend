@@ -1,6 +1,10 @@
 // #602: must be the first import. ES imports are evaluated before this
 // module's body, and several modules read process.env at top level.
 import "dotenv/config";
+import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
+import type { Express } from "express";
+import type { Server } from "http";
 import { createApp, assertProductionEnv } from "./app.js";
 import { validateConfigAtStartup } from "./config.js";
 import { runMigrations } from "./indexer/db.js";
@@ -39,31 +43,67 @@ assertProductionEnv();
 const app = createApp();
 const PORT = process.env.PORT || 3001;
 
-// Run DB migrations then start the indexer poller
-runMigrations();
-markIndexerStarted();
+export interface StartupDeps {
+  /** Override the app instance (tests inject a fresh Express app). */
+  createApp?: () => Express;
+  runMigrations?: () => void;
+  markIndexerStarted?: () => void;
+  assertRpcNetworkMatches?: () => Promise<void>;
+  startPoller?: () => void;
+  startReconciliationJob?: () => void;
+  registerShutdownHandlers?: (server: Server) => void;
+  listen?: (target: Express, port: string | number, onListening?: () => void) => Server;
+  exit?: (code: number) => void;
+  port?: string | number;
+}
 
-// #692: Verify the RPC's reported network passphrase matches our config
-// before accepting any traffic. Mismatches would cause silent signature
-// failures; fail loud at startup instead.
-assertRpcNetworkMatches()
-  .then(() => {
-    startPoller();
-    startReconciliationJob();
-  })
-  .catch((err) => {
+/**
+ * Boot the backend. Every side effect that used to live in the module body is
+ * injectable so the startup sequence can be tested (#950): a failed RPC
+ * network check must exit(1) without starting the poller or reconciler.
+ */
+export async function main(deps: StartupDeps = {}): Promise<void> {
+  const targetApp = deps.createApp ? deps.createApp() : app;
+  const port = deps.port ?? PORT;
+
+  (deps.runMigrations ?? runMigrations)();
+  (deps.markIndexerStarted ?? markIndexerStarted)();
+
+  // #692: Verify the RPC's reported network passphrase matches our config
+  // before accepting any traffic. Mismatches would cause silent signature
+  // failures; fail loud at startup instead.
+  try {
+    await (deps.assertRpcNetworkMatches ?? assertRpcNetworkMatches)();
+  } catch (err) {
     logger.error("Startup network check failed – shutting down", {
       error: err instanceof Error ? err.message : String(err),
     });
-    process.exit(1);
+    (deps.exit ?? process.exit)(1);
+    return;
+  }
+
+  (deps.startPoller ?? startPoller)();
+  (deps.startReconciliationJob ?? startReconciliationJob)();
+
+  const listen = deps.listen ?? ((a: Express, p: string | number, cb?: () => void) => a.listen(p, cb));
+  const server = listen(targetApp, port, () => {
+    logger.info("Escrow backend started", { port });
   });
 
-const server = app.listen(PORT, () => {
-  logger.info("Escrow backend started", { port: PORT });
-});
+  // #623: drain in-flight work (poller, HTTP, SQLite) on SIGTERM/SIGINT
+  // instead of exiting mid-transaction.
+  (deps.registerShutdownHandlers ?? registerShutdownHandlers)(server);
+}
 
-// #623: drain in-flight work (poller, HTTP, SQLite) on SIGTERM/SIGINT
-// instead of exiting mid-transaction.
-registerShutdownHandlers(server);
+// Run only when this module is the process entry point. Importing index.ts in
+// a test must not bind a port or touch the database; the production assertion
+// above still runs on import so the existing fail-fast tests keep working.
+const invokedDirectly =
+  typeof process.argv[1] === "string" &&
+  resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+
+if (invokedDirectly) {
+  void main();
+}
 
 export default app;
