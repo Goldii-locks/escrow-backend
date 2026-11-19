@@ -38,7 +38,7 @@ describe("production startup assertion (src/index.ts)", () => {
     process.env.NODE_ENV = "production";
     process.env.API_KEY = "set";
     process.env.ALLOWED_ORIGINS = "https://example.test";
-    process.env.CONTRACT_ID = "CDD5WKK3WT3QVKXMXTJNDIXE4T73FK6GGXDSD6UTJAH6YYZU52SQ4MUH";
+    process.env.CONTRACT_ID = "CARZQMYKDGA4TTIE2XBDJ42EX27VYLLJGGG4WGUIXXWIVHPDTX3UCLJA";
     delete process.env.ADMIN_API_KEY;
 
     await expect(import("../src/index.js")).rejects.toThrow(

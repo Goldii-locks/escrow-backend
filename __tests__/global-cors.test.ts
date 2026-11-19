@@ -45,7 +45,7 @@ describe("global CORS allowlist (#601)", () => {
   });
 
   it.each([
-    ["GET", "/api/jobs/CDD5WKK3WT3QVKXMXTJNDIXE4T73FK6GGXDSD6UTJAH6YYZU52SQ4MUH"],
+    ["GET", "/api/jobs/CARZQMYKDGA4TTIE2XBDJ42EX27VYLLJGGG4WGUIXXWIVHPDTX3UCLJA"],
     ["GET", "/api/jobs/by-wallet/GAODBHVR63Z56MVQRBEJSYM2H5423LJ4WAPUUBOFG4JYY72S6ROKVZRX"],
     ["POST", "/api/jobs/build-tx"],
     ["POST", "/api/jobs/submit"],

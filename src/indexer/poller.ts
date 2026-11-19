@@ -87,7 +87,9 @@ let failoverNodeSelected = false;
 
 /** Pick the healthiest configured node and rebuild the client against it. */
 async function selectRpcNode(): Promise<void> {
-  const selected = await createFailoverServer(RPC_URLS, (url) => new Server(url, { allowHttp: rpcAllowHttp(url) }));
+  const selected = await createFailoverServer(RPC_URLS, (url) =>
+    new Server(url, { allowHttp: rpcAllowHttp(url), timeout: config.rpcTimeoutMs })
+  );
   failoverNodeSelected = true;
   if (!selected) return;
   if (selected.nodeUrl !== activeNodeUrl) {
@@ -1075,6 +1077,39 @@ let pollerTimeout: NodeJS.Timeout | null = null;
 let pollerRunning = false;
 
 /**
+ * Deadline for a single poll cycle (#954). Five RPC timeouts is enough for a
+ * getEvents → backfill → verification sequence, while still bounding a hung
+ * connection that the transport timeout did not abort (half-open TCP, stuck
+ * load balancer).
+ */
+export const POLL_CYCLE_WATCHDOG_FACTOR = 5;
+
+export function pollCycleWatchdogMs(): number {
+  return Math.max(config.rpcTimeoutMs * POLL_CYCLE_WATCHDOG_FACTOR, 1_000);
+}
+
+/**
+ * Reject if `work` has not settled by the cycle deadline. The timer is
+ * unref'd so it never keeps the process (or a Jest worker) alive on its own,
+ * and is always cleared on settlement.
+ */
+export function withPollCycleWatchdog<T>(
+  work: Promise<T>,
+  timeoutMs: number = pollCycleWatchdogMs()
+): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error(`Poll cycle exceeded ${timeoutMs}ms watchdog deadline`));
+    }, timeoutMs);
+    timer.unref?.();
+  });
+  return Promise.race([work, deadline]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
+/**
  * One poll cycle (#689); pollEvents() applies the interval adjustment.
  *
  * Never rejects: `pollEvents` already converts failures to a `false`
@@ -1084,8 +1119,8 @@ let pollerRunning = false;
 async function runPollCycle(): Promise<void> {
   try {
     // pollEvents() adjusts the interval itself, so the logged and scheduled
-    // delays match (#639).
-    await pollEvents();
+    // delays match (#639). The watchdog bounds a hung RPC that never settles.
+    await withPollCycleWatchdog(pollEvents());
   } catch (err) {
     const consecutiveFailures = failureMonitor.recordFailure("poll", {
       error: formatError(err),
@@ -1103,6 +1138,8 @@ async function pollLoop() {
   await runPollCycle();
   if (!pollerRunning) return;
   pollerTimeout = setTimeout(pollLoop, currentPollIntervalMs);
+  // A pending poll must never keep a process or Jest worker alive (#951).
+  pollerTimeout.unref?.();
 }
 
 export function startPoller() {
@@ -1136,6 +1173,7 @@ export function startPoller() {
     .then(() => {
       if (pollerRunning) {
         pollerTimeout = setTimeout(pollLoop, currentPollIntervalMs);
+        pollerTimeout.unref?.();
       }
     });
 
@@ -1233,6 +1271,8 @@ function scheduleNextMaintenance(intervalMs: number): void {
       Number.isFinite(next) && next > 0 ? next : DEFAULT_DB_MAINTENANCE_INTERVAL_MS,
     );
   }, intervalMs);
+  // The maintenance interval is hours; it must not hold a worker open (#951).
+  maintenanceTimeout.unref?.();
 }
 
 /** Start the maintenance scheduler and run the first cycle immediately. */

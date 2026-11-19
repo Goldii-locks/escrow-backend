@@ -24,7 +24,7 @@ const KEY = "webhook-auth-test-admin-key";
 // A valid contract id: subscribe now rejects malformed ids and contracts the
 // indexer does not monitor (#641), so the tests register it first.
 const CONTRACT =
-  "CDD5WKK3WT3QVKXMXTJNDIXE4T73FK6GGXDSD6UTJAH6YYZU52SQ4MUH";
+  "CARZQMYKDGA4TTIE2XBDJ42EX27VYLLJGGG4WGUIXXWIVHPDTX3UCLJA";
 const SUBSCRIBED_URL = "https://example.com/hook";
 const ATTACKER_URL = "https://attacker.example/hook";
 
