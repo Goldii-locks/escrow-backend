@@ -180,6 +180,25 @@ paths:
             type: integer
             default: 20
             maximum: 100
+        - name: role
+          in: query
+          required: false
+          description: Only jobs where this wallet holds the given role.
+          schema:
+            type: string
+            enum: [client, freelancer, arbiter]
+        - name: state
+          in: query
+          required: false
+          description: >
+            open (default semantics) means the job's latest indexed event is not
+            terminal; closed means the latest indexed event is one of the
+            terminal outcomes: adminexc, adtxrfd, adtxrls, arbsplit, cancel,
+            cxlappr, cxlspref, msadmref, msadmrel, resolve, sprefnet, splitref,
+            sweep, twspltref, unaccref, withdraw.
+          schema:
+            type: string
+            enum: [open, closed]
       responses:
         '200':
           description: List of jobs for wallet
@@ -888,3 +907,57 @@ paths:
           description: contract_id is missing
         '401':
           description: Unauthorized (missing or invalid API key)
+
+  /api/tokens/{contractId}:
+    get:
+      summary: Resolve SEP-41 token metadata
+      description: >
+        Returns the cached on-chain symbol, name and decimals for a token
+        contract, so clients can format raw i128 amounts. Public read-only;
+        success responses are cacheable for one hour.
+      parameters:
+        - name: contractId
+          in: path
+          required: true
+          description: Stellar token contract address (C... 56 chars)
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Resolved token metadata
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                example: public, max-age=3600
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  data:
+                    type: object
+                    properties:
+                      contractId:
+                        type: string
+                      symbol:
+                        type: string
+                        description: Empty when the contract has no symbol().
+                      name:
+                        type: string
+                      decimals:
+                        type: integer
+                        minimum: 0
+                        maximum: 18
+                      label:
+                        type: string
+                        description: Human-readable display label for the symbol.
+        '400':
+          description: Invalid contract id
+        '404':
+          description: Contract does not implement the token interface
+        '429':
+          description: Rate limit exceeded

@@ -1,43 +1,39 @@
-# Indexer database backups
+# Database backup and rollback
 
-All indexed state lives in one SQLite file on the host at
-`/opt/escrow/data/escrow.db` (mounted into the backend container at
-`/app/data`). `deploy/backup.sh` runs on the host, takes an online, consistent
-copy with `sqlite3 .backup` (safe under WAL), checks it with
-`PRAGMA integrity_check`, gzips it and uploads it to
-`s3://<bucket>/escrow-backend/indexer/escrow-YYYY-MM-DD.db.gz`.
-Running it twice on the same day overwrites that day's object, and any failure
-exits non-zero.
+## Pre-migration safety backups (#955)
 
-## Setup
+Every time `runMigrations()` is about to apply one or more pending migrations on
+startup it creates an online SQLite backup of the database **before** the first
+pending migration runs:
 
-1. Install `sqlite3`, `gzip` and the AWS CLI on the instance.
-2. Create the bucket and apply the lifecycle rule (30-day expiry):
-   `aws s3api put-bucket-lifecycle-configuration --bucket <bucket> --lifecycle-configuration file://deploy/backup-lifecycle-policy.json`
-3. Attach `deploy/backup-iam-policy.json` to the deploy role, with `YOUR_BUCKET`
-   replaced. It grants `s3:PutObject` on the backup prefix only.
-4. Install the script and the cron entry (set `BACKUP_S3_BUCKET` in
-   `deploy/backup.cron` first):
-   `sudo install -m 755 deploy/backup.sh /opt/escrow/backup.sh`
-   `sudo cp deploy/backup.cron /etc/cron.d/escrow-backup`
-5. Run it once by hand to confirm it works:
-   `sudo BACKUP_S3_BUCKET=<bucket> /opt/escrow/backup.sh`
+- Path: `<DB_PATH>.pre-v<N>.bak`, where `N` is the first pending migration
+  version (for example `data/escrow.db.pre-v11.bak`).
+- Created with better-sqlite3's `db.backup(path)` (SQLite online backup API),
+  so the copy is consistent even when WAL mode is active.
+- In-memory databases (`:memory:`) are never backed up.
+- The indexer keeps the **two most recent** `.pre-v*.bak` files per database and
+  removes older ones automatically.
+- The backup path is logged at startup as `Created pre-migration SQLite backup`.
+- If no migrations are pending, no backup file is written.
 
-## Restore
+## Deploy rollback (`deploy/deploy.sh`)
 
-Restoring needs read access (`s3:GetObject`), which the deploy role does not
-have. Use an operator role.
+`deploy.sh` records the highest `schema_migrations.version` in the host database
+before deploying the backend image. On a failed health check it:
 
-1. Download the backup:
-   `aws s3 cp s3://<bucket>/escrow-backend/indexer/escrow-YYYY-MM-DD.db.gz .`
-2. Unpack it: `gunzip escrow-YYYY-MM-DD.db.gz`
-3. Stop the backend: `cd /opt/escrow && docker compose stop backend`
-4. Move the old database aside, then copy the restored file to
-   `/opt/escrow/data/escrow.db`. Delete any stale `escrow.db-wal` and
-   `escrow.db-shm` files next to it.
-5. Make the app able to read it: `sudo chown 1001 /opt/escrow/data/escrow.db`
-6. Start the backend: `cd /opt/escrow && docker compose up -d backend`
-7. Check `GET /api/admin/indexer-status` and confirm `lastIndexedLedger`
-   matches the value from before the backup.
+1. Compares the post-failure schema version to the pre-deploy version.
+2. If migrations were applied, restores the newest `<DB_PATH>.pre-v*.bak` over the
+   database file and removes any stale `-wal`/`-shm` sidecars.
+3. Restarts the previous image tag.
 
-The restore procedure has not been run end to end against a real bucket yet.
+The host database path defaults to `./data/escrow.db` (matching the Compose bind
+mount) and can be overridden with `DB_PATH_HOST`. `sqlite3` is used when
+available on the host; otherwise the script falls back to running `sqlite3`
+inside an ephemeral `alpine` container.
+
+## When there is no backup
+
+If no pre-migration backup exists (for example, the failed release did not apply
+migrations, or the database is new), the script logs the condition and proceeds
+with the image rollback only. Routine operational backups remain the
+responsibility of `deploy/backup.sh` / the existing backup cron.

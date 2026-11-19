@@ -356,6 +356,8 @@ export const byWalletQuerySchema = z.object({
       { message: "limit must be between 1 and 100" },
     )
     .transform((v) => (typeof v === "number" ? v : parseInt(v, 10))),
+  role: z.enum(["client", "freelancer", "arbiter"]).optional(),
+  state: z.enum(["open", "closed"]).optional(),
 });
 
 /**

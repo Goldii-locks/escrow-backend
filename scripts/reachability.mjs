@@ -6,6 +6,9 @@ import path from "node:path";
 const repoRoot = process.cwd();
 const srcRoot = path.join(repoRoot, "src");
 const entryFile = path.join(srcRoot, "index.ts");
+const architecturePath = path.join(repoRoot, "docs", "ARCHITECTURE.md");
+const startMarker = "<!-- reachability:start -->";
+const endMarker = "<!-- reachability:end -->";
 
 function walkFiles(dir, acc = []) {
   const entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -93,30 +96,94 @@ function walkReachable(entry) {
   return visited;
 }
 
-if (!fs.existsSync(entryFile)) {
-  console.error(`Entry file not found: ${path.relative(repoRoot, entryFile)}`);
-  process.exit(1);
+function buildRows() {
+  if (!fs.existsSync(entryFile)) {
+    throw new Error(`Entry file not found: ${path.relative(repoRoot, entryFile)}`);
+  }
+  const allModules = walkFiles(srcRoot).sort((a, b) => a.localeCompare(b));
+  const reachableModules = walkReachable(entryFile);
+
+  return allModules.map((modulePath) => {
+    const relative = path.relative(repoRoot, modulePath).replace(/\\/g, "/");
+    const status = reachableModules.has(modulePath) ? "live" : "unwired";
+    const trackingIssue = status === "unwired" ? "#718" : "";
+    return { module: relative, status, trackingIssue };
+  });
 }
 
-const allModules = walkFiles(srcRoot).sort((a, b) => a.localeCompare(b));
-const reachableModules = walkReachable(entryFile);
+function renderTable(rows) {
+  const lines = [
+    "| Module | Status | Tracking issue |",
+    "|---|---|---|",
+  ];
+  for (const row of rows) {
+    const issueCell = row.trackingIssue
+      ? `[${row.trackingIssue}](https://github.com/Goldii-locks/escrow-backend/issues/718)`
+      : "—";
+    lines.push(`| \`${row.module}\` | ${row.status} | ${issueCell} |`);
+  }
+  return lines.join("\n");
+}
 
-const rows = allModules.map((modulePath) => {
-  const relative = path.relative(repoRoot, modulePath).replace(/\\/g, "/");
-  const status = reachableModules.has(modulePath) ? "live" : "unwired";
-  const trackingIssue = status === "unwired" ? "#718" : "";
-  return { module: relative, status, trackingIssue };
-});
+function renderMarkedTable(rows) {
+  return `${startMarker}\n${renderTable(rows)}\n${endMarker}`;
+}
 
-const liveCount = rows.filter((row) => row.status === "live").length;
-const unwiredCount = rows.length - liveCount;
+function extractMarkedTable(content) {
+  const start = content.indexOf(startMarker);
+  const end = content.indexOf(endMarker);
+  if (start === -1 || end === -1 || end < start) {
+    throw new Error(
+      `docs/ARCHITECTURE.md must contain ${startMarker} and ${endMarker}`,
+    );
+  }
+  return content.slice(start, end + endMarker.length);
+}
 
-console.log(`Entry: ${path.relative(repoRoot, entryFile).replace(/\\/g, "/")}`);
-console.log(`Total modules: ${rows.length}`);
-console.log(`Live modules: ${liveCount}`);
-console.log(`Unwired modules: ${unwiredCount}`);
+function printSummary(rows) {
+  const liveCount = rows.filter((row) => row.status === "live").length;
+  const unwiredCount = rows.length - liveCount;
+  console.log(`Entry: ${path.relative(repoRoot, entryFile).replace(/\\/g, "/")}`);
+  console.log(`Total modules: ${rows.length}`);
+  console.log(`Live modules: ${liveCount}`);
+  console.log(`Unwired modules: ${unwiredCount}`);
+}
+
+const rows = buildRows();
+const check = process.argv.includes("--check");
+const write = process.argv.includes("--write");
+
+if (check) {
+  const content = fs.readFileSync(architecturePath, "utf8");
+  const expected = renderMarkedTable(rows);
+  const actual = extractMarkedTable(content);
+  if (actual !== expected) {
+    console.error("docs/ARCHITECTURE.md is out of sync with scripts/reachability.mjs.");
+    console.error("Run `node scripts/reachability.mjs --write` to regenerate the table.");
+    process.exit(1);
+  }
+  printSummary(rows);
+  console.log("ARCHITECTURE.md reachability table is up to date.");
+  process.exit(0);
+}
+
+if (write) {
+  const content = fs.readFileSync(architecturePath, "utf8");
+  const expected = renderMarkedTable(rows);
+  const start = content.indexOf(startMarker);
+  const end = content.indexOf(endMarker);
+  if (start === -1 || end === -1 || end < start) {
+    throw new Error(
+      `docs/ARCHITECTURE.md must contain ${startMarker} and ${endMarker}`,
+    );
+  }
+  const next = content.slice(0, start) + expected + content.slice(end + endMarker.length);
+  fs.writeFileSync(architecturePath, next);
+  printSummary(rows);
+  console.log("Updated docs/ARCHITECTURE.md.");
+  process.exit(0);
+}
+
+printSummary(rows);
 console.log("");
-console.log("module\tstatus\ttrackingIssue");
-for (const row of rows) {
-  console.log(`${row.module}\t${row.status}\t${row.trackingIssue}`);
-}
+console.log(renderTable(rows));

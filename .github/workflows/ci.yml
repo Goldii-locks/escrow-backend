@@ -27,6 +27,9 @@ jobs:
         # except those listed with a reason in .audit-allowlist.json.
         run: node scripts/audit-gate.mjs
 
+      - name: Architecture reachability table
+        run: node scripts/reachability.mjs --check
+
       - name: Lint
         run: npm run lint
 
