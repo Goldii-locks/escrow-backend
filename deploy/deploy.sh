@@ -53,10 +53,57 @@ docker compose up -d --remove-orphans
 #
 # Both paths trigger the rollback on failure and exit non-zero.
 
+# Compare applied schema_migrations versions between before/after for the backend
+# deploy so a failed migration can restore the pre-migration backup.
+schema_version() {
+  local db_path="$1"
+  if [ ! -f "${db_path}" ]; then
+    echo "0"
+    return
+  fi
+  if command -v sqlite3 >/dev/null 2>&1; then
+    sqlite3 "${db_path}" "SELECT COALESCE(MAX(version),0) FROM schema_migrations;" 2>/dev/null || echo "0"
+  else
+    docker run --rm -v "$(dirname "${db_path}"):/db" alpine:3.20 \
+      sh -c 'apk add --no-cache sqlite >/dev/null 2>&1 && sqlite3 "/db/'"$(basename "${db_path}")"'" "SELECT COALESCE(MAX(version),0) FROM schema_migrations;"' 2>/dev/null || echo "0"
+  fi
+}
+
+restore_pre_migration_backup() {
+  local db_path="$1"
+  local expected_version="$2"
+  local backup
+  backup=$(ls -1t "${db_path}".pre-v*.bak 2>/dev/null | head -1 || true)
+  if [ -z "${backup}" ]; then
+    echo "!! no pre-migration backup found for ${db_path}" >&2
+    return 1
+  fi
+  echo "==> restoring pre-migration backup ${backup} (target schema ${expected_version})" >&2
+  cp "${backup}" "${db_path}"
+  if [ -f "${db_path}-wal" ]; then rm -f "${db_path}-wal"; fi
+  if [ -f "${db_path}-shm" ]; then rm -f "${db_path}-shm"; fi
+  echo "==> restored ${db_path} from ${backup}" >&2
+}
+
+DB_PATH_HOST="${DB_PATH_HOST:-./data/escrow.db}"
+SCHEMA_VERSION_BEFORE=""
+if [ "${SERVICE}" = "backend" ]; then
+  SCHEMA_VERSION_BEFORE=$(schema_version "${DB_PATH_HOST}")
+  echo "schema_migrations version before deploy: ${SCHEMA_VERSION_BEFORE}"
+fi
+
 rollback() {
   echo "!! health check failed for ${SERVICE}:${TAG}" >&2
   echo "!! last 40 lines of ${SERVICE} logs:" >&2
   docker compose logs --tail=40 "${SERVICE}" >&2
+  if [ "${SERVICE}" = "backend" ] && [ -n "${SCHEMA_VERSION_BEFORE}" ]; then
+    SCHEMA_VERSION_AFTER=$(schema_version "${DB_PATH_HOST}")
+    echo "schema_migrations version after failed deploy: ${SCHEMA_VERSION_AFTER}" >&2
+    if [ "${SCHEMA_VERSION_AFTER}" -gt "${SCHEMA_VERSION_BEFORE}" ] 2>/dev/null; then
+      echo "!! migrations were applied (${SCHEMA_VERSION_BEFORE} -> ${SCHEMA_VERSION_AFTER}); restoring backup before rollback" >&2
+      restore_pre_migration_backup "${DB_PATH_HOST}" "${SCHEMA_VERSION_BEFORE}" || true
+    fi
+  fi
   if [ -n "${PREVIOUS:-}" ]; then
     echo "!! rolling back to ${PREVIOUS}" >&2
     sed -i "s|^${KEY}=.*|${KEY}=${PREVIOUS}|" .env
