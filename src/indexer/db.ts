@@ -11,11 +11,21 @@ import {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 let dbInstance: Database.Database | null = null;
+let dbFilePath: string | null = null;
+let lastPreMigrationBackupPath: string | null = null;
+
+const MAX_PRE_MIGRATION_BACKUPS = 2;
+
+export function resolveDbFilePath(): string {
+  if (dbFilePath) return dbFilePath;
+  dbFilePath = process.env.DB_PATH || path.join(__dirname, "../../data/escrow.db");
+  return dbFilePath;
+}
 
 export function getDb(): Database.Database {
   if (dbInstance) return dbInstance;
 
-  const dbPath = process.env.DB_PATH || path.join(__dirname, "../../data/escrow.db");
+  const dbPath = resolveDbFilePath();
   const dataDir = path.dirname(dbPath);
   if (!fs.existsSync(dataDir)) {
     fs.mkdirSync(dataDir, { recursive: true });
@@ -25,8 +35,12 @@ export function getDb(): Database.Database {
   return dbInstance;
 }
 
-export function setDb(newDb: Database.Database) {
+// For tests - allows injecting an in-memory db
+export function setDb(newDb: Database.Database, filePath?: string | null) {
   dbInstance = newDb;
+  if (filePath !== undefined) {
+    dbFilePath = filePath;
+  }
 }
 
 /**
@@ -38,15 +52,67 @@ export function setDb(newDb: Database.Database) {
  * lets test teardown release it.
  */
 export function closeDb(): void {
-  if (!dbInstance) return;
+  if (dbInstance) {
+    try {
+      dbInstance.close();
+    } catch (err) {
+      logger.warn("Failed to close database connection", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      dbInstance = null;
+    }
+  }
+  dbFilePath = null;
+  lastPreMigrationBackupPath = null;
+}
+
+export function getLastPreMigrationBackupPath(): string | null {
+  return lastPreMigrationBackupPath;
+}
+
+function prunePreMigrationBackups(dbPath: string): void {
   try {
-    dbInstance.close();
+    const dir = path.dirname(dbPath);
+    const base = path.basename(dbPath);
+    const backups = fs
+      .readdirSync(dir)
+      .filter((name) => name.startsWith(`${base}.pre-v`) && name.endsWith(".bak"))
+      .map((name) => {
+        const full = path.join(dir, name);
+        return { full, mtime: fs.statSync(full).mtimeMs };
+      })
+      .sort((a, b) => b.mtime - a.mtime);
+    for (const stale of backups.slice(MAX_PRE_MIGRATION_BACKUPS)) {
+      fs.rmSync(stale.full, { force: true });
+    }
   } catch (err) {
-    logger.warn("Failed to close database connection", {
+    logger.warn("Failed to prune pre-migration backups", {
       error: err instanceof Error ? err.message : String(err),
     });
-  } finally {
-    dbInstance = null;
+  }
+}
+
+function createPreMigrationBackup(database: Database.Database, nextVersion: number): void {
+  const dbPath = resolveDbFilePath();
+  if (!dbPath || dbPath === ":memory:" || path.basename(dbPath) === ":memory:") {
+    return;
+  }
+  const backupPath = `${dbPath}.pre-v${nextVersion}.bak`;
+  try {
+    database.backup(backupPath);
+    lastPreMigrationBackupPath = backupPath;
+    logger.info("Created pre-migration SQLite backup", {
+      backupPath,
+      nextVersion,
+    });
+    prunePreMigrationBackups(dbPath);
+  } catch (err) {
+    logger.warn("Failed to create pre-migration SQLite backup", {
+      backupPath,
+      nextVersion,
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
 }
 
@@ -758,6 +824,16 @@ export function runMigrations(
       UNIQUE(contract_id, webhook_url)
     );
   `);
+
+  const pending = MIGRATIONS.filter(
+    (migration) =>
+      !database
+        .prepare("SELECT 1 FROM schema_migrations WHERE version = ?")
+        .get(migration.version),
+  );
+  if (pending.length > 0) {
+    createPreMigrationBackup(database, pending[0].version);
+  }
 
   for (const migration of MIGRATIONS) {
     const applied = database
@@ -1729,6 +1805,92 @@ export interface PaginatedJobs {
   limit: number;
 }
 
+export interface ByWalletFilters {
+  role?: "client" | "freelancer" | "arbiter";
+  state?: "open" | "closed";
+}
+
+/**
+ * Latest-event discriminators that end a job (#958). A job is "closed" when
+ * its most recent indexed event is one of these; otherwise it is "open".
+ * Kept in sync with the documented definition in docs/openapi.yaml.
+ */
+export const TERMINAL_JOB_EVENT_TYPES = [
+  "adminexc",
+  "adtxrfd",
+  "adtxrls",
+  "arbsplit",
+  "cancel",
+  "cxlappr",
+  "cxlspref",
+  "msadmref",
+  "msadmrel",
+  "resolve",
+  "sprefnet",
+  "splitref",
+  "sweep",
+  "twspltref",
+  "unaccref",
+  "withdraw",
+] as const;
+
+const TERMINAL_EVENT_SQL = TERMINAL_JOB_EVENT_TYPES.map(
+  (eventType) => `'${eventType}'`,
+).join(", ");
+
+/**
+ * Shared CTEs and bind parameters for the wallet job count/page queries.
+ * Exported so the EXPLAIN QUERY PLAN assertion in the tests checks the real
+ * query rather than a hand-written approximation (#958).
+ */
+export function buildWalletJobsQuery(
+  address: string,
+  filters: ByWalletFilters = {},
+): { ctes: string; params: Array<string | null> } {
+  const { role = null, state = null } = filters;
+  const ctes = `WITH wallet_contracts AS (
+       SELECT
+         contract_id,
+         CASE
+           WHEN MAX(role = 'client') = 1 THEN 'client'
+           WHEN MAX(role = 'freelancer') = 1 THEN 'freelancer'
+           WHEN MAX(role = 'arbiter') = 1 THEN 'arbiter'
+           ELSE 'unknown'
+         END AS role
+       FROM job_participants
+       WHERE address = ?
+       GROUP BY contract_id
+     ),
+     ranked_events AS (
+       SELECT
+         e.contract_id,
+         e.event_type,
+         e.ledger_sequence,
+         e.timestamp,
+         e.data_json,
+         ROW_NUMBER() OVER (
+           PARTITION BY e.contract_id
+           ORDER BY e.ledger_sequence DESC, e.id DESC
+         ) AS rn_desc,
+         ROW_NUMBER() OVER (
+           PARTITION BY e.contract_id
+           ORDER BY e.ledger_sequence ASC, e.id ASC
+         ) AS rn_asc
+       FROM events e
+       JOIN wallet_contracts wc ON wc.contract_id = e.contract_id
+     ),
+     filtered_contracts AS (
+       SELECT wc.contract_id, wc.role
+       FROM wallet_contracts wc
+       JOIN ranked_events l ON l.contract_id = wc.contract_id AND l.rn_desc = 1
+       WHERE (? IS NULL OR wc.role = ?)
+         AND (? IS NULL
+              OR (? = 'closed' AND l.event_type IN (${TERMINAL_EVENT_SQL}))
+              OR (? = 'open' AND l.event_type NOT IN (${TERMINAL_EVENT_SQL})))
+     )`;
+  return { ctes, params: [address, role, role, state, state, state] };
+}
+
 /**
  * Optimized wallet query (#87).
  *
@@ -1753,15 +1915,19 @@ export interface PaginatedJobs {
  *   4. Reads milestone_count from the init event's $.milestone_count
  *      (falling back to a $.milestones array length for older fixtures).
  *   5. Applies LIMIT / OFFSET inside the engine, so memory footprint is O(page).
+ *   6. Optional role/state filters (#958) are applied before counting and
+ *      pagination, and are part of the cache key.
  */
 export async function getJobsByWallet(
   address: string,
   page: number = 1,
   limit: number = 10,
+  filters: ByWalletFilters = {},
 ): Promise<PaginatedJobs> {
   const safePage = Math.max(1, page);
   const safeLimit = Math.max(1, limit);
-  const cacheKey = `${address.trim().toLowerCase()}::${safePage}::${safeLimit}`;
+  const { role = null, state = null } = filters;
+  const cacheKey = `${address.trim().toLowerCase()}::${safePage}::${safeLimit}::${role ?? ""}::${state ?? ""}`;
 
   const cachedResult = jobsByWalletCache.get<PaginatedJobs>(cacheKey);
   if (cachedResult !== undefined) {
@@ -1776,66 +1942,36 @@ export async function getJobsByWallet(
   const pendingResult = (async () => {
     const db = getDb();
     const offset = (safePage - 1) * safeLimit;
+    const { ctes: walletCtes, params: filterParams } = buildWalletJobsQuery(
+      address,
+      filters,
+    );
 
     const countRow = db
-      .prepare(
-        `SELECT COUNT(DISTINCT contract_id) AS cnt
-         FROM job_participants
-         WHERE address = ?`
-      )
-      .get(address) as { cnt: number };
+      .prepare(`${walletCtes} SELECT COUNT(*) AS cnt FROM filtered_contracts`)
+      .get(...filterParams) as { cnt: number };
 
     const total = countRow?.cnt ?? 0;
 
     const rows = db
       .prepare(
-        `WITH wallet_contracts AS (
-           SELECT
-             contract_id,
-             CASE
-               WHEN MAX(role = 'client') = 1 THEN 'client'
-               WHEN MAX(role = 'freelancer') = 1 THEN 'freelancer'
-               WHEN MAX(role = 'arbiter') = 1 THEN 'arbiter'
-               ELSE 'unknown'
-             END AS role
-           FROM job_participants
-           WHERE address = ?
-           GROUP BY contract_id
-         ),
-         ranked_events AS (
-           SELECT
-             e.contract_id,
-             e.event_type,
-             e.ledger_sequence,
-             e.timestamp,
-             e.data_json,
-             ROW_NUMBER() OVER (
-               PARTITION BY e.contract_id
-               ORDER BY e.ledger_sequence DESC, e.id DESC
-             ) AS rn_desc,
-             ROW_NUMBER() OVER (
-               PARTITION BY e.contract_id
-               ORDER BY e.ledger_sequence ASC, e.id ASC
-             ) AS rn_asc
-           FROM events e
-           JOIN wallet_contracts wc ON wc.contract_id = e.contract_id
-         )
+        `${walletCtes}
          SELECT
-           wc.contract_id,
-           wc.role,
+           fc.contract_id,
+           fc.role,
            l.event_type      AS latest_event_type,
            l.ledger_sequence AS latest_ledger,
            l.timestamp       AS latest_timestamp,
            -- milestone_count comes from the job's first (init) event, as
            -- before; job_participants only replaces the address lookup (#640).
            i.data_json       AS init_data
-         FROM wallet_contracts wc
-         JOIN ranked_events l ON l.contract_id = wc.contract_id AND l.rn_desc = 1
-         JOIN ranked_events i ON i.contract_id = wc.contract_id AND i.rn_asc = 1
-         ORDER BY l.ledger_sequence DESC, wc.contract_id ASC
+         FROM filtered_contracts fc
+         JOIN ranked_events l ON l.contract_id = fc.contract_id AND l.rn_desc = 1
+         JOIN ranked_events i ON i.contract_id = fc.contract_id AND i.rn_asc = 1
+         ORDER BY l.ledger_sequence DESC, fc.contract_id ASC
          LIMIT ? OFFSET ?`
       )
-      .all(address, safeLimit, offset) as Array<{
+      .all(...filterParams, safeLimit, offset) as Array<{
         contract_id: string;
         latest_event_type: string;
         latest_ledger: number;
