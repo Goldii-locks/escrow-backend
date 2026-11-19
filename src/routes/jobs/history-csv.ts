@@ -11,7 +11,7 @@ import {
   logger,
 } from "./shared.js";
 import { getDb } from "../../indexer/db.js";
-import { escapeCsvField, formatRowToCsv } from "../../utils/csv-serializer.js";
+import { formatRowToCsv } from "../../utils/csv-serializer.js";
 import {
   getCachedTokenDecimals,
   resolveTokenMetadata,
@@ -126,7 +126,7 @@ router.get(
         const ts = row.timestamp
           ? new Date(Number(row.timestamp) * 1000).toISOString()
           : "";
-        const txHash = (row as any).tx_hash ?? (row as any).txHash ?? "";
+        const txHash = row.tx_hash ?? row.txHash ?? "";
         const line = formatRowToCsv([
           row.ledger_sequence,
           ts,
