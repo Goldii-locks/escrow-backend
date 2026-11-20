@@ -1,0 +1,67 @@
+name: Load test (manual)
+
+# Read-endpoint load test (#965). Never runs on PRs: start it from the
+# Actions tab. Seeds a synthetic events DB, runs the backend against a mock
+# RPC and measures each public read endpoint with k6. Shared runners are
+# noisy, so treat the numbers as a trend, not as docs/PERFORMANCE.md's
+# baseline, which is recorded on one stated machine.
+on:
+  workflow_dispatch:
+    inputs:
+      contracts:
+        description: "Synthetic contracts to seed"
+        required: false
+        default: "1000"
+      events:
+        description: "Synthetic events to seed"
+        required: false
+        default: "100000"
+      vus:
+        description: "k6 virtual users per endpoint"
+        required: false
+        default: "20"
+      duration:
+        description: "k6 duration per endpoint"
+        required: false
+        default: "30s"
+
+jobs:
+  loadtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install k6
+        uses: grafana/setup-k6-action@v1
+
+      - name: Run load test
+        run: npm run loadtest
+        env:
+          LOADTEST_CONTRACTS: ${{ inputs.contracts }}
+          LOADTEST_EVENTS: ${{ inputs.events }}
+          VUS: ${{ inputs.vus }}
+          DURATION: ${{ inputs.duration }}
+
+      - name: Job summary
+        if: always()
+        run: |
+          if [ -f loadtest/results/baseline.md ]; then
+            cat loadtest/results/baseline.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: loadtest-results
+          path: loadtest/results/

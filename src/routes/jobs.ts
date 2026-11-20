@@ -10,6 +10,7 @@ import partialReleaseRouter from "./jobs/partial-release.js";
 import timeRemainingRouter from "./jobs/time-remaining.js";
 import claimAutoReleaseRouter from "./jobs/claim-auto-release.js";
 import submitRouter from "./jobs/submit.js";
+import sponsorRouter from "./jobs/sponsor.js";
 
 const router = Router();
 
@@ -27,6 +28,7 @@ router.use(partialReleaseRouter);
 router.use(timeRemainingRouter);
 router.use(claimAutoReleaseRouter);
 router.use(submitRouter);
+router.use(sponsorRouter);
 
 export { assertRpcNetworkMatches, getRpcUrl, maskAddress } from "./jobs/shared.js";
 export {
@@ -48,5 +50,10 @@ export {
   UNSIGNED_TX_MIN_REMAINING_S,
 } from "./jobs/caches.js";
 export { SimError, classifySimError, classifySubmitError } from "./jobs/errors.js";
+export {
+  isSponsorshipEnabled,
+  resetSponsorState,
+  getSponsorBudgetSpent,
+} from "./jobs/sponsor.js";
 
 export default router;

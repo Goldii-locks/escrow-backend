@@ -9,7 +9,9 @@
     "lint": "eslint . --max-warnings=44",
     "dev": "nodemon --exec \"node --loader ts-node/esm\" src/index.ts",
     "build": "tsc -p tsconfig.build.json",
-    "start": "node dist/index.js"
+    "start": "node dist/index.js",
+    "loadtest": "npm run build && node loadtest/run.mjs",
+    "gen:client": "npx --yes openapi-typescript@7.4.4 docs/openapi.yaml --output clients/ts/schema.d.ts"
   },
   "keywords": [],
   "author": "",

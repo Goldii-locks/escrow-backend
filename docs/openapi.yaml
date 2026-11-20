@@ -667,6 +667,41 @@ paths:
         '429':
           description: Rate limit exceeded (SUBMIT_RATE_MAX)
 
+  /api/jobs/sponsor:
+    post:
+      summary: Submit a fee-sponsored transaction
+      description: >-
+        Opt-in (only when SPONSOR_SECRET_KEY is set). Takes a user-signed
+        transaction with a single invokeHostFunction operation calling a
+        build-tx allowlisted method on the configured escrow, the factory or a
+        monitored escrow, wraps it in a fee-bump signed by the sponsor account
+        (capped at SPONSOR_MAX_FEE) and submits it like /submit.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - signedXdr
+              properties:
+                signedXdr:
+                  type: string
+                  description: Base64 XDR of the user-signed inner transaction
+      responses:
+        '200':
+          description: Sponsored transaction submitted result
+        '400':
+          description: Invalid or non-sponsorable transaction
+        '403':
+          description: Contract or method not eligible for sponsorship
+        '404':
+          description: Fee sponsorship is not enabled
+        '422':
+          description: Fee above SPONSOR_MAX_FEE or transaction rejected by network
+        '429':
+          description: Rate limit (SPONSOR_RATE_MAX, SPONSOR_ACCOUNT_RATE_MAX) or daily budget exceeded
+
   /api/admin/indexer-status:
     get:
       summary: Get indexer and reconciliation status

@@ -30,6 +30,19 @@ jobs:
       - name: Architecture reachability table
         run: node scripts/reachability.mjs --check
 
+      - name: Typed API client is up to date
+        # clients/ts/schema.d.ts is generated from docs/openapi.yaml (#964).
+        # Fail when the spec changed without `npm run gen:client`.
+        run: |
+          npm run gen:client
+          if ! git diff --exit-code -- clients/ts; then
+            echo "::error::clients/ts is out of date with docs/openapi.yaml. Run 'npm run gen:client' and commit the result."
+            exit 1
+          fi
+
+      - name: Typed API client compiles
+        run: npx tsc -p clients/ts
+
       - name: Lint
         run: npm run lint
 

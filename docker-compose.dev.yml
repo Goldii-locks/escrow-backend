@@ -1,0 +1,87 @@
+# Local development stack (#963): the backend against a private Stellar
+# network instead of public testnet. Not for production; that is
+# deploy/docker-compose.yml.
+#
+#   docker compose -f docker-compose.dev.yml up --build
+#
+# brings up quickstart and the backend; /ready on http://localhost:3001 turns
+# 200 once the first indexer poll succeeds. To deploy the escrow and factory
+# contracts (needs escrow-contract built next to this repo, see
+# CONTRIBUTING.md), run the optional one-shot `deploy` service and recreate
+# the backend so it reads the ids it wrote to .env.dev:
+#
+#   docker compose -f docker-compose.dev.yml --profile deploy run --rm deploy
+#   docker compose -f docker-compose.dev.yml up -d --force-recreate backend
+
+services:
+  quickstart:
+    # Pinned to the image the nightly E2E job uses (.github/workflows/
+    # e2e-nightly.yml): its protocol matches the escrow contract's soroban-sdk.
+    image: stellar/quickstart:v678-b1525.1-latest
+    # The escrow Wasm is larger than the default contract size limit.
+    command: ["--local", "--enable-soroban-rpc", "--limits", "unlimited"]
+    ports:
+      - "8000:8000"   # RPC at /rpc, friendbot at /friendbot, Horizon at /
+    healthcheck:
+      # Core, Horizon, RPC and friendbot take a minute or two on a cold start.
+      test: ["CMD-SHELL", "curl -sf -X POST -H 'Content-Type: application/json' -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getHealth\"}' http://localhost:8000/rpc | grep -q '\"healthy\"'"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      quickstart:
+        condition: service_healthy
+    env_file:
+      # Committed defaults, then whatever the deploy service wrote (if any);
+      # later files win.
+      - path: docker-compose.dev.env
+      - path: .env.dev
+        required: false
+    environment:
+      # The image defaults to production, which refuses http:// RPC URLs and
+      # requires the production-only keys.
+      NODE_ENV: development
+      SOROBAN_RPC_URL: http://quickstart:8000/rpc
+      SOROBAN_NETWORK_PASSPHRASE: "Standalone Network ; February 2017"
+      DB_PATH: /app/data/indexer.db
+    ports:
+      - "3001:3001"
+    volumes:
+      # The indexer DB lives in ./data on the host, so it survives restarts.
+      # Delete ./data/indexer.db to start the index over.
+      - ./data:/app/data
+    # The image runs as uid 1001, which usually can't write a bind-mounted
+    # host directory on Linux. Dev only: run as root here.
+    user: "0:0"
+
+  deploy:
+    # Optional one-shot: only runs with --profile deploy.
+    profiles: ["deploy"]
+    # The Dockerfile's deps stage: Node 24 plus every npm dependency.
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: deps
+    depends_on:
+      quickstart:
+        condition: service_healthy
+    working_dir: /app
+    command: ["node", "test/e2e/dev-deploy.ts"]
+    environment:
+      E2E_RPC_URL: http://quickstart:8000/rpc
+      E2E_FRIENDBOT_URL: http://quickstart:8000/friendbot
+      E2E_NETWORK_PASSPHRASE: "Standalone Network ; February 2017"
+      ESCROW_WASM_PATH: /escrow-contract/target/wasm32v1-none/release/milestone_escrow.wasm
+      FACTORY_WASM_PATH: /escrow-contract/target/wasm32v1-none/release/escrow_factory.wasm
+      DEV_ENV_FILE: /workspace/.env.dev
+    volumes:
+      - ./test:/app/test:ro
+      - ${ESCROW_CONTRACT_DIR:-../escrow-contract}:/escrow-contract:ro
+      # Only to write .env.dev back to the repo root.
+      - .:/workspace
