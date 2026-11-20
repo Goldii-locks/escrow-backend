@@ -61,13 +61,18 @@ router.post("/subscribe", webhookLimiter, requireAdmin, (req, res) => {
     contract_id: req.body?.contract_id,
     webhook_url: req.body?.webhook_url,
     event_types: req.body?.event_types,
+    register: req.body?.register,
   }, req.id);
 
   if (!result.ok) {
     return sendError(res, result.status, result.error);
   }
 
-  sendSuccess(res, { subscription: result.subscription, traceId: result.traceId });
+  sendSuccess(res, {
+    subscription: result.subscription,
+    registered: result.registered,
+    traceId: result.traceId,
+  });
 });
 
 router.post("/unsubscribe", webhookLimiter, requireAdmin, (req, res) => {

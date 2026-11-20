@@ -4,6 +4,8 @@ import express from "express";
 import { autoAuth } from "./helpers/api-key-helper.js";
 import type { NextFunction, Request, Response } from "express";
 import { xdr } from "@stellar/stellar-sdk";
+import Database from "better-sqlite3";
+import { initSchema, setDb } from "../src/indexer/db.js";
 import { jobScVal, CLIENT, FREELANCER, ARBITER, TOKEN } from "./helpers/scval-fixtures.js";
 
 const VALID_CONTRACT =
@@ -112,6 +114,12 @@ describe("GET /api/jobs/:contractId – error interceptor", () => {
 });
 
 describe("GET /api/jobs/:contractId – real ScVal decoding (#597)", () => {
+  beforeAll(() => {
+    // Acceptance (#967) is read from indexed events; start from an empty index.
+    setDb(new Database(":memory:"));
+    initSchema();
+  });
+
   beforeEach(() => {
     mockGetAccount.mockReset();
     mockSimulateTransaction.mockReset();
@@ -142,10 +150,15 @@ describe("GET /api/jobs/:contractId – real ScVal decoding (#597)", () => {
       arbiter: ARBITER,
       token: TOKEN,
       funded: true,
+      // A bare Job retval carries no escrow-only state, and this mock server
+      // has no getLedgerEntries, so the #967 fields degrade to null.
       milestones: [
-        { index: 0, amount: "500", status: "Pending" },
-        { index: 1, amount: big.toString(), status: "Released" },
+        { index: 0, amount: "500", status: "Pending", dueAt: null, revisionCount: null },
+        { index: 1, amount: big.toString(), status: "Released", dueAt: null, revisionCount: null },
       ],
+      acceptance: { freelancer: false, arbiter: false },
+      paused: null,
+      cancel: null,
     });
   });
 

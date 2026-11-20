@@ -17,13 +17,16 @@ import {
   isValidStellarContractId,
   NETWORK_PASSPHRASE,
   server,
-  parseJobFromResult,
   convertScValToNativeStrings,
   simulationSource,
   maskAddress,
 } from "./shared.js";
 import { getInclusionFee } from "../../utils/fee-helper.js";
 import { getCachedJobState } from "../../indexer/job-state-cache.js";
+import {
+  parseEscrowStateFromResult,
+  completeEscrowJobView,
+} from "./escrow-state.js";
 import type {
   RequestWithValidatedQuery,
   FeePreviewQuery,
@@ -238,8 +241,13 @@ router.get(
 
     try {
       // Cached for JOB_STATE_CACHE_TTL_S with concurrent misses sharing one
-      // simulation; the poller invalidates the entry when it indexes a new
-      // event for this contract (#679).
+      // load; the poller invalidates the entry when it indexes a new event
+      // for this contract (#679).
+      //
+      // An uncached load costs a fixed number of RPC calls whatever the
+      // milestone count (#967, see escrow-state.ts): one get_escrow_state
+      // simulation plus one getLedgerEntries read for every milestone's due
+      // date and revision count. Acceptance comes from indexed events.
       const { value: job, source } = await getCachedJobState(contractId, async () => {
         const contract = new Contract(contractId);
         const account = simulationSource();
@@ -247,7 +255,7 @@ router.get(
           fee: await getInclusionFee(server),
           networkPassphrase: NETWORK_PASSPHRASE,
         })
-          .addOperation(contract.call("get_job"))
+          .addOperation(contract.call("get_escrow_state"))
           .setTimeout(30)
           .build();
 
@@ -260,7 +268,8 @@ router.get(
           throw new SimError(500, "Internal server error");
         }
 
-        return parseJobFromResult(result, contractId);
+        const parsed = parseEscrowStateFromResult(result, contractId);
+        return parsed ? completeEscrowJobView(parsed, contractId) : null;
       });
 
       if (source !== "rpc") {

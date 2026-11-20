@@ -13,6 +13,7 @@ import { startReconciliationJob } from "./indexer/reconciliation.js";
 import { markIndexerStarted } from "./indexer/status.js";
 import { assertRpcNetworkMatches } from "./routes/jobs.js";
 import { registerShutdownHandlers } from "./shutdown.js";
+import { assertDisjointApiKeyLists } from "./utils/api-keys.js";
 import { formatError } from "./utils/format-error.js";
 import logger from "./utils/logger.js";
 
@@ -38,6 +39,9 @@ validateConfigAtStartup();
 
 // Fail fast when required production env vars are missing.
 assertProductionEnv();
+
+// #970: refuse to start when a key is both a public and an admin key.
+assertDisjointApiKeyLists();
 
 // Initialize Express backend for Milesto Escrow Platform (pure, no side effects).
 const app = createApp();

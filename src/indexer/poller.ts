@@ -202,8 +202,12 @@ export function toEventTimestamp(ledgerClosedAt: unknown): number | null {
   return Math.floor(millis / 1000);
 }
 
-/** Map an RPC event notification onto the row shape `events` stores. */
-function toEventRow(event: Api.EventResponse, fallbackContractId: string): EventRow {
+/**
+ * Map an RPC event notification onto the row shape `events` stores.
+ * Exported so the webhook payload examples in docs/webhooks.md are generated
+ * from the real decoding path (#969).
+ */
+export function toEventRow(event: Api.EventResponse, fallbackContractId: string): EventRow {
   return {
     contractId: event.contractId?.contractId() ?? fallbackContractId,
     eventType: scValToNative(event.topic[0]) as string,

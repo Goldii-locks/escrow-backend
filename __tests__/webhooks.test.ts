@@ -8,6 +8,8 @@ import {
   addSubscription,
   removeSubscription,
   registerContract,
+  deregisterContract,
+  getActiveContractIds,
   getSubscriptions,
   insertEvent,
 } from "../src/indexer/db.js";
@@ -152,14 +154,70 @@ describe("POST /api/webhooks/subscribe – HTTP", () => {
     expect(res.body.success).toBe(false);
   });
 
-  it("returns 404 when contract is valid but not indexed", async () => {
+  it("returns 422 when contract is valid but not indexed (#968)", async () => {
     const res = await request(app)
       .post("/api/webhooks/subscribe")
       .send({ contract_id: UNMONITORED_CONTRACT, webhook_url: WEBHOOK_URL })
-      .expect(404);
+      .expect(422);
 
     expect(res.body.success).toBe(false);
     expect(res.body.error).toBe("Contract is not indexed");
+    expect(getSubscriptions()).toHaveLength(0);
+  });
+
+  it("returns 422 for a contract that was deregistered (#968)", async () => {
+    deregisterContract(VALID_CONTRACT);
+
+    const res = await request(app)
+      .post("/api/webhooks/subscribe")
+      .send(VALID_BODY)
+      .expect(422);
+
+    expect(res.body.error).toBe("Contract is not indexed");
+    expect(getSubscriptions()).toHaveLength(0);
+  });
+
+  it("registers an unmonitored contract when register: true (#968)", async () => {
+    expect(getActiveContractIds()).not.toContain(UNMONITORED_CONTRACT);
+
+    const res = await request(app)
+      .post("/api/webhooks/subscribe")
+      .send({
+        contract_id: UNMONITORED_CONTRACT,
+        webhook_url: WEBHOOK_URL,
+        register: true,
+      })
+      .expect(200);
+
+    expect(res.body.success).toBe(true);
+    expect(res.body.data.registered).toBe(true);
+    expect(res.body.data.subscription.contract_id).toBe(UNMONITORED_CONTRACT);
+    expect(getActiveContractIds()).toContain(UNMONITORED_CONTRACT);
+
+    deregisterContract(UNMONITORED_CONTRACT);
+  });
+
+  it("reports registered: false when the contract was already monitored", async () => {
+    const res = await request(app)
+      .post("/api/webhooks/subscribe")
+      .send({ ...VALID_BODY, register: true })
+      .expect(200);
+
+    expect(res.body.data.registered).toBe(false);
+  });
+
+  it("returns 400 when register is not a boolean", async () => {
+    const res = await request(app)
+      .post("/api/webhooks/subscribe")
+      .send({
+        contract_id: UNMONITORED_CONTRACT,
+        webhook_url: WEBHOOK_URL,
+        register: "yes",
+      })
+      .expect(400);
+
+    expect(res.body.error).toBe("register must be a boolean");
+    expect(getActiveContractIds()).not.toContain(UNMONITORED_CONTRACT);
   });
 
   it("accepts '*' event_types", async () => {

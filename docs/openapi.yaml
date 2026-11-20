@@ -24,8 +24,8 @@ components:
     AdminApiKeyAuth:
       type: apiKey
       in: header
-      name: x-api-key
-      description: Admin API key required for administrative and indexer monitoring endpoints (ADMIN_API_KEYS). Bearer token also supported.
+      name: x-admin-key
+      description: Admin API key required for administrative and indexer monitoring endpoints (ADMIN_API_KEYS). Bearer token also supported. Sending the admin key via x-api-key is deprecated and logs a warning.
 
   schemas:
     HealthResponse:
@@ -78,6 +78,21 @@ components:
           type: string
         approved:
           type: boolean
+        index:
+          type: integer
+        dueAt:
+          type: string
+          nullable: true
+          description: >-
+            Delivery deadline (unix seconds, decimal string) from
+            get_milestone_due_at; null when none is set or when the ledger read
+            failed. reclaim_overdue applies after it (#967).
+        revisionCount:
+          type: integer
+          nullable: true
+          description: >-
+            Revisions requested so far (get_revision_count, capped by the
+            contract's MAX_REVISIONS); null when the ledger read failed (#967).
 
     JobState:
       type: object
@@ -98,6 +113,39 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/JobMilestone'
+        acceptance:
+          type: object
+          nullable: true
+          description: >-
+            Whether the freelancer (accept_job) and arbiter (accept_arbiter)
+            have accepted. Both gate delivery and disputes; withdraw_unaccepted
+            is open until both have. Derived from indexed acceptjob / acceptarb
+            events, since the contract has no getter (#967).
+          properties:
+            freelancer:
+              type: boolean
+            arbiter:
+              type: boolean
+        paused:
+          type: object
+          nullable: true
+          description: Pause flags from get_escrow_state (`emergency` = party pause, `admin` = admin pause).
+          properties:
+            emergency:
+              type: boolean
+            admin:
+              type: boolean
+        cancel:
+          type: object
+          nullable: true
+          description: Mutual-cancellation state from get_escrow_state (lock and approval mask).
+          properties:
+            locked:
+              type: boolean
+            clientApproved:
+              type: boolean
+            freelancerApproved:
+              type: boolean
 
     JobDraft:
       type: object
@@ -381,7 +429,13 @@ paths:
   /api/jobs/{contractId}:
     get:
       summary: Fetch job state
-      description: Simulates get_job against the Soroban contract to return live escrow state. Public read-only.
+      description: >-
+        Returns live escrow state. Public read-only. An uncached request costs a
+        fixed number of RPC calls whatever the milestone count: one
+        get_escrow_state simulation and one getLedgerEntries read for every
+        milestone's due date and revision count. Acceptance is read from
+        indexed events. Results are cached for JOB_STATE_CACHE_TTL_S and
+        invalidated when the indexer stores a new event for the contract.
       parameters:
         - name: contractId
           in: path
@@ -894,14 +948,34 @@ paths:
             type: string
       responses:
         '200':
-          description: Contract deregistered
+          description: >-
+            Contract deregistered. `subscriptionCount` reports how many webhook
+            subscriptions still point at the contract; they stop firing while it
+            is not monitored (#968).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  message:
+                    type: string
+                  contractId:
+                    type: string
+                  subscriptionCount:
+                    type: integer
         '401':
           description: Unauthorized (missing or invalid admin API key)
 
   /api/webhooks/subscribe:
     post:
       summary: Subscribe to escrow contract webhook notifications
-      description: Registers a webhook URL to receive notifications for contract events.
+      description: >-
+        Registers a webhook URL to receive notifications for contract events.
+        The contract must be actively monitored by the indexer; otherwise the
+        request is rejected with 422 unless `register: true` is sent, in which
+        case the contract is registered first (#968).
       requestBody:
         required: true
         content:
@@ -920,11 +994,16 @@ paths:
                   type: array
                   items:
                     type: string
+                register:
+                  type: boolean
+                  description: Register the contract with the indexer when it is not monitored yet.
       responses:
         '200':
-          description: Subscription created successfully
+          description: Subscription created successfully (`registered` is true when the contract was registered by this request)
         '400':
           description: Validation error
+        '422':
+          description: Contract is not indexed
 
   /api/webhooks/unsubscribe:
     post:

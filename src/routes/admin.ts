@@ -7,6 +7,7 @@ import {
   getActiveSubscriptions,
   getDisabledSubscriptions,
   getAdminJobs,
+  getSubscriptionsForContract,
 } from "../indexer/db.js";
 import { getIndexerUptimeSeconds } from "../indexer/status.js";
 import { getLatestReconciliationResults } from "../indexer/reconciliation.js";
@@ -185,10 +186,20 @@ router.post("/contracts", validate(registerContractBodySchema, "body"), (req, re
 router.delete("/contracts/:contractId", validate(contractParamSchema, "params"), (req, res) => {
   const { contractId } = req.params as { contractId: string };
   deregisterContract(contractId);
+  // #968: subscriptions are kept, but they stop firing once the contract is
+  // no longer polled. Report how many are affected so the operator knows.
+  const subscriptionCount = getSubscriptionsForContract(contractId).length;
+  if (subscriptionCount > 0) {
+    logger.warn("Deregistered contract still has webhook subscriptions", {
+      contractId,
+      subscriptionCount,
+    });
+  }
   res.json({
     success: true,
     message: "Contract deregistered successfully",
     contractId,
+    subscriptionCount,
   });
 });
 
