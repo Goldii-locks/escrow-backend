@@ -7,6 +7,7 @@ import logger from "../utils/logger.js";
 import {
   getSqliteSchemaManagerFailureMonitor,
 } from "./sqlite_schema_manager.js";
+import { jobStateCache, invalidateJobState } from "./job-state-cache.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -172,7 +173,15 @@ function extractAddressesFromEvents(events: EventRow[]): string[] {
       type === "dispute_resolved" ||
       type === "partial_release" ||
       type === "approved" ||
-      type === "delivered"
+      type === "delivered" ||
+      type === "add_milestone" ||
+      type === "ms_add" ||
+      type === "milestone_add" ||
+      type === "milestone_added" ||
+      type === "reduce_milestone" ||
+      type === "ms_reduce" ||
+      type === "milestone_reduce" ||
+      type === "milestone_reduced"
     ) {
       try {
         const data = JSON.parse(ev.dataJson) as Record<string, unknown>;
@@ -630,6 +639,20 @@ const MIGRATIONS: Migration[] = [
         ON undecodable_events (ledger_sequence);
     `,
   },
+  {
+    version: 20,
+    description: "create job_summary table and backfill milestone counts (#889)",
+    up: (database) => {
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS job_summary (
+          contract_id TEXT PRIMARY KEY,
+          milestone_count INTEGER NOT NULL DEFAULT 0,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+      `);
+      backfillJobSummary(database);
+    },
+  },
 ];
 
 /** Index names created by the SQLite schema manager lookup-index migration (#259). */
@@ -842,6 +865,12 @@ export function runMigrations(
       event_types TEXT NOT NULL DEFAULT '*',
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       UNIQUE(contract_id, webhook_url)
+    );
+
+    CREATE TABLE IF NOT EXISTS job_summary (
+      contract_id TEXT PRIMARY KEY,
+      milestone_count INTEGER NOT NULL DEFAULT 0,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
   `);
 
@@ -1509,10 +1538,28 @@ export function insertEvent(
     );
     if (result.changes > 0) {
       recordJobParticipants(db, contractId, eventType, dataJson);
+      updateJobSummaryOnEvent(db, contractId, eventType, dataJson);
     }
     return result.changes > 0;
   });
-  return tx();
+  const inserted = tx();
+  if (inserted) {
+    const affected = extractAddressesFromEvents([
+      { contractId, eventType, ledgerSequence, timestamp, dataJson },
+    ]);
+    if (affected.length > 0) {
+      invalidateJobsByWalletCache(affected);
+    } else {
+      const participants = db
+        .prepare("SELECT address FROM job_participants WHERE contract_id = ?")
+        .all(contractId) as Array<{ address: string }>;
+      if (participants.length > 0) {
+        invalidateJobsByWalletCache(participants.map((p) => p.address));
+      }
+    }
+    invalidateJobState(contractId);
+  }
+  return inserted;
 }
 
 export interface EventRow {
@@ -1531,11 +1578,20 @@ export interface EventRow {
   txHash?: string | null;
 }
 
+interface CachedJobSnapshot {
+  milestones?: Array<unknown> | number;
+  milestoneCount?: number;
+  milestone_count?: number;
+  client?: string;
+  freelancer?: string;
+  arbiter?: string;
+}
+
 /**
  * Extracts wallet participants from an event if it is an init/initialized event,
  * and inserts them into the job_participants table.
  */
-function recordJobParticipants(
+export function recordJobParticipants(
   db: import("better-sqlite3").Database,
   contractId: string,
   eventType: string,
@@ -1563,6 +1619,244 @@ function recordJobParticipants(
     }
   } catch {
     // Unparseable dataJson - ignore participant extraction
+  }
+}
+
+/**
+ * Updates or sets the stored milestone count in the job_summary table for a contract.
+ */
+export function setJobSummaryMilestoneCount(
+  contractId: string,
+  count: number,
+  db?: Database.Database,
+): void {
+  const database = db ?? getDb();
+  const safeCount = Math.max(0, Math.floor(count));
+  database
+    .prepare(
+      `INSERT INTO job_summary (contract_id, milestone_count, updated_at)
+       VALUES (?, ?, CURRENT_TIMESTAMP)
+       ON CONFLICT(contract_id) DO UPDATE SET
+         milestone_count = excluded.milestone_count,
+         updated_at = excluded.updated_at`
+    )
+    .run(contractId, safeCount);
+}
+
+/**
+ * Reads summary info (milestone_count) for a contract from job_summary.
+ */
+export function getJobSummary(
+  contractId: string,
+  db?: Database.Database,
+): { contract_id: string; milestone_count: number } | null {
+  const database = db ?? getDb();
+  const row = database
+    .prepare("SELECT contract_id, milestone_count FROM job_summary WHERE contract_id = ?")
+    .get(contractId) as { contract_id: string; milestone_count: number } | undefined;
+  return row ?? null;
+}
+
+/**
+ * Rebuilds the milestone_count in job_summary for a contract deterministically
+ * from ordered indexed events, falling back to jobStateCache snapshots when
+ * initial events fell out of retention.
+ */
+export function rebuildJobSummaryForContract(
+  db: Database.Database,
+  contractId: string,
+): number {
+  const hasEventsTable = db
+    .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='events'")
+    .get();
+  if (!hasEventsTable) return 0;
+
+  const rows = db
+    .prepare(
+      `SELECT event_type, data_json, ledger_sequence, id
+       FROM events
+       WHERE contract_id = ?
+       ORDER BY ledger_sequence ASC, id ASC`
+    )
+    .all(contractId) as Array<{
+      event_type: string;
+      data_json: string;
+      ledger_sequence: number;
+      id: number;
+    }>;
+
+  const cached = jobStateCache.get<CachedJobSnapshot>(contractId);
+  let snapshotCount: number | null = null;
+  if (cached) {
+    if (Array.isArray(cached.milestones)) {
+      snapshotCount = cached.milestones.length;
+    } else if (typeof cached.milestoneCount === "number" && Number.isFinite(cached.milestoneCount)) {
+      snapshotCount = Math.max(0, Math.floor(cached.milestoneCount));
+    } else if (typeof cached.milestone_count === "number" && Number.isFinite(cached.milestone_count)) {
+      snapshotCount = Math.max(0, Math.floor(cached.milestone_count));
+    }
+  }
+
+  const existingSummary = db
+    .prepare("SELECT milestone_count FROM job_summary WHERE contract_id = ?")
+    .get(contractId) as { milestone_count: number } | undefined;
+
+  let count = 0;
+  const hasInitInRows = rows.some((r) => {
+    const t = (r.event_type || "").toLowerCase();
+    return t === "init" || t === "initialized";
+  });
+
+  if (!hasInitInRows) {
+    if (snapshotCount !== null && snapshotCount > 0) {
+      count = snapshotCount;
+    } else if (existingSummary && existingSummary.milestone_count > 0) {
+      count = existingSummary.milestone_count;
+    }
+  }
+
+  for (const row of rows) {
+    const type = (row.event_type || "").toLowerCase();
+    let data: Record<string, unknown> | null = null;
+    try {
+      data = JSON.parse(row.data_json) as Record<string, unknown>;
+    } catch {
+      data = null;
+    }
+
+    if (type === "init" || type === "initialized") {
+      if (data) {
+        const direct = data["milestone_count"];
+        if (typeof direct === "number" && Number.isFinite(direct)) {
+          count = Math.max(0, Math.floor(direct));
+        } else if (typeof direct === "string" && /^\d+$/.test(direct.trim())) {
+          count = parseInt(direct.trim(), 10);
+        } else if (Array.isArray(data["milestones"])) {
+          count = (data["milestones"] as unknown[]).length;
+        } else {
+          count = 0;
+        }
+      } else {
+        count = 0;
+      }
+    } else if (
+      type === "add_milestone" ||
+      type === "ms_add" ||
+      type === "milestone_add" ||
+      type === "milestone_added"
+    ) {
+      if (data && typeof data["milestone_count"] === "number" && Number.isFinite(data["milestone_count"])) {
+        count = Math.max(0, Math.floor(data["milestone_count"]));
+      } else if (data && typeof data["delta"] === "number" && Number.isFinite(data["delta"])) {
+        count = Math.max(0, count + Math.floor(data["delta"]));
+      } else if (data && Array.isArray(data["milestones"])) {
+        count = Math.max(0, count + (data["milestones"] as unknown[]).length);
+      } else {
+        count = Math.max(0, count + 1);
+      }
+    } else if (
+      type === "reduce_milestone" ||
+      type === "ms_reduce" ||
+      type === "milestone_reduce" ||
+      type === "milestone_reduced"
+    ) {
+      if (data && typeof data["milestone_count"] === "number" && Number.isFinite(data["milestone_count"])) {
+        count = Math.max(0, Math.floor(data["milestone_count"]));
+      } else if (data && typeof data["delta"] === "number" && Number.isFinite(data["delta"])) {
+        count = Math.max(0, count - Math.floor(data["delta"]));
+      } else {
+        count = Math.max(0, count - 1);
+      }
+    }
+  }
+
+  // Bounds safety: guard against negative counts
+  count = Math.max(0, count);
+
+  db.prepare(`
+    INSERT INTO job_summary (contract_id, milestone_count, updated_at)
+    VALUES (?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(contract_id) DO UPDATE SET
+      milestone_count = excluded.milestone_count,
+      updated_at = excluded.updated_at
+  `).run(contractId, count);
+
+  return count;
+}
+
+/**
+ * Updates job_summary when a new event row is inserted.
+ */
+export function updateJobSummaryOnEvent(
+  db: Database.Database,
+  contractId: string,
+  eventType: string,
+  _dataJson: string,
+): void {
+  const type = (eventType || "").toLowerCase();
+  if (type === "created") return;
+
+  const isInit = type === "init" || type === "initialized";
+  const isAdd =
+    type === "add_milestone" ||
+    type === "ms_add" ||
+    type === "milestone_add" ||
+    type === "milestone_added";
+  const isReduce =
+    type === "reduce_milestone" ||
+    type === "ms_reduce" ||
+    type === "milestone_reduce" ||
+    type === "milestone_reduced";
+
+  if (!isInit && !isAdd && !isReduce) {
+    const existing = db
+      .prepare("SELECT milestone_count FROM job_summary WHERE contract_id = ?")
+      .get(contractId) as { milestone_count: number } | undefined;
+    if (!existing) {
+      const cached = jobStateCache.get<CachedJobSnapshot>(contractId);
+      if (cached) {
+        const count = Array.isArray(cached.milestones)
+          ? cached.milestones.length
+          : typeof cached.milestoneCount === "number"
+          ? cached.milestoneCount
+          : typeof cached.milestone_count === "number"
+          ? cached.milestone_count
+          : 0;
+        if (count > 0) {
+          setJobSummaryMilestoneCount(contractId, count, db);
+        }
+      }
+    }
+    return;
+  }
+
+  rebuildJobSummaryForContract(db, contractId);
+}
+
+/**
+ * Backfills job_summary for all existing indexed contracts from events.
+ */
+export function backfillJobSummary(database?: Database.Database): void {
+  const db = database ?? getDb();
+  const tables = new Set(
+    (
+      db
+        .prepare("SELECT name FROM sqlite_master WHERE type='table'")
+        .all() as Array<{ name: string }>
+    ).map((t) => t.name)
+  );
+  const sources: string[] = [];
+  if (tables.has("events")) sources.push("SELECT DISTINCT contract_id FROM events");
+  if (tables.has("job_participants"))
+    sources.push("SELECT DISTINCT contract_id FROM job_participants");
+  if (sources.length === 0) return;
+
+  const contractRows = db
+    .prepare(sources.join(" UNION "))
+    .all() as Array<{ contract_id: string }>;
+
+  for (const { contract_id } of contractRows) {
+    rebuildJobSummaryForContract(db, contract_id);
   }
 }
 
@@ -1614,6 +1908,7 @@ export function insertEventBatch(events: EventRow[], newLedger: number): void {
       );
       if (res.changes > 0) {
         recordJobParticipants(db, ev.contractId, ev.eventType, ev.dataJson);
+        updateJobSummaryOnEvent(db, ev.contractId, ev.eventType, ev.dataJson);
       }
     }
     updateLedger.run(newLedger.toString());
@@ -1624,6 +1919,21 @@ export function insertEventBatch(events: EventRow[], newLedger: number): void {
   const affectedAddresses = extractAddressesFromEvents(events);
   if (affectedAddresses.length > 0) {
     invalidateJobsByWalletCache(affectedAddresses);
+  } else {
+    const contractIds = Array.from(new Set(events.map((e) => e.contractId)));
+    if (contractIds.length > 0) {
+      const placeholders = contractIds.map(() => "?").join(",");
+      const participants = db
+        .prepare(`SELECT DISTINCT address FROM job_participants WHERE contract_id IN (${placeholders})`)
+        .all(...contractIds) as Array<{ address: string }>;
+      if (participants.length > 0) {
+        invalidateJobsByWalletCache(participants.map((p) => p.address));
+      }
+    }
+  }
+
+  for (const ev of events) {
+    invalidateJobState(ev.contractId);
   }
 
   const payloadSizeBytes = events.reduce(
@@ -1972,12 +2282,14 @@ export async function getJobsByWallet(
            l.event_type      AS latest_event_type,
            l.ledger_sequence AS latest_ledger,
            l.timestamp       AS latest_timestamp,
-           -- milestone_count comes from the job's first (init) event, as
-           -- before; job_participants only replaces the address lookup (#640).
-           i.data_json       AS init_data
+           -- milestone_count comes from job_summary if available, falling back
+           -- to the latest get_job snapshot, and then to init_data (#889).
+           i.data_json       AS init_data,
+           js.milestone_count AS summary_milestone_count
          FROM filtered_contracts fc
          JOIN ranked_events l ON l.contract_id = fc.contract_id AND l.rn_desc = 1
-         JOIN ranked_events i ON i.contract_id = fc.contract_id AND i.rn_asc = 1
+         LEFT JOIN ranked_events i ON i.contract_id = fc.contract_id AND i.rn_asc = 1
+         LEFT JOIN job_summary js ON js.contract_id = fc.contract_id
          ORDER BY l.ledger_sequence DESC, fc.contract_id ASC
          LIMIT ? OFFSET ?`
       )
@@ -1987,26 +2299,60 @@ export async function getJobsByWallet(
         latest_ledger: number;
         latest_timestamp: number;
         role: "client" | "freelancer" | "arbiter" | "unknown";
-        init_data: string;
+        init_data: string | null;
+        summary_milestone_count?: number | null;
       }>;
 
     const jobs: JobSummary[] = rows.map((row) => {
       let milestoneCount = 0;
-      try {
-        const parsed = JSON.parse(row.init_data) as Record<string, unknown>;
-        const direct = parsed["milestone_count"];
-        if (typeof direct === "number" && Number.isFinite(direct)) {
-          milestoneCount = Math.max(0, Math.floor(direct));
-        } else if (typeof direct === "string" && /^\d+$/.test(direct.trim())) {
-          milestoneCount = parseInt(direct.trim(), 10);
-        } else {
-          milestoneCount = Array.isArray(parsed["milestones"])
-            ? (parsed["milestones"] as unknown[]).length
-            : 0;
+
+      // 1. Check job-state cache (Option B: latest get_job snapshot if present)
+      const cached = jobStateCache.get<CachedJobSnapshot>(row.contract_id);
+      let snapshotCount: number | null = null;
+      if (cached) {
+        if (Array.isArray(cached.milestones)) {
+          snapshotCount = cached.milestones.length;
+        } else if (typeof cached.milestoneCount === "number" && Number.isFinite(cached.milestoneCount)) {
+          snapshotCount = Math.max(0, Math.floor(cached.milestoneCount));
+        } else if (typeof cached.milestone_count === "number" && Number.isFinite(cached.milestone_count)) {
+          snapshotCount = Math.max(0, Math.floor(cached.milestone_count));
         }
-      } catch {
-        // unparseable – leave milestone_count as 0
       }
+
+      if (snapshotCount !== null && snapshotCount >= 0) {
+        milestoneCount = snapshotCount;
+        // Seed / correct job_summary for future reads when init was missed
+        try {
+          setJobSummaryMilestoneCount(row.contract_id, milestoneCount, db);
+        } catch {
+          // ignore write errors during read
+        }
+      } else if (
+        typeof row.summary_milestone_count === "number" &&
+        row.summary_milestone_count !== null &&
+        row.summary_milestone_count >= 0
+      ) {
+        milestoneCount = row.summary_milestone_count;
+      } else if (row.init_data) {
+        try {
+          const parsed = JSON.parse(row.init_data) as Record<string, unknown>;
+          const direct = parsed["milestone_count"];
+          if (typeof direct === "number" && Number.isFinite(direct)) {
+            milestoneCount = Math.max(0, Math.floor(direct));
+          } else if (typeof direct === "string" && /^\d+$/.test(direct.trim())) {
+            milestoneCount = parseInt(direct.trim(), 10);
+          } else {
+            milestoneCount = Array.isArray(parsed["milestones"])
+              ? (parsed["milestones"] as unknown[]).length
+              : 0;
+          }
+        } catch {
+          // unparseable – leave milestone_count as 0
+        }
+      }
+
+      // Bounds safety: guard against negative counts
+      milestoneCount = Math.max(0, milestoneCount);
 
       return {
         contract_id: row.contract_id,
@@ -2729,6 +3075,7 @@ export function insertHistoricalEventBatch(
       if (result.changes > 0) {
         inserted += 1;
         recordJobParticipants(db, ev.contractId, ev.eventType, ev.dataJson);
+        updateJobSummaryOnEvent(db, ev.contractId, ev.eventType, ev.dataJson);
       }
     }
 
@@ -3025,6 +3372,8 @@ export function insertEventsWithDedup(
       );
       if (result.changes > 0) {
         newEventsInserted++;
+        recordJobParticipants(db, ev.contractId, ev.eventType, ev.dataJson);
+        updateJobSummaryOnEvent(db, ev.contractId, ev.eventType, ev.dataJson);
       } else {
         duplicatesFound++;
       }
