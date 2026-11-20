@@ -1,5 +1,5 @@
 import Database from "better-sqlite3";
-import { getDb, getLastIndexedLedger, getShippedMigrationVersions, eventDedupeId } from "./db.js";
+import { getDb, getLastIndexedLedger, getShippedMigrationVersions, eventDedupeId, recordJobParticipants, updateJobSummaryOnEvent } from "./db.js";
 import {
   validateLedgerRange,
   resolveHistoricalLedgerRange,
@@ -1502,6 +1502,8 @@ export async function importFailoverRecoveryHistoricalRange(
       );
       if (result.changes > 0) {
         insertedCount += 1;
+        recordJobParticipants(db, ev.contractId, ev.eventType, ev.dataJson);
+        updateJobSummaryOnEvent(db, ev.contractId, ev.eventType, ev.dataJson);
       } else {
         duplicateCount += 1;
       }

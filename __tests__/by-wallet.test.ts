@@ -68,6 +68,7 @@ beforeEach(() => {
     resetByWalletRateLimitBuckets();
   testDb.exec("DELETE FROM events");
   testDb.exec("DELETE FROM job_participants");
+  testDb.exec("DELETE FROM job_summary");
   resetJobsByWalletCache();
 });
 
@@ -240,6 +241,42 @@ describe("getJobsByWallet() – unit", () => {
     expect(result.total).toBe(1);
     // CASE expression checks client first → role = "client"
     expect(result.jobs[0].role).toBe("client");
+  });
+
+  it("reflects milestone amendments (add_milestone / reduce_milestone) in milestone_count (#889)", async () => {
+    const addr = "GAMENDMENTTEST";
+    seedEvent(testDb, {
+      contractId: "C-AMEND",
+      eventType: "init",
+      ledger: 100,
+      timestamp: 1000,
+      dataJson: JSON.stringify({ client: addr, freelancer: "GFREE", milestone_count: 2 }),
+    });
+
+    const initResult = await getJobsByWallet(addr);
+    expect(initResult.jobs[0].milestone_count).toBe(2);
+
+    seedEvent(testDb, {
+      contractId: "C-AMEND",
+      eventType: "add_milestone",
+      ledger: 105,
+      timestamp: 1050,
+      dataJson: JSON.stringify({ amount: "500" }),
+    });
+
+    const addedResult = await getJobsByWallet(addr);
+    expect(addedResult.jobs[0].milestone_count).toBe(3);
+
+    seedEvent(testDb, {
+      contractId: "C-AMEND",
+      eventType: "reduce_milestone",
+      ledger: 110,
+      timestamp: 1100,
+      dataJson: JSON.stringify({}),
+    });
+
+    const reducedResult = await getJobsByWallet(addr);
+    expect(reducedResult.jobs[0].milestone_count).toBe(2);
   });
 
   it("a contract with two events in its latest ledger appears exactly once (#707)", async () => {
