@@ -88,6 +88,7 @@ Legend:
 | `src/routes/jobs/history.ts` | live | — |
 | `src/routes/jobs/partial-release.ts` | live | — |
 | `src/routes/jobs/shared.ts` | live | — |
+| `src/routes/jobs/sponsor.ts` | live | — |
 | `src/routes/jobs/submit.ts` | live | — |
 | `src/routes/jobs/time-remaining.ts` | live | — |
 | `src/routes/jobs/whitelist.ts` | live | — |

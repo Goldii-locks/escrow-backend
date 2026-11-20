@@ -33,6 +33,7 @@ Express + TypeScript backend for the Soroban milestone escrow platform.
     - [GET /api/jobs/:contractId/milestones/:index/time-remaining](#get-apijobscontractidmilestonesindextime-remaining)
     - [POST /api/jobs/:contractId/milestones/:index/claim-auto-release](#post-apijobscontractidmilestonesindexclaim-auto-release)
     - [POST /api/jobs/submit](#post-apijobssubmit)
+    - [POST /api/jobs/sponsor](#post-apijobssponsor)
   - [Admin API](#admin-api)
     - [GET /api/admin/indexer-status](#get-apiadminindexer-status)
     - [GET /api/admin/metrics](#get-apiadminmetrics)
@@ -64,6 +65,7 @@ npm run dev
 - [CSV serialization guide](./docs/CSV_SERIALIZATION_GUIDE.md)
 - [Webhook delivery](./docs/webhooks.md) — event types, payload shapes, retry policy, idempotency
 - [OpenAPI 3.0 specification](./docs/openapi.yaml) — complete machine-readable route definitions, parameter schemas, and response shapes
+- [Performance baseline](./docs/PERFORMANCE.md) — load test of the public read endpoints (`npm run loadtest`)
 
 ### Webhook idempotency
 
@@ -80,6 +82,22 @@ See [docs/webhooks.md](./docs/webhooks.md#idempotency) for the full contract.
 
 The complete OpenAPI specification is maintained in [docs/openapi.yaml](./docs/openapi.yaml).
 
+### Typed TypeScript client
+
+`npm run gen:client` generates TypeScript types for every documented route
+into [clients/ts/schema.d.ts](./clients/ts/schema.d.ts) with
+[openapi-typescript](https://openapi-ts.dev/). The file is committed for
+escrow-frontend to vendor, and CI fails when `openapi.yaml` changes without
+regenerating it. With [openapi-fetch](https://openapi-ts.dev/openapi-fetch/):
+
+```ts
+const api = createClient<paths>({ baseUrl: "http://localhost:3001" });
+const { data } = await api.GET("/api/jobs/{contractId}", { params: { path: { contractId } } });
+```
+
+`createClient` comes from `openapi-fetch` and `paths` from the vendored
+`schema.d.ts`; see [clients/ts/README.md](./clients/ts/README.md).
+
 ### API Versioning
 
 New integrations should use `/api/v1`. Existing `/api` routes remain available
@@ -90,6 +108,10 @@ for backwards compatibility and return `Deprecation: true`.
 - **Public endpoints**: Endpoints that simulate public contract reads (`/api/jobs/:contractId`, `/api/jobs/by-wallet/:address`, `/api/jobs/:contractId/whitelist`, etc.) or construct unsigned transactions for the caller's wallet to sign require no API key.
 - **Admin endpoints**: `/api/admin/*` requires an admin key passed via `x-api-key: <ADMIN_API_KEY>` or `Authorization: Bearer <ADMIN_API_KEY>`.
 - **Client endpoints**: When `API_KEYS` is configured, client integrations pass their key via `x-api-key: <API_KEY>`.
+
+### Secrets handling
+
+The backend holds one signing secret, `SPONSOR_SECRET_KEY`, and only when fee sponsorship is wanted. Keep it in the deployed env file (`/opt/escrow/backend.env`, `chmod 600`), never in git, `.env.example` or CI logs; the backend never logs it. Fund the sponsor account with no more XLM than the daily budgets need, and rotate the key (new account, new env value, restart) if it may have leaked. Unset it to switch sponsorship off.
 
 ---
 
@@ -212,6 +234,17 @@ Submit a signed transaction to the Stellar network and return execution status.
 - **Auth**: None (Public)
 - **Rate Limit**: 5 requests / minute (`SUBMIT_RATE_MAX`)
 - **Body**: `{ signedXdr, sourceAddress? }`
+
+#### POST /api/jobs/sponsor
+
+Opt-in fee sponsorship (#966): submit a user-signed transaction with its fee paid by the backend's sponsor account, so a new wallet needs no XLM for fees.
+- **Auth**: None (Public; the user still signs the inner transaction)
+- **Enabled**: only when `SPONSOR_SECRET_KEY` is set; otherwise `404` and nothing is signed
+- **Accepted**: a signed transaction with exactly one `invokeHostFunction` operation calling a [build-tx](#post-apijobsbuild-tx) allowlisted method on `CONTRACT_ID`, `FACTORY_CONTRACT_ID` or a contract the indexer monitors. Anything else is `400`/`403`
+- **Fee**: wrapped in a fee-bump signed by the sponsor, rejected with `422` above `SPONSOR_MAX_FEE` stroops
+- **Rate Limit**: `SPONSOR_RATE_MAX` per IP and `SPONSOR_ACCOUNT_RATE_MAX` per source account per `SPONSOR_RATE_WINDOW_MS`, plus a daily budget of `SPONSOR_DAILY_BUDGET_STROOPS` fee stroops per source account (`429` when spent)
+- **Body**: `{ signedXdr }` (the inner transaction, as for `/submit`)
+- **Response**: the same as `/submit`
 
 ---
 

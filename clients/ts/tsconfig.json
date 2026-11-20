@@ -1,0 +1,14 @@
+{
+  // Type-checks the generated client types on their own (#964):
+  // `npx tsc -p clients/ts`. skipLibCheck stays off so the .d.ts is checked.
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": false,
+    "types": []
+  },
+  "include": ["schema.d.ts"]
+}

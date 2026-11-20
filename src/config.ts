@@ -158,6 +158,23 @@ export const config = {
   get shutdownTimeoutMs(): number {
     return readIntEnv("SHUTDOWN_TIMEOUT_MS", 10000, 1);
   },
+
+  // Fee sponsorship (#966). Only used when SPONSOR_SECRET_KEY is set.
+  get sponsorMaxFeeStroops(): number {
+    return readIntEnv("SPONSOR_MAX_FEE", 1_000_000, 1);
+  },
+  get sponsorDailyBudgetStroops(): number {
+    return readIntEnv("SPONSOR_DAILY_BUDGET_STROOPS", 5_000_000, 1);
+  },
+  get sponsorRateWindowMs(): number {
+    return readIntEnv("SPONSOR_RATE_WINDOW_MS", 60000, 1);
+  },
+  get sponsorIpRateMax(): number {
+    return readIntEnv("SPONSOR_RATE_MAX", 10, 1);
+  },
+  get sponsorAccountRateMax(): number {
+    return readIntEnv("SPONSOR_ACCOUNT_RATE_MAX", 5, 1);
+  },
 } as const;
 
 /** Throw at startup when any numeric env var is invalid, naming the variable. */

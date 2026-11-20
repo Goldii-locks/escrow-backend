@@ -10,6 +10,51 @@ Thank you for your interest in contributing! This document outlines the process 
 4. Copy .env.example to .env and fill in the required values
 5. Run the development server: `npm run dev`
 
+## Local Network with Docker Compose
+
+`npm run dev` talks to public testnet by default. To work against a private
+local network instead, [docker-compose.dev.yml](./docker-compose.dev.yml)
+runs `stellar/quickstart` (`--local --enable-soroban-rpc`, the image the
+nightly E2E job pins) and the backend built from the local `Dockerfile`:
+
+```bash
+docker compose -f docker-compose.dev.yml up --build
+curl -i http://localhost:3001/ready   # 200 once the first indexer poll succeeds
+```
+
+Quickstart takes a minute or two to become healthy on a cold start; the
+backend waits for it. The backend uses `SOROBAN_RPC_URL=http://quickstart:8000/rpc`,
+the standalone passphrase and the defaults in
+[docker-compose.dev.env](./docker-compose.dev.env), and keeps its SQLite DB in
+`./data` (delete `data/indexer.db` to re-index from scratch). Quickstart's RPC,
+friendbot and Horizon are also on `http://localhost:8000` for your own tools.
+`deploy/docker-compose.yml` is the production file; don't use it for this.
+Needs Docker Compose v2.24 or later.
+
+Until contracts are deployed, the backend indexes the network's native XLM
+token contract so it has something to poll. To deploy the escrow and
+escrow-factory contracts, build them first (see
+[End-to-End Tests](#end-to-end-tests-soroban-quickstart) below; the default
+location is `../escrow-contract`, or set `ESCROW_CONTRACT_DIR`), then run the
+optional one-shot `deploy` service and recreate the backend:
+
+```bash
+docker compose -f docker-compose.dev.yml --profile deploy run --rm deploy
+docker compose -f docker-compose.dev.yml up -d --force-recreate backend
+```
+
+`deploy` runs the same setup as the E2E suite
+([test/e2e/global-setup.ts](./test/e2e/global-setup.ts), through
+[test/e2e/dev-deploy.ts](./test/e2e/dev-deploy.ts)): it deploys the native
+token contract, an escrow with two milestones and a factory that allows the
+token, and has the freelancer and arbiter accept the job. It writes
+`CONTRACT_ID`, `FACTORY_CONTRACT_ID` and a one-off `LEDGER_RANGE_START/END`
+backfill to `.env.dev` (git-ignored), along with the throwaway accounts'
+keys as comments. The quickstart network starts empty on every
+`docker compose up`, so deploy again after recreating it.
+
+Stop everything with `docker compose -f docker-compose.dev.yml down`.
+
 ## Making Changes
 
 1. Create a new branch for your feature/fix: `git checkout -b my-feature`
