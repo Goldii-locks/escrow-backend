@@ -28,6 +28,27 @@ components:
       description: Admin API key required for administrative and indexer monitoring endpoints (ADMIN_API_KEYS). Bearer token also supported.
 
   schemas:
+    HistoryEvent:
+      type: object
+      description: A parsed history event; internal DB columns are not exposed (#931).
+      properties:
+        eventId:
+          type: string
+          nullable: true
+        eventType:
+          type: string
+        ledger:
+          type: integer
+        timestamp:
+          type: integer
+          nullable: true
+        txHash:
+          type: string
+          nullable: true
+        data:
+          nullable: true
+          description: Parsed event payload, or null when it is not valid JSON.
+
     HealthResponse:
       type: object
       properties:
@@ -332,7 +353,11 @@ paths:
   /api/jobs/{contractId}/history:
     get:
       summary: Job event history
-      description: Returns indexed event timeline for an escrow contract. Public read-only.
+      description: >
+        Returns an indexed event timeline for an escrow contract. Public
+        read-only. Newest-first by default on /api/v1, oldest-first on the
+        legacy /api path. Keyset cursors keep paging stable as new events
+        arrive (#931, #932).
       parameters:
         - name: contractId
           in: path
@@ -351,9 +376,58 @@ paths:
           schema:
             type: integer
             default: 10
+        - name: order
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [asc, desc]
+        - name: before
+          in: query
+          required: false
+          description: Return rows before this event row id in the current order.
+          schema:
+            type: integer
+        - name: after
+          in: query
+          required: false
+          description: Return rows after this event row id in the current order.
+          schema:
+            type: integer
+        - name: includeTotal
+          in: query
+          required: false
+          description: Opt in to the expensive COUNT(*) used for `total`.
+          schema:
+            type: boolean
+            default: false
       responses:
         '200':
           description: Event history result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      events:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/HistoryEvent'
+                      page:
+                        type: integer
+                      limit:
+                        type: integer
+                      nextCursor:
+                        type: string
+                        nullable: true
+                      total:
+                        type: integer
+                        description: Present only when includeTotal=true.
         '400':
           description: Invalid contractId or pagination
 
@@ -682,6 +756,36 @@ paths:
                 $ref: '#/components/schemas/IndexerStatus'
         '401':
           description: Unauthorized (missing or invalid admin API key)
+
+  /api/admin/undecodable-events/retry:
+    post:
+      summary: Retry undecodable events after a decoder fix
+      description: >
+        Re-decodes events parked in undecodable_events with the current decoder,
+        inserts the recovered ones through the normal event path (participants,
+        cache invalidation and webhooks), and deletes them from the table (#933).
+      security:
+        - AdminApiKeyAuth: []
+      responses:
+        '200':
+          description: Retry result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  retried:
+                    type: integer
+                  recovered:
+                    type: integer
+                  stillFailing:
+                    type: integer
+        '401':
+          description: Unauthorized (missing or invalid admin API key)
+        '500':
+          description: Retry could not be completed
 
   /api/admin/metrics:
     get:

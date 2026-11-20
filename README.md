@@ -35,6 +35,7 @@ Express + TypeScript backend for the Soroban milestone escrow platform.
     - [POST /api/jobs/submit](#post-apijobssubmit)
   - [Admin API](#admin-api)
     - [GET /api/admin/indexer-status](#get-apiadminindexer-status)
+    - [POST /api/admin/undecodable-events/retry](#post-apiadminundecodable-eventsretry)
     - [GET /api/admin/metrics](#get-apiadminmetrics)
     - [GET /api/admin/jobs](#get-apiadminjobs)
     - [GET /api/admin/webhook-subscriptions](#get-apiadminwebhook-subscriptions)
@@ -151,7 +152,8 @@ Frontend query alias to fetch accepted token contract IDs for a contract.
 
 Fetch indexed contract lifecycle events (funded, milestone approved, completed, etc.).
 - **Auth**: None (Public)
-- **Query**: `page` (default: 1), `limit` (default: 10, max: 100)
+- **Query**: `page` (default: 1), `limit` (default: 10, max: 100), `order` (`asc`/`desc`; `desc` under `/api/v1`, `asc` on the legacy path), `before`/`after` (event row id cursors), `includeTotal` (set `true` to compute `total`)
+- **Response**: `{ success: true, data: { events, page, limit, nextCursor, total? } }`. Each event is `{ eventId, eventType, ledger, timestamp, txHash, data }` with `data` parsed into an object.
 
 #### GET /api/jobs/:contractId/fee-preview
 
@@ -222,6 +224,12 @@ Submit a signed transaction to the Stellar network and return execution status.
 Retrieve indexer health, current ledger, event counters, uptime, and reconciliation status.
 - **Auth**: Admin API Key (`x-api-key: <ADMIN_API_KEY>` or `Bearer`)
 - **Response**: `{ success: true, data: { lastIndexedLedger, totalEvents, uptimeSeconds, lastEventAt, eventsByType, skippedLedgerRange, undecodableEvents, reconciliation, failedDeliveries, deadDeliveries, consecutiveFailures, lastSuccessfulPollAt, pollIntervalMs, ledgerLag } }` (`ledgerLag` is `null` when the RPC head cannot be read)
+
+#### POST /api/admin/undecodable-events/retry
+
+Re-decode events that were parked in `undecodable_events` after a decoder failure (#933). Recovered events are inserted through the normal indexer path (participants, cache invalidation and webhooks) and removed from the table.
+- **Auth**: Admin API Key
+- **Response**: `{ success: true, retried, recovered, stillFailing }`
 
 #### GET /api/admin/metrics
 

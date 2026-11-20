@@ -2,11 +2,14 @@ import { Server } from "@stellar/stellar-sdk/rpc";
 import type { Api } from "@stellar/stellar-sdk/rpc";
 
 
-import { scValToNative } from "@stellar/stellar-sdk";
+import { scValToNative, xdr } from "@stellar/stellar-sdk";
 import {
   insertEventBatch,
   insertHistoricalEventBatch,
   recordUndecodableEvent,
+  getUndecodableEvents,
+  deleteUndecodableEvent,
+  type UndecodableStoredEvent,
   getActiveContractIds,
   getAllContracts,
   getActiveContractsWithPointers,
@@ -40,6 +43,7 @@ import {
 import { deliverWebhooks } from "./webhook-delivery.js";
 import { buildGetEventsRequest } from "./event_type_filter.js";
 import { invalidateJobStateForEvents } from "./job-state-cache.js";
+import { invalidateContractCaches } from "../routes/jobs/caches.js";
 import { formatError } from "../utils/format-error.js";
 import { config } from "../config.js";
 import { rpcAllowHttp } from "../utils/rpc-allow-http.js";
@@ -275,6 +279,91 @@ function decodeEventsIsolated(
     }
   }
   return rows;
+}
+
+// ---------------------------------------------------------------------------
+// Retry undecodable events after a decoder fix (#933)
+// ---------------------------------------------------------------------------
+
+export interface UndecodableRetryResult {
+  retried: number;
+  recovered: number;
+  stillFailing: number;
+}
+
+/** Rehydrate the topic ScVals saved by `rawXdr` into real XDR values. */
+function decodeStoredTopic(raw: string | null): xdr.ScVal[] {
+  if (!raw) throw new Error("missing topic XDR");
+  const encoded: unknown = raw.trim().startsWith("[") ? JSON.parse(raw) : [raw];
+  if (!Array.isArray(encoded) || encoded.length === 0) {
+    throw new Error("invalid topic XDR");
+  }
+  return encoded.map((part) => {
+    if (typeof part !== "string" || part.length === 0) {
+      throw new Error("invalid topic XDR part");
+    }
+    return xdr.ScVal.fromXDR(part, "base64");
+  });
+}
+
+/**
+ * Decode a stored undecodable row with the current `toEventRow` logic. The
+ * ledger close time was never persisted, so the recovered timestamp is null.
+ */
+function toEventRowFromStored(row: UndecodableStoredEvent): EventRow {
+  if (row.ledgerSequence === null) throw new Error("missing ledger sequence");
+  if (!Number.isInteger(row.ledgerSequence) || row.ledgerSequence < 1) {
+    throw new Error("invalid ledger sequence");
+  }
+  if (!row.valueXdr) throw new Error("missing value XDR");
+  const contractId = row.contractId ?? "";
+  const event = {
+    contractId: { contractId: () => contractId },
+    topic: decodeStoredTopic(row.topicXdr),
+    ledger: row.ledgerSequence,
+    ledgerClosedAt: "",
+    id: row.eventId ?? undefined,
+    txHash: null,
+    value: xdr.ScVal.fromXDR(row.valueXdr, "base64"),
+  } as unknown as Api.EventResponse;
+  return toEventRow(event, contractId);
+}
+
+/**
+ * Re-run the current decoder over stored undecodable rows, insert the ones that
+ * now decode through the normal event-write queue, deliver their ledger range
+ * to webhook subscribers, and remove the successfully recovered rows.
+ */
+export async function retryUndecodableEvents(): Promise<UndecodableRetryResult> {
+  const rows = getUndecodableEvents();
+  const decoded: Array<{ id: number; row: EventRow }> = [];
+  let stillFailing = 0;
+
+  for (const stored of rows) {
+    try {
+      decoded.push({ id: stored.id, row: toEventRowFromStored(stored) });
+    } catch (err) {
+      stillFailing += 1;
+      logger.warn("Undecodable event still failing after retry", {
+        id: stored.id,
+        error: formatError(err),
+      });
+    }
+  }
+
+  if (decoded.length > 0) {
+    const ledgers = decoded.map(({ row }) => row.ledgerSequence);
+    const startLedger = Math.min(...ledgers);
+    const endLedger = Math.max(...ledgers);
+    await enqueueHistoricalEventInsert(
+      decoded.map(({ row }) => row),
+      { startLedger, endLedger },
+    );
+    await deliverWebhooks(startLedger, endLedger);
+    for (const { id } of decoded) deleteUndecodableEvent(id);
+  }
+
+  return { retried: rows.length, recovered: decoded.length, stillFailing };
 }
 
 // ---------------------------------------------------------------------------
@@ -600,6 +689,15 @@ export function resetEventInsertQueueForTests(): void {
   eventInsertTail = Promise.resolve();
 }
 
+/** Drop the per-contract HTTP caches affected by a batch of indexed events. */
+function invalidateContractCachesForEvents(
+  rows: ReadonlyArray<{ contractId: string }>,
+): void {
+  for (const contractId of new Set(rows.map((row) => row.contractId))) {
+    invalidateContractCaches(contractId);
+  }
+}
+
 /**
  * Enqueue an event batch write behind a memory queue lock.
  *
@@ -614,8 +712,10 @@ export function enqueueEventInsert(
   return enqueueEventWrite(() => {
     insertEventBatch(events, newLedger);
     // New events can change on-chain job state: drop cached state for every
-    // contract in the batch as soon as it is stored (#679).
+    // contract in the batch as soon as it is stored (#679). The per-contract
+    // whitelist/countdown/fee caches must go too (#934).
     invalidateJobStateForEvents(events);
+    invalidateContractCachesForEvents(events);
   });
 }
 
@@ -626,6 +726,7 @@ export function enqueueHistoricalEventInsert(
   return enqueueEventWrite(() => {
     const result = insertHistoricalEventBatch(events, range);
     invalidateJobStateForEvents(events);
+    invalidateContractCachesForEvents(events);
     return result;
   });
 }
