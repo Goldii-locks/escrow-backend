@@ -843,12 +843,10 @@ export async function pollEvents(): Promise<boolean> {
     let minStartLedger = Number.POSITIVE_INFINITY;
     const diagnosticsBatch: EventRow[] = [];
     let anyGroupPolled = false;
+    let anyPageFetched = false;
 
     // Safety valve so one poll cycle can never page forever (#608).
-    const maxPagesPerPoll = parseInt(
-      process.env.POLLER_MAX_PAGES_PER_POLL || "20",
-      10,
-    );
+    const maxPagesPerPoll = config.pollerMaxPagesPerPoll;
     const pageLimit = 100;
 
     for (const [pointer, groupContractIds] of groups) {
@@ -924,6 +922,7 @@ export async function pollEvents(): Promise<boolean> {
       let cursor: string | undefined;
       let lastStoredLedger = pointer;
       for (let page = 0; page < maxPagesPerPoll; page++) {
+        anyPageFetched = true;
         const events = await fetchPageRetentionAware(startLedger, cursor);
         ensureCurrentCycle();
 
@@ -1025,6 +1024,12 @@ export async function pollEvents(): Promise<boolean> {
         if (isLastPage) break;
         cursor = nextCursor;
       }
+    }
+
+    if (anyGroupPolled && !anyPageFetched) {
+      throw new Error(
+        `Poller had groups behind chain head but fetched no pages (maxPagesPerPoll=${maxPagesPerPoll})`,
+      );
     }
 
     // Record success for any poll that completes without throwing, even idle cycles.
