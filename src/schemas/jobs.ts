@@ -148,10 +148,14 @@ export const BUILD_TX_ALLOWED_METHODS = [
   "fund",
   "mark_delivered",
   "approve_milestone",
+  // Batch approval of several delivered milestones (escrow-frontend #899).
+  "approve_milestones",
   "approve_partial",
   "raise_dispute",
   "resolve_dispute",
   "claim_auto_release",
+  // Returns tokens sent to the escrow beyond what it owes (escrow-frontend #898).
+  "sweep_excess",
   "add_whitelisted_token",
   "remove_whitelisted_token",
   // Admin pause switch, called from the frontend admin page.

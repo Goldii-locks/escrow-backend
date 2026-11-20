@@ -905,10 +905,12 @@ describe("POST /api/jobs/build-tx — contract method allowlist (#709)", () => {
     "fund",
     "mark_delivered",
     "approve_milestone",
+    "approve_milestones",
     "approve_partial",
     "raise_dispute",
     "resolve_dispute",
     "claim_auto_release",
+    "sweep_excess",
     "admin_pause_escrow",
     "admin_resume_escrow",
   ])("accepts allowlisted method %s", async (method) => {
