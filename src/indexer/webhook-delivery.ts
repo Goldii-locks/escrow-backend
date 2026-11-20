@@ -1,24 +1,39 @@
 import { createHash, randomUUID } from "crypto";
 import {
   getDb,
-  getActiveSubscriptions,
+  getActiveSubscriptionsForDelivery,
+  advanceSubscriptionCursor,
   recordSubscriptionFailure,
   recordSubscriptionSuccess,
   EventDbRow,
 } from "./db.js";
 import logger from "../utils/logger.js";
 import { assertDeliveryTargetAllowed } from "../utils/webhook-url-guard.js";
+import { signPayload } from "../utils/webhook_signature_verifier.js";
 
-const MAX_RETRIES = 3;
-const BACKOFF_MS = [500, 1500, 4500];
+/**
+ * Default number of subscriptions delivered to at the same time (#851).
+ * Each subscription has its own ordered queue, so one unreachable receiver
+ * only occupies one slot instead of delaying every other subscriber.
+ * Override with WEBHOOK_DELIVERY_CONCURRENCY.
+ */
+export const DEFAULT_WEBHOOK_DELIVERY_CONCURRENCY = 4;
+
+/** Read per call so a deployment (or a test) can change it at runtime. */
+function webhookDeliveryConcurrency(): number {
+  const configured = Number.parseInt(process.env.WEBHOOK_DELIVERY_CONCURRENCY ?? "", 10);
+  return Number.isFinite(configured) && configured > 0
+    ? configured
+    : DEFAULT_WEBHOOK_DELIVERY_CONCURRENCY;
+}
 
 /**
  * Default per-attempt timeout for an outbound webhook POST (#606).
  *
  * Undici has no overall deadline of its own: a receiver that accepts the
  * connection and then never writes a response would pin the attempt forever.
- * Because delivery is sequential, one such subscriber would starve every
- * other subscriber behind it. Override with WEBHOOK_TIMEOUT_MS.
+ * Each subscription's queue is sequential, so such a receiver would hold its
+ * queue and a delivery slot forever. Override with WEBHOOK_TIMEOUT_MS.
  */
 export const DEFAULT_WEBHOOK_TIMEOUT_MS = 5000;
 
@@ -46,11 +61,11 @@ export const WEBHOOK_DISABLE_AFTER = Math.max(
 );
 
 /**
- * Number of ledgers scanned per query inside deliverWebhooks (#690). Paging
- * the range keeps peak memory bounded even after long downtime, when the
- * range to deliver can span thousands of ledgers.
+ * Number of events read per query for one subscription inside
+ * deliverWebhooks (#690, #850). Paging keeps peak memory bounded even after
+ * long downtime, when the backlog behind a cursor can be large.
  */
-const WEBHOOK_DELIVERY_LEDGER_PAGE_SIZE =
+const WEBHOOK_DELIVERY_PAGE_SIZE =
   parseInt(process.env.WEBHOOK_DELIVERY_PAGE_SIZE || "500", 10) || 500;
 
 /**
@@ -183,19 +198,21 @@ export function getFetchErrorCode(err: unknown): string {
   return "UNKNOWN_ERROR";
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 /**
  * POSTs one event to one URL. Callers retrying a delivery must pass the same
  * `deliveryId` with an incremented `attempt`; a standalone call is treated
  * as attempt 1 of a new delivery.
+ *
+ * When `signingSecret` is given, the exact body string sent is signed with
+ * HMAC-SHA256 (`signPayload`) and the `X-Webhook-Timestamp` /
+ * `X-Webhook-Signature` headers are attached (#849). The timestamp is taken
+ * per call, so every retry is signed again with a fresh timestamp.
  */
 export async function deliverToUrl(
   webhookUrl: string,
   event: EventDbRow,
-  delivery: DeliveryAttempt = { deliveryId: randomUUID(), attempt: 1 }
+  delivery: DeliveryAttempt = { deliveryId: randomUUID(), attempt: 1 },
+  signingSecret?: string | null
 ): Promise<DeliveryOutcome> {
   const startedAt = Date.now();
   const eventId = webhookEventId(event);
@@ -234,12 +251,33 @@ export async function deliverToUrl(
       timestamp: event.timestamp,
       data: JSON.parse(event.data_json),
     };
-  } catch (err) {
+  } catch {
     return {
       ok: false,
       errorCode: "PAYLOAD_PARSE_ERROR",
       durationMs: Date.now() - startedAt,
     };
+  }
+
+  // Sign the exact string that is sent: any re-serialization on the way
+  // would break the receiver's verification (#849).
+  const body = JSON.stringify(payload);
+  let signatureHeaders: Record<string, string> = {};
+  if (signingSecret) {
+    try {
+      signatureHeaders = signPayload(body, signingSecret).headers;
+    } catch {
+      // Never include the secret or the error detail in logs (#849).
+      logger.error("Webhook delivery could not be signed", {
+        webhookUrl,
+        eventId: event.id,
+      });
+      return {
+        ok: false,
+        errorCode: "SIGNING_ERROR",
+        durationMs: Date.now() - startedAt,
+      };
+    }
   }
 
   try {
@@ -250,13 +288,14 @@ export async function deliverToUrl(
         [WEBHOOK_EVENT_ID_HEADER]: eventId,
         [WEBHOOK_DELIVERY_ID_HEADER]: delivery.deliveryId,
         [WEBHOOK_DELIVERY_ATTEMPT_HEADER]: String(delivery.attempt),
+        ...signatureHeaders,
       },
-      body: JSON.stringify(payload),
+      body,
       // A public URL must not be able to bounce the request to an internal
       // one: any 3xx is a failed attempt, never followed (#605).
       redirect: "manual",
       // Hard per-attempt deadline: a receiver that never answers must fail
-      // the attempt instead of stalling the sequential delivery loop (#606).
+      // the attempt instead of holding its subscription's queue (#606).
       signal: AbortSignal.timeout(webhookTimeoutMs()),
     });
 
@@ -423,10 +462,173 @@ export function getFailedDeliveryCount(): number {
 }
 
 /**
+ * Run `worker` over `items` with at most `limit` running at once (#851).
+ * A worker that throws is logged and does not stop the others.
+ */
+async function runWithConcurrency<T>(
+  items: T[],
+  limit: number,
+  worker: (item: T) => Promise<void>
+): Promise<void> {
+  let next = 0;
+  const runners = Array.from(
+    { length: Math.min(Math.max(1, limit), items.length) },
+    async () => {
+      while (next < items.length) {
+        const item = items[next++];
+        try {
+          await worker(item);
+        } catch (err) {
+          logger.error("Webhook delivery worker failed", {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+    }
+  );
+  await Promise.all(runners);
+}
+
+/** The subscription fields the delivery loop needs. */
+interface DeliverySubscription {
+  id: number;
+  webhook_url: string;
+  signing_secret?: string | null;
+}
+
+/**
+ * Update the subscription's failure counter after an attempt (#701) and log
+ * the outcome. The signing secret is never logged (#849).
+ */
+function recordSubscriptionOutcome(
+  sub: DeliverySubscription,
+  result: DeliveryResult
+): void {
+  if (result.success) {
+    // A successful delivery clears the failure history (#701).
+    recordSubscriptionSuccess(sub.id);
+    logger.info("Webhook delivered", {
+      subscriptionId: sub.id,
+      eventId: result.eventId,
+      deliveryId: result.deliveryId,
+      webhookUrl: sub.webhook_url,
+      attempt: result.attempts,
+      status: result.status,
+      durationMs: result.durationMs,
+    });
+    return;
+  }
+
+  const failure = recordSubscriptionFailure(
+    sub.id,
+    result.error ?? result.errorCode ?? "delivery failed",
+    WEBHOOK_DISABLE_AFTER,
+  );
+  logger.warn("Webhook delivery failed; queued for retry", {
+    subscriptionId: sub.id,
+    eventId: result.eventId,
+    deliveryId: result.deliveryId,
+    webhookUrl: sub.webhook_url,
+    attempt: result.attempts,
+    status: result.status,
+    errorCode: result.errorCode,
+    durationMs: result.durationMs,
+    consecutiveFailures: failure.consecutiveFailures,
+    disabled: failure.disabled,
+  });
+  if (failure.disabled) {
+    logger.warn(
+      "Webhook subscription auto-disabled after repeated delivery failures",
+      {
+        subscriptionId: sub.id,
+        webhookUrl: sub.webhook_url,
+        consecutiveFailures: failure.consecutiveFailures,
+        disableAfter: WEBHOOK_DISABLE_AFTER,
+      },
+    );
+  }
+}
+
+/**
+ * Make one signed attempt to deliver `event` to `sub`. There are no inline
+ * retries (#851): a failed attempt is persisted as a `failed` outbox row and
+ * retried by `retryFailedDeliveries` after its backoff.
+ *
+ * With `advanceCursor`, the outbox row and the subscription's delivery
+ * cursor are written in one transaction (#850), so after a restart the
+ * event is neither lost nor handed to the receiver twice.
+ */
+async function attemptDelivery(
+  sub: DeliverySubscription,
+  event: EventDbRow,
+  attempt: number,
+  advanceCursor: boolean
+): Promise<DeliveryResult> {
+  // One logical delivery: every attempt carries the same delivery id.
+  const deliveryId = webhookDeliveryId(sub.id, event.id);
+
+  let result: DeliveryResult;
+  try {
+    const outcome = await deliverToUrl(
+      sub.webhook_url,
+      event,
+      { deliveryId, attempt },
+      sub.signing_secret
+    );
+    result = {
+      subscriptionId: sub.id,
+      webhookUrl: sub.webhook_url,
+      eventId: event.id,
+      deliveryId,
+      success: outcome.ok,
+      attempts: attempt,
+      error: outcome.ok ? undefined : `Attempt ${attempt} failed`,
+      status: outcome.status,
+      errorCode: outcome.errorCode,
+      durationMs: outcome.durationMs,
+    };
+  } catch (err) {
+    // One throwing subscriber must not skip the rest of the queue (#611).
+    result = {
+      subscriptionId: sub.id,
+      webhookUrl: sub.webhook_url,
+      eventId: event.id,
+      deliveryId,
+      success: false,
+      attempts: attempt,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+
+  const db = getDb();
+  db.transaction(() => {
+    recordDeliveryOutcome(
+      sub.id,
+      event.id,
+      result.success,
+      result.attempts,
+      result.success ? undefined : (result.errorCode ?? result.error)
+    );
+    if (advanceCursor) {
+      advanceSubscriptionCursor(sub.id, event.id);
+    }
+  })();
+
+  recordSubscriptionOutcome(sub, result);
+  return result;
+}
+
+/**
  * Periodic sweep: retry failed rows whose backoff has expired, with
  * exponential backoff up to a maximum age, then mark them dead (#611).
  * Called at the start of every deliverWebhooks cycle so a subscriber that
  * was down for one cycle receives the missed event on the next one.
+ *
+ * Rows are grouped per subscription and retried in event order; a
+ * subscription stops at its first failure so later events never overtake
+ * an earlier one. Subscriptions are retried in parallel, bounded by
+ * WEBHOOK_DELIVERY_CONCURRENCY (#851). Every retry is signed again with a
+ * fresh timestamp (#849).
  */
 export async function retryFailedDeliveries(): Promise<number> {
   try {
@@ -436,12 +638,13 @@ export async function retryFailedDeliveries(): Promise<number> {
   }
   const db = getDb();
   const now = Date.now();
-  let rows: Array<{
+  type RetryRow = {
     subscription_id: number;
     event_id: number;
     attempts: number;
     last_error: string | null;
-  }>;
+  };
+  let rows: RetryRow[];
   try {
     rows = db
       .prepare(
@@ -449,21 +652,18 @@ export async function retryFailedDeliveries(): Promise<number> {
          FROM webhook_deliveries
          WHERE status = 'failed' AND next_attempt_at IS NOT NULL
            AND next_attempt_at <= ?
+         ORDER BY subscription_id ASC, event_id ASC
          LIMIT 100`
       )
-      .all(now) as Array<{
-      subscription_id: number;
-      event_id: number;
-      attempts: number;
-      last_error: string | null;
-    }>;
+      .all(now) as RetryRow[];
   } catch {
     return 0;
   }
   if (rows.length === 0) return 0;
 
-  let eventStmt;
-  let subStmt;
+  // Typed explicitly: both are captured by the per-subscription workers.
+  let eventStmt: ReturnType<typeof db.prepare>;
+  let subStmt: ReturnType<typeof db.prepare>;
   try {
     eventStmt = db.prepare(`SELECT * FROM events WHERE id = ?`);
     subStmt = db.prepare(`SELECT * FROM webhook_subscriptions WHERE id = ?`);
@@ -471,125 +671,90 @@ export async function retryFailedDeliveries(): Promise<number> {
     return 0;
   }
 
-  let redelivered = 0;
-  for (const row of rows) {
-    let event: EventDbRow | undefined;
-    let sub: { webhook_url: string } | undefined;
+  const markDead = (row: RetryRow, reason?: string): void => {
     try {
-      event = eventStmt.get(row.event_id) as EventDbRow | undefined;
-      sub = subStmt.get(row.subscription_id) as
-        | { webhook_url: string }
-        | undefined;
-    } catch {
-      continue;
-    }
-    if (!event || !sub) {
-      try {
+      if (reason) {
         db.prepare(
-          `UPDATE webhook_deliveries SET status = 'dead', last_error = 'event or subscription gone',
+          `UPDATE webhook_deliveries SET status = 'dead', last_error = ?,
              updated_at = CURRENT_TIMESTAMP
            WHERE subscription_id = ? AND event_id = ?`
-        ).run(row.subscription_id, row.event_id);
-      } catch {
-        /* ignore */
-      }
-      continue;
-    }
-    // Expire rows older than the max age instead of retrying forever.
-    const eventAgeMs = Date.now() - new Date(event.created_at).getTime();
-    if (
-      row.attempts >= WEBHOOK_MAX_DELIVERY_ATTEMPTS ||
-      (!Number.isNaN(eventAgeMs) && eventAgeMs > WEBHOOK_RETRY_MAX_AGE_MS)
-    ) {
-      try {
+        ).run(reason, row.subscription_id, row.event_id);
+      } else {
         db.prepare(
           `UPDATE webhook_deliveries SET status = 'dead', updated_at = CURRENT_TIMESTAMP
            WHERE subscription_id = ? AND event_id = ?`
         ).run(row.subscription_id, row.event_id);
-      } catch {
-        /* ignore */
       }
-      continue;
+    } catch {
+      /* ignore */
     }
-    const attempts = row.attempts + 1;
-    const outcome = await deliverToUrl(sub.webhook_url, event, {
-      deliveryId: webhookDeliveryId(row.subscription_id, event.id),
-      attempt: attempts,
-    });
-    if (outcome.ok) {
-      recordDeliveryOutcome(row.subscription_id, row.event_id, true, attempts);
-      redelivered++;
-    } else {
-      recordDeliveryOutcome(
-        row.subscription_id,
-        row.event_id,
-        false,
-        attempts,
-        outcome.errorCode ?? "retry failed"
-      );
-    }
+  };
+
+  const rowsBySubscription = new Map<number, RetryRow[]>();
+  for (const row of rows) {
+    const list = rowsBySubscription.get(row.subscription_id) ?? [];
+    list.push(row);
+    rowsBySubscription.set(row.subscription_id, list);
   }
+
+  let redelivered = 0;
+  await runWithConcurrency(
+    [...rowsBySubscription.values()],
+    webhookDeliveryConcurrency(),
+    async (subRows) => {
+      for (const row of subRows) {
+        let event: EventDbRow | undefined;
+        let sub: DeliverySubscription | undefined;
+        try {
+          event = eventStmt.get(row.event_id) as EventDbRow | undefined;
+          sub = subStmt.get(row.subscription_id) as DeliverySubscription | undefined;
+        } catch {
+          continue;
+        }
+        if (!event || !sub) {
+          markDead(row, "event or subscription gone");
+          continue;
+        }
+        // Expire rows older than the max age instead of retrying forever.
+        const eventAgeMs = Date.now() - new Date(event.created_at).getTime();
+        if (
+          row.attempts >= WEBHOOK_MAX_DELIVERY_ATTEMPTS ||
+          (!Number.isNaN(eventAgeMs) && eventAgeMs > WEBHOOK_RETRY_MAX_AGE_MS)
+        ) {
+          markDead(row);
+          continue;
+        }
+        const result = await attemptDelivery(sub, event, row.attempts + 1, false);
+        if (!result.success) {
+          // Keep per-subscriber order: later rows wait for this one.
+          return;
+        }
+        redelivered++;
+      }
+    }
+  );
   return redelivered;
 }
 
-async function deliverEventToSubscriber(
-  webhookUrl: string,
-  event: EventDbRow,
-  subscriptionId: number
-): Promise<DeliveryResult> {
-  let success = false;
-  let lastError: string | undefined;
-  let attemptsMade = 0;
-
-  let lastOutcome: DeliveryOutcome | undefined;
-  // One logical delivery: every retry carries the same delivery id.
-  const deliveryId = webhookDeliveryId(subscriptionId, event.id);
-
-  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-    attemptsMade = attempt;
-    const outcome = await deliverToUrl(webhookUrl, event, { deliveryId, attempt });
-    lastOutcome = outcome;
-    success = outcome.ok;
-    if (success) break;
-
-    lastError = `Attempt ${attempt}/${MAX_RETRIES} failed`;
-    logger.warn("Webhook delivery failed", {
-      webhookUrl,
-      eventId: event.id,
-      deliveryId,
-      attempt,
-      status: outcome.status,
-      errorCode: outcome.errorCode,
-      durationMs: outcome.durationMs,
-    });
-
-    if (attempt < MAX_RETRIES) {
-      await sleep(BACKOFF_MS[attempt - 1] || BACKOFF_MS[0]);
-    }
+/**
+ * Whether the subscription has a delivery still waiting in the retry path.
+ * New events are held back until it clears, so a receiver never gets a
+ * later event before an earlier one (#851).
+ */
+function hasPendingRetry(subscriptionId: number): boolean {
+  try {
+    ensureDeliveriesTable();
+    return (
+      getDb()
+        .prepare(
+          `SELECT 1 FROM webhook_deliveries
+           WHERE subscription_id = ? AND status = 'failed' LIMIT 1`
+        )
+        .get(subscriptionId) !== undefined
+    );
+  } catch {
+    return false;
   }
-
-  return {
-    subscriptionId,
-    webhookUrl,
-    eventId: event.id,
-    deliveryId,
-    success,
-    attempts: attemptsMade,
-    error: success ? undefined : lastError,
-    status: lastOutcome?.status,
-    errorCode: lastOutcome?.errorCode,
-    durationMs: lastOutcome?.durationMs,
-  };
-}
-
-function recordResult(result: DeliveryResult): void {
-  recordDeliveryOutcome(
-    result.subscriptionId,
-    result.eventId,
-    result.success,
-    result.attempts,
-    result.error ?? result.errorCode
-  );
 }
 
 function subscriptionsMatchEvent(
@@ -605,12 +770,82 @@ function subscriptionsMatchEvent(
   }
 }
 
-export async function deliverWebhooks(
-  startLedger: number,
-  endLedger: number
-): Promise<DeliveryResult[]> {
-  const db = getDb();
+/**
+ * Deliver one subscription's queue: every event for its contract with an id
+ * above the subscription's persisted cursor, in id order (#850). The queue
+ * stops at the first failed attempt; that event is retried by the persisted
+ * retry path and the rest of the queue follows once it clears (#851).
+ */
+async function deliverSubscriptionQueue(
+  sub: ReturnType<typeof getActiveSubscriptionsForDelivery>[number],
+  results: DeliveryResult[]
+): Promise<void> {
+  if (hasPendingRetry(sub.id)) return;
 
+  const pageQuery = getDb().prepare(
+    `SELECT * FROM events
+     WHERE contract_id = ? AND id > ?
+     ORDER BY id ASC
+     LIMIT ?`
+  );
+
+  let cursor = sub.last_delivered_event_id ?? 0;
+  // Highest id of a skipped (non-matching) event not yet persisted.
+  let skippedTo = cursor;
+  try {
+    for (;;) {
+      const events = pageQuery.all(
+        sub.contract_id,
+        cursor,
+        WEBHOOK_DELIVERY_PAGE_SIZE
+      ) as EventDbRow[];
+      if (events.length === 0) return;
+
+      for (const event of events) {
+        cursor = event.id;
+        if (!subscriptionsMatchEvent(sub.event_types, event.event_type)) {
+          skippedTo = event.id;
+          continue;
+        }
+        const result = await attemptDelivery(sub, event, 1, true);
+        // The cursor now covers this event and every skipped one before it.
+        skippedTo = event.id;
+        results.push(result);
+        if (!result.success) return;
+      }
+    }
+  } finally {
+    if (skippedTo > (sub.last_delivered_event_id ?? 0)) {
+      try {
+        advanceSubscriptionCursor(sub.id, skippedTo);
+      } catch (err) {
+        logger.warn("Failed to advance webhook delivery cursor", {
+          subscriptionId: sub.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  }
+}
+
+/**
+ * Deliver every stored event that has not yet been handed to its
+ * subscribers.
+ *
+ * Delivery is driven by each subscription's persisted cursor
+ * (`last_delivered_event_id`, #850), not by the ledger range: events
+ * indexed before a restart are delivered by the first run after it. The
+ * `startLedger` / `endLedger` arguments only identify the poll that
+ * triggered the run and are kept for callers and logs.
+ *
+ * Each subscription has its own ordered queue, and queues run in parallel
+ * bounded by WEBHOOK_DELIVERY_CONCURRENCY (#851), so an unreachable
+ * subscriber no longer delays healthy ones.
+ */
+export async function deliverWebhooks(
+  _startLedger?: number,
+  _endLedger?: number
+): Promise<DeliveryResult[]> {
   // Retry previously failed deliveries first, so a subscriber that was down
   // for one cycle receives the missed events on the next cycle (#611).
   try {
@@ -621,114 +856,16 @@ export async function deliverWebhooks(
     });
   }
 
-  // Subscriptions are few; load them once and group by contract so each
-  // event only meets the subscriptions for its own contract (#690).
   // Auto-disabled subscriptions are skipped: their endpoint is permanently
-  // dead and retrying it would delay every healthy subscriber (#701).
-  const subscriptionsByContract = new Map<
-    string,
-    ReturnType<typeof getActiveSubscriptions>
-  >();
-  for (const sub of getActiveSubscriptions()) {
-    const list = subscriptionsByContract.get(sub.contract_id) ?? [];
-    list.push(sub);
-    subscriptionsByContract.set(sub.contract_id, list);
-  }
-  if (subscriptionsByContract.size === 0) return [];
-
-  // Only events for subscribed contracts are read, so the SQL engine skips
-  // every other contract's rows before they reach application memory.
-  const contractIds = [...subscriptionsByContract.keys()];
-  const placeholders = contractIds.map(() => "?").join(", ");
-  const pageQuery = db.prepare(
-    `SELECT * FROM events
-     WHERE ledger_sequence >= ? AND ledger_sequence <= ?
-       AND contract_id IN (${placeholders})
-     ORDER BY ledger_sequence ASC, id ASC`
-  );
+  // dead (#701).
+  const subscriptions = getActiveSubscriptionsForDelivery();
+  if (subscriptions.length === 0) return [];
 
   const results: DeliveryResult[] = [];
-
-  for (
-    let pageStart = startLedger;
-    pageStart <= endLedger;
-    pageStart += WEBHOOK_DELIVERY_LEDGER_PAGE_SIZE
-  ) {
-    const pageEnd = Math.min(pageStart + WEBHOOK_DELIVERY_LEDGER_PAGE_SIZE - 1, endLedger);
-    const events = pageQuery.all(pageStart, pageEnd, ...contractIds) as EventDbRow[];
-
-    for (const event of events) {
-      for (const sub of subscriptionsByContract.get(event.contract_id) ?? []) {
-        if (!subscriptionsMatchEvent(sub.event_types, event.event_type)) {
-          continue;
-        }
-
-        // One bad row or one throwing subscriber must not skip the rest of
-        // the range for every subscriber (#611).
-        let result: DeliveryResult;
-        try {
-          result = await deliverEventToSubscriber(
-            sub.webhook_url,
-            event,
-            sub.id
-          );
-        } catch (err) {
-          result = {
-            subscriptionId: sub.id,
-            webhookUrl: sub.webhook_url,
-            eventId: event.id,
-            deliveryId: webhookDeliveryId(sub.id, event.id),
-            success: false,
-            attempts: 0,
-            error: err instanceof Error ? err.message : String(err),
-          };
-        }
-        results.push(result);
-        recordResult(result);
-
-        if (result.success) {
-          // A successful delivery clears the failure history (#701).
-          recordSubscriptionSuccess(sub.id);
-          logger.info("Webhook delivered", {
-            subscriptionId: sub.id,
-            eventId: event.id,
-            deliveryId: result.deliveryId,
-            webhookUrl: sub.webhook_url,
-            status: result.status,
-            durationMs: result.durationMs,
-          });
-        } else {
-          const failure = recordSubscriptionFailure(
-            sub.id,
-            result.error ?? result.errorCode ?? "delivery failed",
-            WEBHOOK_DISABLE_AFTER,
-          );
-          logger.error("Webhook delivery failed after all attempts", {
-            subscriptionId: sub.id,
-            eventId: event.id,
-            deliveryId: result.deliveryId,
-            webhookUrl: sub.webhook_url,
-            status: result.status,
-            errorCode: result.errorCode,
-            durationMs: result.durationMs,
-            consecutiveFailures: failure.consecutiveFailures,
-            disabled: failure.disabled,
-          });
-          if (failure.disabled) {
-            logger.warn(
-              "Webhook subscription auto-disabled after repeated delivery failures",
-              {
-                subscriptionId: sub.id,
-                webhookUrl: sub.webhook_url,
-                consecutiveFailures: failure.consecutiveFailures,
-                disableAfter: WEBHOOK_DISABLE_AFTER,
-              },
-            );
-          }
-        }
-      }
-    }
-  }
-
+  await runWithConcurrency(
+    subscriptions,
+    webhookDeliveryConcurrency(),
+    (sub) => deliverSubscriptionQueue(sub, results)
+  );
   return results;
 }

@@ -641,30 +641,45 @@ function enqueueEventWrite<T>(write: () => T): Promise<T> {
 }
 
 // ---------------------------------------------------------------------------
-// Ordered webhook delivery queue (#682)
+// Ordered webhook delivery queue (#682, #850)
 // ---------------------------------------------------------------------------
 // Deliveries used to be fired and forgotten per poll. A slow delivery for
 // ledgers N..M could still be running when the next poll delivered M+1..K, so
 // subscribers saw later events first. All delivery runs now chain onto one
-// promise tail, so a range is fully delivered before the next one starts.
+// promise tail, so one run finishes before the next one starts.
+//
+// What a run delivers comes from the database, not from this queue: each
+// subscription's persisted cursor (#850) says which events are still owed.
+// The queue only schedules runs, so losing it on restart loses nothing, and
+// a run that is still waiting to start already covers any later poll.
 let webhookDeliveryTail: Promise<void> = Promise.resolve();
+let pendingWebhookDelivery: Promise<void> | null = null;
 
 /** Reset the webhook delivery queue (used by tests). */
 export function resetWebhookDeliveryQueueForTests(): void {
   webhookDeliveryTail = Promise.resolve();
+  pendingWebhookDelivery = null;
 }
 
 /**
- * Queue delivery of `[startLedger, endLedger]` behind every earlier range.
- * A failed run is logged and does not stall later ranges. The returned
- * promise settles when this range's delivery has finished; it never rejects.
+ * Queue a delivery run behind the current one. When a run is already
+ * waiting to start, that run is returned instead of queuing another: it
+ * reads the cursors when it starts, so it covers this request too.
+ * `startLedger` / `endLedger` identify the triggering poll for logs.
+ * A failed run is logged and does not stall later runs. The returned
+ * promise settles when the run has finished; it never rejects.
  */
 export function enqueueWebhookDelivery(
-  startLedger: number,
-  endLedger: number,
+  startLedger?: number,
+  endLedger?: number,
 ): Promise<void> {
+  if (pendingWebhookDelivery) return pendingWebhookDelivery;
+
   const run = webhookDeliveryTail
-    .then(() => deliverWebhooks(startLedger, endLedger))
+    .then(() => {
+      pendingWebhookDelivery = null;
+      return deliverWebhooks(startLedger, endLedger);
+    })
     .then(
       () => undefined,
       (err) => {
@@ -675,8 +690,17 @@ export function enqueueWebhookDelivery(
         });
       },
     );
+  pendingWebhookDelivery = run;
   webhookDeliveryTail = run;
   return run;
+}
+
+/**
+ * Resolves once every queued webhook delivery run has finished. Used by
+ * graceful shutdown (#850); it never rejects.
+ */
+export function waitForWebhookDeliveries(): Promise<void> {
+  return webhookDeliveryTail;
 }
 
 /**
@@ -1053,11 +1077,16 @@ export async function pollEvents(): Promise<boolean> {
         diagnosticsBatch,
         stallWindow,
       );
-
-      // Not awaited: polling keeps its cadence, but deliveries stay in ledger
-      // order behind any slower earlier range (#682).
-      void enqueueWebhookDelivery(minStartLedger, currentLedger);
     }
+
+    // Not awaited: polling keeps its cadence, and runs stay ordered behind
+    // any slower earlier run (#682). Runs on every cycle, not only active
+    // ones, so events still owed to subscribers (per their persisted cursor)
+    // and due retries are delivered even when the chain is idle (#850).
+    void enqueueWebhookDelivery(
+      anyGroupPolled ? minStartLedger : currentLedger,
+      currentLedger,
+    );
 
     if (!anyGroupPolled) {
       return false;
@@ -1189,6 +1218,10 @@ export function startPoller() {
   logger.info("Starting event indexer poller", {
     intervalMs: currentPollIntervalMs,
   });
+
+  // Deliver events that were indexed before a restart but not yet handed to
+  // their subscribers, without waiting for the first poll to succeed (#850).
+  void enqueueWebhookDelivery();
 
   // Any configured historical window is imported once first (#675); the live
   // cycle then runs immediately and the loop is scheduled off its outcome so

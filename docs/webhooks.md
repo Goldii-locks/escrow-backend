@@ -1,14 +1,32 @@
 # Webhook Delivery
 
 The indexer POSTs a JSON payload to each registered `webhook_url` whenever a
-matching on-chain event is ingested. Deliveries are retried up to 3 times
-with backoff (`500ms`, `1500ms`, `4500ms`). Each attempt has a hard timeout
-(`WEBHOOK_TIMEOUT_MS`, default `5000`): a receiver that never answers fails
-the attempt, and delivery continues with the next subscriber.
+matching on-chain event is ingested. Each attempt has a hard timeout
+(`WEBHOOK_TIMEOUT_MS`, default `5000`).
 
-Deliveries are ordered by ledger: each poll's ledger range is queued behind
-the previous one, so every event from an earlier range (including its
-retries) is sent before any event from a later range (#682).
+Delivery is driven from the database (#850). Every subscription stores the
+id of the last event it was handed (`last_delivered_event_id`). Each poll
+cycle, and once at startup, the indexer sends every matching event above
+that cursor and moves the cursor forward in the same transaction that
+records the delivery. Events indexed just before a deploy, crash or
+`SIGTERM` are therefore delivered by the next process. On shutdown the
+indexer waits for the in-flight delivery run, bounded by
+`SHUTDOWN_TIMEOUT_MS`. A new subscription starts at the newest stored event:
+it receives events indexed from then on, not the history.
+
+Each subscription has its own ordered queue (#851). Queues run in parallel,
+at most `WEBHOOK_DELIVERY_CONCURRENCY` at a time (default `4`), so an
+unreachable receiver does not delay healthy ones. Each event gets one inline
+attempt. A failed attempt is stored in the `webhook_deliveries` outbox and
+retried by the background sweep with exponential backoff
+(`WEBHOOK_RETRY_BASE_DELAY_MS`, default `60000`, doubling up to one hour),
+until `WEBHOOK_MAX_DELIVERY_ATTEMPTS` (default `25`) or
+`WEBHOOK_RETRY_MAX_AGE_DAYS` (default `7`) is reached.
+
+Order is preserved per subscription: events are sent in the order they were
+indexed, and while a subscription has a failed delivery waiting for retry,
+no later event is sent to it (#682, #851).
+
 ## URL requirements
 
 `webhook_url` is validated when the subscription is created and again before
@@ -93,8 +111,7 @@ Recommended receiver contract:
 ## Automatic disabling of dead subscriptions
 
 A subscription whose endpoint is permanently dead (expired domain, removed
-route) would otherwise be retried for every matching event, forever, and
-delay every healthy subscriber behind it in the sequential delivery loop.
+route) would otherwise be retried for every matching event, forever.
 
 Each subscription therefore tracks its consecutive delivery failures. After
 `WEBHOOK_DISABLE_AFTER` consecutive failed deliveries (default `50`) the
@@ -103,7 +120,8 @@ subscription is disabled: it is skipped by the delivery loop and shows up in
 
 A successful delivery resets the counter, and calling `POST
 /api/webhooks/subscribe` again for the same `(contract_id, webhook_url)` pair
-re-enables the subscription and clears the failure history.
+re-enables the subscription and clears the failure history. Re-subscribing
+also rotates the signing secret (see below).
 
 ## Subscription event types
 
@@ -277,27 +295,82 @@ arbitration split (`arbsplit`) carry `client_refund` / `freelancer_payout`
 fields whose sum equals the settled split. See `docs` on reconciliation
 for how inflow/outflow event types map to on-chain balances.
 
-## Outgoing webhook signature verification (#694)
+## Signature verification (#849)
 
-> **Not active for event deliveries.** The indexer's event webhooks
-> (`src/indexer/webhook-delivery.ts`) are currently sent unsigned. The
-> signing senders (the email-alert sender and the unreachable
-> `src/indexer/webhook_dispatcher.ts`) were removed as dead code (#782,
-> #631). The scheme below is what `src/utils/webhook_signature_verifier.ts`
-> verifies, for when signing is wired into live delivery.
+Every delivery, including every retry, is signed with HMAC-SHA256 using a
+secret that belongs to the subscription. The signature lets a receiver prove
+that a request came from this backend and was not replayed.
 
-Email-alert webhooks were signed with HMAC-SHA256 over
-`${timestamp}.${body}` (Stripe/Slack-style) so captured deliveries cannot
-be replayed. Each delivery sends:
+### The signing secret
 
-- `X-Webhook-Signature: sha256=<hex>`
-- `X-Milesto-Timestamp: <millis-since-epoch>`
+`POST /api/webhooks/subscribe` generates a random 32-byte secret (64 hex
+characters) and returns it **once**, as `subscription.signing_secret` in the
+response. Store it on the receiver side. It is never returned by
+`GET /api/webhooks/subscriptions` or the admin subscription listing, and it is
+never logged.
+
+Calling `POST /api/webhooks/subscribe` again for the same
+`(contract_id, webhook_url)` pair generates a new secret and returns it. The
+old secret stops working immediately, so this is how you rotate a secret or
+recover a lost one. Subscriptions that existed before signing was introduced
+were given a random secret by the migration; re-subscribe to obtain it.
+
+### Headers
+
+| Header                | Value                                                              |
+| --------------------- | ------------------------------------------------------------------ |
+| `X-Webhook-Timestamp` | Unix time in **seconds** when the attempt was signed. Each retry is signed again with a fresh timestamp. |
+| `X-Webhook-Signature` | `sha256=<hex>`: `HMAC-SHA256(secret, timestamp + "." + body)` over the exact raw request body. |
+
+### Verifying a delivery
 
 Receivers must:
 
-1. Read the raw body bytes, both headers, and reject when any is missing.
-2. Reject when `timestamp` is not an integer within 5 minutes of now
-   (tolerance is configurable; see
-   `DEFAULT_WEBHOOK_TIMESTAMP_TOLERANCE_MS`).
-3. Recompute `HMAC-SHA256(secret, timestamp + "." + body)` as hex and
-   compare with the signature header in constant time.
+1. Read the **raw** body exactly as received. Do not parse and re-serialize
+   it before verifying: any whitespace or key-order change breaks the
+   signature.
+2. Reject the request when either header is missing.
+3. Reject it when the timestamp is not an integer within 5 minutes
+   (300 seconds) of the receiver's clock.
+4. Recompute `HMAC-SHA256(secret, timestamp + "." + body)` as hex and compare
+   it with the signature header in constant time.
+
+`verifySignedRequest` in
+[`src/utils/webhook_signature_verifier.ts`](../src/utils/webhook_signature_verifier.ts)
+does all four steps. An Express receiver built on it:
+
+```ts
+import express from "express";
+import { verifySignedRequest } from "./webhook_signature_verifier.js";
+
+const app = express();
+const SECRET = process.env.MILESTO_WEBHOOK_SECRET; // subscription.signing_secret
+
+// express.text keeps the body as the exact string that was signed.
+app.post("/hook", express.text({ type: "application/json" }), (req, res) => {
+  const result = verifySignedRequest(req.body, req.headers, SECRET, {
+    toleranceSeconds: 300,
+  });
+  if (!result.ok) {
+    return res.status(401).json({ error: result.code });
+  }
+
+  const event = JSON.parse(req.body);
+  // Deduplicate on event.event_id / X-Milesto-Event-Id, then handle it.
+  res.sendStatus(204);
+});
+```
+
+Without the helper, the same check in plain Node:
+
+```ts
+import { createHmac, timingSafeEqual } from "crypto";
+
+function isValid(rawBody: string, timestamp: string, signature: string, secret: string) {
+  const ts = Number(timestamp);
+  if (!/^\d+$/.test(timestamp) || Math.abs(Date.now() / 1000 - ts) > 300) return false;
+  const expected = createHmac("sha256", secret).update(`${ts}.${rawBody}`).digest();
+  const provided = Buffer.from(signature.replace(/^sha256=/, ""), "hex");
+  return provided.length === expected.length && timingSafeEqual(provided, expected);
+}
+```

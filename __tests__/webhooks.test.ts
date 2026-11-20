@@ -123,6 +123,11 @@ describe("POST /api/webhooks/subscribe – HTTP", () => {
     expect(res.body.success).toBe(true);
     expect(res.body.data.subscription.contract_id).toBe(VALID_BODY.contract_id);
     expect(res.body.data.subscription.webhook_url).toBe(VALID_BODY.webhook_url);
+    // The signing secret is returned once, here (#849).
+    expect(res.body.data.subscription.signing_secret).toMatch(/^[0-9a-f]{64}$/);
+    expect(JSON.stringify(getSubscriptions())).not.toContain(
+      res.body.data.subscription.signing_secret
+    );
   });
 
   it("returns 400 when contract_id is missing", async () => {
@@ -308,36 +313,52 @@ describe("Webhook delivery", () => {
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
-  it("retries up to 3 times on failure", async () => {
+  it("makes one inline attempt and leaves the retry to the outbox sweep (#851)", async () => {
     mockFetch.mockResolvedValue({ ok: false });
 
-    addSubscription(CONTRACT_A, WEBHOOK_URL, ["fund"]);
+    const sub = addSubscription(CONTRACT_A, WEBHOOK_URL, ["fund"]);
     insertEvent(CONTRACT_A, "fund", 100, 1000, JSON.stringify({ client: "GCLIENT" }));
+    const { id: eventId } = testDb.prepare("SELECT MAX(id) AS id FROM events").get() as { id: number };
 
     const { deliverWebhooks } = await import("../src/indexer/webhook-delivery.js");
     const results = await deliverWebhooks(100, 100);
 
     expect(results).toHaveLength(1);
     expect(results[0].success).toBe(false);
-    expect(results[0].attempts).toBe(3);
-    expect(mockFetch).toHaveBeenCalledTimes(3);
+    expect(results[0].attempts).toBe(1);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+
+    const row = testDb
+      .prepare("SELECT status, attempts FROM webhook_deliveries WHERE subscription_id = ? AND event_id = ?")
+      .get(sub.id, eventId) as { status: string; attempts: number };
+    expect(row).toEqual({ status: "failed", attempts: 1 });
   });
 
-  it("succeeds on second attempt after first fails", async () => {
+  it("succeeds on the second attempt made by the retry sweep", async () => {
     mockFetch
       .mockResolvedValueOnce({ ok: false })
       .mockResolvedValueOnce({ ok: true });
 
-    addSubscription(CONTRACT_A, WEBHOOK_URL, ["fund"]);
+    const sub = addSubscription(CONTRACT_A, WEBHOOK_URL, ["fund"]);
     insertEvent(CONTRACT_A, "fund", 100, 1000, JSON.stringify({ client: "GCLIENT" }));
+    const { id: eventId } = testDb.prepare("SELECT MAX(id) AS id FROM events").get() as { id: number };
 
-    const { deliverWebhooks } = await import("../src/indexer/webhook-delivery.js");
+    const { deliverWebhooks, retryFailedDeliveries } = await import("../src/indexer/webhook-delivery.js");
     const results = await deliverWebhooks(100, 100);
+    expect(results[0].success).toBe(false);
 
-    expect(results).toHaveLength(1);
-    expect(results[0].success).toBe(true);
-    expect(results[0].attempts).toBe(2);
+    // Make the backoff expire, then let the sweep retry it.
+    testDb
+      .prepare("UPDATE webhook_deliveries SET next_attempt_at = 0 WHERE subscription_id = ? AND event_id = ?")
+      .run(sub.id, eventId);
+    await expect(retryFailedDeliveries()).resolves.toBe(1);
+
     expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(mockFetch.mock.calls[1][1].headers["X-Milesto-Delivery-Attempt"]).toBe("2");
+    const row = testDb
+      .prepare("SELECT status, attempts FROM webhook_deliveries WHERE subscription_id = ? AND event_id = ?")
+      .get(sub.id, eventId) as { status: string; attempts: number };
+    expect(row).toEqual({ status: "delivered", attempts: 2 });
   });
 
   it("delivers to multiple subscribers for same event", async () => {

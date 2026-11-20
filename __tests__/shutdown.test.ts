@@ -57,6 +57,37 @@ describe("graceful shutdown (#623)", () => {
     expect(d.exit).toHaveBeenCalledWith(0);
   });
 
+  it("waits for the in-flight webhook delivery run before closing the DB (#850)", async () => {
+    let releaseDelivery!: () => void;
+    const deliveryGate = new Promise<void>((resolve) => {
+      releaseDelivery = resolve;
+    });
+    const waitForWebhookDeliveries = jest.fn(() => deliveryGate);
+    const d = deps({ waitForWebhookDeliveries });
+    const pending = shutdown(d);
+    await sleep(20);
+    expect(d.stopPoller).toHaveBeenCalledTimes(1);
+    expect(waitForWebhookDeliveries).toHaveBeenCalledTimes(1);
+    expect(d.closeServer).not.toHaveBeenCalled();
+    expect(d.closeDb).not.toHaveBeenCalled();
+    releaseDelivery();
+    await pending;
+    expect(d.closeDb).toHaveBeenCalledTimes(1);
+    expect(d.exit).toHaveBeenCalledWith(0);
+  });
+
+  it("stops waiting for webhook delivery after timeoutMs (#850)", async () => {
+    const d = deps({
+      timeoutMs: 50,
+      waitForWebhookDeliveries: jest.fn(() => new Promise<void>(() => {})),
+    });
+    const startedAt = Date.now();
+    await shutdown(d);
+    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(40);
+    expect(d.closeDb).toHaveBeenCalledTimes(1);
+    expect(d.exit).toHaveBeenCalledWith(0);
+  });
+
   it("an in-flight request completes when shutdown drains the server", async () => {
     const app = express();
     app.get("/slow", async (_req, res) => {

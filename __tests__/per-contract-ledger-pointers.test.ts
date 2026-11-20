@@ -164,7 +164,9 @@ describe("pollEvents() with per-contract pointers", () => {
 
     await expect(pollEvents()).resolves.toBe(false);
     expect(mockGetEvents).not.toHaveBeenCalled();
-    expect(mockDeliverWebhooks).not.toHaveBeenCalled();
+    // Delivery still runs on an idle cycle: it is driven by the persisted
+    // per-subscription cursors and retry outbox, not by new ledgers (#850).
+    expect(mockDeliverWebhooks).toHaveBeenCalledWith(1000, 1000);
   });
 
   it("keeps legacy single-contract setups on the global pointer", async () => {

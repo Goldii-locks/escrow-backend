@@ -2,12 +2,22 @@ import { jest } from "@jest/globals";
 import http from "http";
 import type { AddressInfo } from "net";
 import Database from "better-sqlite3";
-import { initSchema, setDb, addSubscription, insertEvent } from "../src/indexer/db.js";
+import {
+  initSchema,
+  setDb,
+  addSubscription,
+  insertEvent,
+  getSubscriptions,
+  getActiveSubscriptions,
+  getSubscriptionsForContract,
+} from "../src/indexer/db.js";
 import {
   deliverToUrl,
   deliverWebhooks,
+  retryFailedDeliveries,
   webhookEventId,
 } from "../src/indexer/webhook-delivery.js";
+import { verifySignedRequest } from "../src/utils/webhook_signature_verifier.js";
 
 /**
  * #676: subscribers dedupe on X-Milesto-Event-Id / X-Milesto-Delivery-Id.
@@ -23,6 +33,13 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{1
 interface Captured {
   headers: http.IncomingHttpHeaders;
   body: Record<string, unknown>;
+  /** The body exactly as received on the wire. */
+  raw: string;
+}
+
+/** Expire the backoff of every failed delivery so the sweep retries it. */
+function makeFailedDeliveriesDue(): void {
+  testDb.exec("UPDATE webhook_deliveries SET next_attempt_at = 0 WHERE status = 'failed'");
 }
 
 let testDb: Database.Database;
@@ -44,7 +61,7 @@ beforeAll(async () => {
     let raw = "";
     req.on("data", (chunk) => (raw += chunk));
     req.on("end", () => {
-      captured.push({ headers: req.headers, body: JSON.parse(raw) });
+      captured.push({ headers: req.headers, body: JSON.parse(raw), raw });
       res.statusCode = responses.shift() ?? 200;
       res.end();
     });
@@ -90,10 +107,16 @@ describe("webhook idempotency headers (#676)", () => {
     addSubscription(CONTRACT_A, hookUrl, ["funded"]);
     insertEvent(CONTRACT_A, "funded", 100, 1000, JSON.stringify({ client: "GCLIENT" }));
 
+    // Attempt 1 is inline; attempts 2 and 3 come from the retry sweep (#851).
     const results = await deliverWebhooks(100, 100);
+    expect(results[0].success).toBe(false);
+    expect(results[0].attempts).toBe(1);
 
-    expect(results[0].success).toBe(true);
-    expect(results[0].attempts).toBe(3);
+    makeFailedDeliveriesDue();
+    await expect(retryFailedDeliveries()).resolves.toBe(0);
+    makeFailedDeliveriesDue();
+    await expect(retryFailedDeliveries()).resolves.toBe(1);
+
     expect(captured).toHaveLength(3);
 
     const deliveryIds = new Set(captured.map((c) => c.headers["x-milesto-delivery-id"]));
@@ -150,5 +173,88 @@ describe("webhook idempotency headers (#676)", () => {
     expect(captured[0].headers["x-milesto-delivery-id"]).toBe("fixed-delivery");
     expect(captured[0].headers["x-milesto-delivery-attempt"]).toBe("2");
     expect(captured[0].headers["x-milesto-event-id"]).toBe(webhookEventId(event));
+  });
+});
+
+describe("webhook delivery signatures (#849)", () => {
+  it("signs a captured delivery so verifySignedRequest accepts it with the subscription's secret", async () => {
+    const sub = addSubscription(CONTRACT_A, hookUrl, ["funded"]);
+    expect(sub.signing_secret).toMatch(/^[0-9a-f]{64}$/);
+    insertEvent(CONTRACT_A, "funded", 100, 1000, JSON.stringify({ client: "GCLIENT" }));
+
+    await deliverWebhooks(100, 100);
+
+    expect(captured).toHaveLength(1);
+    const [{ raw, headers }] = captured;
+    expect(headers["x-webhook-timestamp"]).toMatch(/^\d+$/);
+    expect(headers["x-webhook-signature"]).toMatch(/^sha256=[0-9a-f]{64}$/);
+
+    const verified = verifySignedRequest(raw, headers, sub.signing_secret);
+    expect(verified.ok).toBe(true);
+
+    // A different secret, or a tampered body, is rejected.
+    expect(verifySignedRequest(raw, headers, "x".repeat(64)).ok).toBe(false);
+    expect(verifySignedRequest(raw.replace("GCLIENT", "GOTHER"), headers, sub.signing_secret).ok).toBe(false);
+  });
+
+  it("signs every retry from retryFailedDeliveries with a fresh timestamp", async () => {
+    responses = [500];
+    const sub = addSubscription(CONTRACT_A, hookUrl, ["funded"]);
+    insertEvent(CONTRACT_A, "funded", 100, 1000, JSON.stringify({ client: "GCLIENT" }));
+
+    // Pin the clock so the two attempts get distinct, known timestamps. It
+    // stays close to real time so the retry sweep does not expire the row.
+    const baseSeconds = Math.floor(Date.now() / 1000);
+    const nowSpy = jest.spyOn(Date, "now");
+    try {
+      nowSpy.mockReturnValue(baseSeconds * 1000);
+      await deliverWebhooks(100, 100);
+
+      makeFailedDeliveriesDue();
+      nowSpy.mockReturnValue((baseSeconds + 120) * 1000);
+      await expect(retryFailedDeliveries()).resolves.toBe(1);
+    } finally {
+      nowSpy.mockRestore();
+    }
+
+    expect(captured).toHaveLength(2);
+    expect(captured.map((c) => c.headers["x-webhook-timestamp"])).toEqual([
+      String(baseSeconds),
+      String(baseSeconds + 120),
+    ]);
+    for (const [i, c] of captured.entries()) {
+      const verified = verifySignedRequest(c.raw, c.headers, sub.signing_secret, {
+        now: baseSeconds + (i === 0 ? 0 : 120),
+      });
+      expect(verified.ok).toBe(true);
+    }
+  });
+
+  it("rotates the secret on re-subscribe; deliveries use the new one", async () => {
+    const first = addSubscription(CONTRACT_A, hookUrl, ["funded"]);
+    const second = addSubscription(CONTRACT_A, hookUrl, ["funded"]);
+    expect(second.id).toBe(first.id);
+    expect(second.signing_secret).not.toBe(first.signing_secret);
+
+    insertEvent(CONTRACT_A, "funded", 100, 1000, JSON.stringify({ client: "GCLIENT" }));
+    await deliverWebhooks(100, 100);
+
+    const [{ raw, headers }] = captured;
+    expect(verifySignedRequest(raw, headers, second.signing_secret).ok).toBe(true);
+    expect(verifySignedRequest(raw, headers, first.signing_secret).ok).toBe(false);
+  });
+
+  it("never returns the secret from subscription listings", () => {
+    const sub = addSubscription(CONTRACT_A, hookUrl, ["funded"]);
+    const listings = [
+      getSubscriptions(),
+      getActiveSubscriptions(),
+      getSubscriptionsForContract(CONTRACT_A),
+    ];
+    for (const list of listings) {
+      expect(list).toHaveLength(1);
+      expect(list[0]).not.toHaveProperty("signing_secret");
+      expect(JSON.stringify(list)).not.toContain(sub.signing_secret as string);
+    }
   });
 });
