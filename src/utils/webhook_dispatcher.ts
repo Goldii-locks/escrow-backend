@@ -21,6 +21,7 @@ import { isValidStellarContractId } from "./stellar.js";
 import { EVENT_TYPES } from "../indexer/event_type_filter.js";
 import logger from "./logger.js";
 import { validateWebhookUrl } from "./webhook-url-guard.js";
+import { maskWebhookUrlQuery } from "./log-redaction.js";
 
 export const WEBHOOK_DISPATCHER_ROUTE_PREFIX = "/api/webhooks";
 const EVENT_TYPE_SET = new Set<string>(EVENT_TYPES);
@@ -241,7 +242,7 @@ export function dispatchSubscribe(
       traceId,
       route,
       contractId: input.contract_id,
-      webhookUrl: input.webhook_url,
+      webhookUrl: maskWebhookUrlQuery(input.webhook_url),
       error,
     });
     logger.debug("webhook_dispatcher subscribe response sent", {
@@ -317,7 +318,7 @@ export function dispatchUnsubscribe(
       traceId,
       route,
       contractId: input.contract_id,
-      webhookUrl: input.webhook_url,
+      webhookUrl: maskWebhookUrlQuery(input.webhook_url),
       error,
     });
     logger.debug("webhook_dispatcher unsubscribe response sent", {

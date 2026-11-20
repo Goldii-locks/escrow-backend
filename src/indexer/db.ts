@@ -4,6 +4,7 @@ import { fileURLToPath } from "url";
 import fs from "fs";
 import NodeCache from "node-cache";
 import logger from "../utils/logger.js";
+import { maskWebhookUrlQuery } from "../utils/log-redaction.js";
 import {
   getSqliteSchemaManagerFailureMonitor,
 } from "./sqlite_schema_manager.js";
@@ -2032,6 +2033,25 @@ export async function getJobsByWallet(
   }
 }
 
+/**
+ * Parse a SQLite `CURRENT_TIMESTAMP` value into epoch milliseconds (#853).
+ *
+ * SQLite stores `CURRENT_TIMESTAMP` as `"YYYY-MM-DD HH:MM:SS"` in UTC with no
+ * zone designator, and V8 parses that space-separated form as local time, so
+ * `new Date(value)` is off by the host's UTC offset. Values that already
+ * carry a zone (`Z` or `±HH:MM`) are parsed as-is. Returns NaN when the
+ * value is missing or unparseable.
+ */
+export function parseSqliteUtcTimestamp(value: string | null | undefined): number {
+  if (typeof value !== "string" || value.trim().length === 0) return NaN;
+  const trimmed = value.trim();
+  // A bare date ("YYYY-MM-DD") is already parsed as UTC.
+  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return Date.parse(trimmed);
+  const iso = trimmed.replace(" ", "T");
+  const hasZone = /(?:[zZ]|[+-]\d{2}:?\d{2})$/.test(iso);
+  return Date.parse(hasZone ? iso : `${iso}Z`);
+}
+
 export interface EventDbRow {
   id: number;
   contract_id: string;
@@ -2372,6 +2392,7 @@ export interface WebhookSubscription {
  * single transaction so the returned row always reflects what was just
  * committed, even under concurrent writes.
  *
+ * Re-subscribing to an existing pair replaces its `event_types` (#854).
  * Re-subscribing to a pair that was auto-disabled re-enables it: the failure
  * counter is reset and the disable marker is cleared (#701).
  */
@@ -2383,22 +2404,18 @@ export function addSubscription(
   const db = getDb();
 
   const addTx = db.transaction(() => {
-    const stmt = db.prepare(`
-      INSERT OR IGNORE INTO webhook_subscriptions
+    // Re-subscribing an existing pair replaces its event filter (#854) and
+    // re-enables it, clearing the failure history (#701).
+    db.prepare(`
+      INSERT INTO webhook_subscriptions
       (contract_id, webhook_url, event_types)
       VALUES (?, ?, ?)
-    `);
-    stmt.run(contractId, webhookUrl, JSON.stringify(eventTypes));
-
-    // A fresh subscribe re-enables the subscription and clears the failure
-    // history (#701).
-    db.prepare(
-      `UPDATE webhook_subscriptions
-       SET consecutive_failures = 0,
-           disabled_at = NULL,
-           last_error = NULL
-       WHERE contract_id = ? AND webhook_url = ?`
-    ).run(contractId, webhookUrl);
+      ON CONFLICT(contract_id, webhook_url) DO UPDATE SET
+        event_types = excluded.event_types,
+        consecutive_failures = 0,
+        disabled_at = NULL,
+        last_error = NULL
+    `).run(contractId, webhookUrl, JSON.stringify(eventTypes));
 
     return db
       .prepare("SELECT * FROM webhook_subscriptions WHERE contract_id = ? AND webhook_url = ?")
@@ -2410,7 +2427,7 @@ export function addSubscription(
   } catch (err) {
     logger.error("addSubscription failed – transaction rolled back", {
       contractId,
-      webhookUrl,
+      webhookUrl: maskWebhookUrlQuery(webhookUrl),
       error: err instanceof Error ? err.message : String(err),
     });
     throw err;
@@ -2436,7 +2453,7 @@ export function removeSubscription(contractId: string, webhookUrl: string): bool
   } catch (err) {
     logger.error("removeSubscription failed – transaction rolled back", {
       contractId,
-      webhookUrl,
+      webhookUrl: maskWebhookUrlQuery(webhookUrl),
       error: err instanceof Error ? err.message : String(err),
     });
     throw err;
