@@ -2541,6 +2541,39 @@ export function recordSubscriptionSuccess(subscriptionId: number): void {
   ).run(subscriptionId);
 }
 
+/**
+ * Whether the freelancer and the arbiter have accepted a job (#967), derived
+ * from its indexed `acceptjob` / `acceptarb` events. The contract keeps the
+ * acceptance mask in `DataKey::Acceptance` (bit 1 = freelancer, bit 2 =
+ * arbiter) but exposes no getter for it, and never clears it, so the events
+ * are the complete record. `mark_delivered` and the dispute endpoints need
+ * both; `withdraw_unaccepted` is open until both have accepted.
+ */
+export function getJobAcceptance(contractId: string): { freelancer: boolean; arbiter: boolean } {
+  const rows = getDb()
+    .prepare(
+      `SELECT event_type, data_json FROM events
+       WHERE contract_id = ? AND event_type IN ('acceptjob', 'acceptarb')`
+    )
+    .all(contractId) as Array<{ event_type: string; data_json: string }>;
+
+  let mask = 0;
+  for (const row of rows) {
+    mask |= row.event_type === "acceptjob" ? 1 : 2;
+    try {
+      // JobAcceptedEvent.acceptance_mask is the mask after this acceptance.
+      const eventMask = Number(
+        (JSON.parse(row.data_json) as { acceptance_mask?: unknown }).acceptance_mask,
+      );
+      if (Number.isInteger(eventMask)) mask |= eventMask;
+    } catch {
+      // The event type alone already identifies the accepting party.
+    }
+  }
+
+  return { freelancer: (mask & 1) !== 0, arbiter: (mask & 2) !== 0 };
+}
+
 export function getSubscriptionsForContract(contractId: string): WebhookSubscription[] {
   const db = getDb();
   return db

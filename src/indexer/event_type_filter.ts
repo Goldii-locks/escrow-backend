@@ -72,6 +72,8 @@ export const EVENT_TYPES = [
   "msiginit",
   "mslock",
   "msrev",
+  // reclaim_overdue (OverdueReclaimedEvent); listed in escrow-contract's EVENTS.md.
+  "overdue",
   "p_strcns",
   "p_stream",
   "pause",

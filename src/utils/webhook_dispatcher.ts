@@ -14,6 +14,7 @@ import {
   removeSubscription,
   getActiveSubscriptions,
   getActiveContractIds,
+  registerContract,
   type WebhookSubscription,
 } from "../indexer/db.js";
 import { deliverWebhooks } from "../indexer/webhook-delivery.js";
@@ -29,6 +30,11 @@ export type SubscribeInput = {
   contract_id: string;
   webhook_url: string;
   event_types?: string[] | "*";
+  /**
+   * Register the contract with the indexer when it isn't monitored yet
+   * (#968). The subscribe route is already admin-only.
+   */
+  register?: boolean;
 };
 
 export type UnsubscribeInput = {
@@ -44,7 +50,13 @@ export type DispatchFailure = {
 };
 
 export type SubscribeResult =
-  | { ok: true; subscription: WebhookSubscription; traceId: string }
+  | {
+      ok: true;
+      subscription: WebhookSubscription;
+      /** True when the contract was registered by this request (#968). */
+      registered: boolean;
+      traceId: string;
+    }
   | DispatchFailure;
 
 export type UnsubscribeResult =
@@ -196,21 +208,45 @@ export function dispatchSubscribe(
     return { ok: false, status: 400, error: normalized.error, traceId };
   }
 
+  if (input.register !== undefined && typeof input.register !== "boolean") {
+    const error = "register must be a boolean";
+    logger.debug("webhook_dispatcher subscribe response sent", {
+      traceId,
+      route,
+      status: 400,
+      success: false,
+      error,
+    });
+    return { ok: false, status: 400, error, traceId };
+  }
+
   try {
-    // A contract that isn't monitored can never receive deliveries, so
-    // subscribing to it is rejected with 404 rather than silently storing a
-    // dead subscription.
+    // deliverWebhooks only sees events from active monitored contracts, so a
+    // subscription to anything else (a typo, an undiscovered factory child, a
+    // deregistered contract) would never fire. Reject it with 422 unless the
+    // caller asked for the contract to be registered (#968).
+    let registered = false;
     if (!getActiveContractIds().includes(input.contract_id)) {
-      const error = "Contract is not indexed";
-      logger.debug("webhook_dispatcher subscribe response sent", {
+      if (input.register !== true) {
+        const error = "Contract is not indexed";
+        logger.debug("webhook_dispatcher subscribe response sent", {
+          traceId,
+          route,
+          status: 422,
+          success: false,
+          error,
+          contractId: input.contract_id,
+        });
+        return { ok: false, status: 422, error, traceId };
+      }
+
+      registerContract(input.contract_id);
+      registered = true;
+      logger.info("webhook_dispatcher registered contract for subscription", {
         traceId,
         route,
-        status: 404,
-        success: false,
-        error,
         contractId: input.contract_id,
       });
-      return { ok: false, status: 404, error, traceId };
     }
 
     const subscription = addSubscription(
@@ -234,7 +270,7 @@ export function dispatchSubscribe(
       subscriptionId: subscription.id,
     });
 
-    return { ok: true, subscription, traceId };
+    return { ok: true, subscription, registered, traceId };
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err);
     logger.error("webhook_dispatcher subscribe failed", {

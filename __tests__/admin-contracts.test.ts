@@ -7,6 +7,7 @@ import {
   runMigrations,
   closeDb,
   getActiveContractIds,
+  addSubscription,
 } from "../src/indexer/db.js";
 
 const app = express();
@@ -125,6 +126,7 @@ describe("Admin Contracts Endpoints (#659)", () => {
 
       expect(delRes.body.success).toBe(true);
       expect(delRes.body.contractId).toBe(VALID_CONTRACT_2);
+      expect(delRes.body.subscriptionCount).toBe(0);
 
       // No longer in active contract IDs
       expect(getActiveContractIds()).not.toContain(VALID_CONTRACT_2);
@@ -138,6 +140,28 @@ describe("Admin Contracts Endpoints (#659)", () => {
       const found = getRes.body.contracts.find((c: any) => c.contractId === VALID_CONTRACT_2);
       expect(found).toBeDefined();
       expect(found.active).toBe(false);
+    });
+  });
+
+  describe("DELETE /api/admin/contracts/:contractId subscription count (#968)", () => {
+    it("reports how many webhook subscriptions point at the contract", async () => {
+      await request(app)
+        .post("/api/admin/contracts")
+        .set("x-admin-key", "test-admin-key")
+        .send({ contractId: VALID_CONTRACT_1 })
+        .expect(201);
+      addSubscription(VALID_CONTRACT_1, "https://example.com/hook-a", ["*"]);
+      addSubscription(VALID_CONTRACT_1, "https://example.com/hook-b", ["fund"]);
+      addSubscription(VALID_CONTRACT_2, "https://example.com/hook-c", ["*"]);
+
+      const res = await request(app)
+        .delete(`/api/admin/contracts/${VALID_CONTRACT_1}`)
+        .set("x-admin-key", "test-admin-key")
+        .expect(200);
+
+      expect(res.body.success).toBe(true);
+      expect(res.body.contractId).toBe(VALID_CONTRACT_1);
+      expect(res.body.subscriptionCount).toBe(2);
     });
   });
 });

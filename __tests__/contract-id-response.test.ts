@@ -3,6 +3,8 @@ import request from "supertest";
 import express from "express";
 import { autoAuth } from "./helpers/api-key-helper.js";
 import logger from "../src/utils/logger.js";
+import Database from "better-sqlite3";
+import { initSchema, setDb } from "../src/indexer/db.js";
 import { jobScVal, CLIENT, FREELANCER, ARBITER, TOKEN } from "./helpers/scval-fixtures.js";
 
 /** The info-level form of an address (#683): first and last four characters. */
@@ -33,6 +35,12 @@ function buildApp() {
 
 describe("GET /api/jobs/:contractId – response format and status codes", () => {
   const originalApiKey = process.env.API_KEY;
+
+  beforeAll(() => {
+    // Acceptance (#967) is read from indexed events; start from an empty index.
+    setDb(new Database(":memory:"));
+    initSchema();
+  });
 
   beforeEach(() => {
     mockGetAccount.mockReset();
@@ -163,7 +171,12 @@ describe("GET /api/jobs/:contractId – response format and status codes", () =>
       arbiter: ARBITER,
       token: TOKEN,
       funded: true,
-      milestones: [{ index: 0, amount: "100", status: "Delivered" }],
+      milestones: [
+        { index: 0, amount: "100", status: "Delivered", dueAt: null, revisionCount: null },
+      ],
+      acceptance: { freelancer: false, arbiter: false },
+      paused: null,
+      cancel: null,
     });
   });
 });

@@ -88,7 +88,8 @@ for backwards compatibility and return `Deprecation: true`.
 ### Authentication Model
 
 - **Public endpoints**: Endpoints that simulate public contract reads (`/api/jobs/:contractId`, `/api/jobs/by-wallet/:address`, `/api/jobs/:contractId/whitelist`, etc.) or construct unsigned transactions for the caller's wallet to sign require no API key.
-- **Admin endpoints**: `/api/admin/*` requires an admin key passed via `x-api-key: <ADMIN_API_KEY>` or `Authorization: Bearer <ADMIN_API_KEY>`.
+- **Admin endpoints**: `/api/admin/*` requires an admin key passed via `x-admin-key: <ADMIN_API_KEY>` or `Authorization: Bearer <ADMIN_API_KEY>`. Sending an admin key via `x-api-key` is deprecated: it still works for now but logs a warning, because `x-api-key` is the public-key header that request logs and proxies may record.
+- **Distinct key lists**: the server refuses to start when any value appears in both `API_KEYS` and `ADMIN_API_KEYS`.
 - **Client endpoints**: When `API_KEYS` is configured, client integrations pass their key via `x-api-key: <API_KEY>`.
 
 ---
@@ -113,6 +114,8 @@ Get current job state simulated directly from the Soroban contract.
 - **Auth**: None (Public read)
 - **Rate Limit**: 30 requests / minute (`JOB_CONTRACT_RATE_MAX`)
 - **Params**: `contractId` (Stellar contract C... address)
+- **Response**: `{ id, client, freelancer, arbiter, token, funded, milestones: [{ index, amount, status, dueAt, revisionCount }], acceptance: { freelancer, arbiter }, paused: { emergency, admin }, cancel: { locked, clientApproved, freelancerApproved } }`. `dueAt` is a unix-seconds string or `null` when no due date is set. Fields that could not be read are `null` rather than failing the request.
+- **RPC cost** (uncached): exactly one `get_escrow_state` simulation plus one `getLedgerEntries` call that reads every milestone's `DueAt` / `RevCnt` entry, independent of the milestone count. `acceptance` comes from indexed `acceptjob` / `acceptarb` events (the contract has no getter for it). The result is cached for `JOB_STATE_CACHE_TTL_S` seconds and dropped as soon as the indexer stores a new event for the contract.
 
 #### GET /api/jobs/by-wallet/:address
 
@@ -220,7 +223,7 @@ Submit a signed transaction to the Stellar network and return execution status.
 #### GET /api/admin/indexer-status
 
 Retrieve indexer health, current ledger, event counters, uptime, and reconciliation status.
-- **Auth**: Admin API Key (`x-api-key: <ADMIN_API_KEY>` or `Bearer`)
+- **Auth**: Admin API Key (`x-admin-key: <ADMIN_API_KEY>` or `Bearer`)
 - **Response**: `{ success: true, data: { lastIndexedLedger, totalEvents, uptimeSeconds, lastEventAt, eventsByType, skippedLedgerRange, undecodableEvents, reconciliation, failedDeliveries, deadDeliveries, consecutiveFailures, lastSuccessfulPollAt, pollIntervalMs, ledgerLag } }` (`ledgerLag` is `null` when the RPC head cannot be read)
 
 #### GET /api/admin/metrics
@@ -270,6 +273,7 @@ Register a contract for indexing (#659).
 
 Stop indexing a contract (#659).
 - **Auth**: Admin API Key
+- **Response**: `{ success, message, contractId, subscriptionCount }`. `subscriptionCount` is the number of webhook subscriptions that still point at the contract; they stop firing until it is registered again.
 
 ---
 
@@ -278,8 +282,9 @@ Stop indexing a contract (#659).
 #### POST /api/webhooks/subscribe
 
 Register a webhook URL to receive real-time notifications for contract events.
-- **Auth**: None (Public)
-- **Body**: `{ contract_id, webhook_url, event_types?: [...] }`
+- **Auth**: Admin API Key
+- **Body**: `{ contract_id, webhook_url, event_types?: [...], register?: boolean }`
+- **422** `Contract is not indexed` when `contract_id` is not an active monitored contract. Send `register: true` to register it with the indexer in the same request (the response then has `registered: true`).
 
 #### POST /api/webhooks/unsubscribe
 
