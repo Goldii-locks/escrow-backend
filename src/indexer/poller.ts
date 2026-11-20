@@ -2,7 +2,8 @@ import { Server } from "@stellar/stellar-sdk/rpc";
 import type { Api } from "@stellar/stellar-sdk/rpc";
 
 
-import { scValToNative, xdr } from "@stellar/stellar-sdk";
+import { scValToNative } from "@stellar/stellar-sdk";
+import type { xdr } from "@stellar/stellar-sdk";
 import {
   insertEventBatch,
   insertHistoricalEventBatch,
@@ -291,8 +292,14 @@ export interface UndecodableRetryResult {
   stillFailing: number;
 }
 
+interface StellarXdrApi {
+  ScVal: {
+    fromXDR(data: string, format: "base64"): xdr.ScVal;
+  };
+}
+
 /** Rehydrate the topic ScVals saved by `rawXdr` into real XDR values. */
-function decodeStoredTopic(raw: string | null): xdr.ScVal[] {
+function decodeStoredTopic(raw: string | null, stellarXdr: StellarXdrApi): xdr.ScVal[] {
   if (!raw) throw new Error("missing topic XDR");
   const encoded: unknown = raw.trim().startsWith("[") ? JSON.parse(raw) : [raw];
   if (!Array.isArray(encoded) || encoded.length === 0) {
@@ -302,7 +309,7 @@ function decodeStoredTopic(raw: string | null): xdr.ScVal[] {
     if (typeof part !== "string" || part.length === 0) {
       throw new Error("invalid topic XDR part");
     }
-    return xdr.ScVal.fromXDR(part, "base64");
+    return stellarXdr.ScVal.fromXDR(part, "base64");
   });
 }
 
@@ -310,7 +317,10 @@ function decodeStoredTopic(raw: string | null): xdr.ScVal[] {
  * Decode a stored undecodable row with the current `toEventRow` logic. The
  * ledger close time was never persisted, so the recovered timestamp is null.
  */
-function toEventRowFromStored(row: UndecodableStoredEvent): EventRow {
+function toEventRowFromStored(
+  row: UndecodableStoredEvent,
+  stellarXdr: StellarXdrApi,
+): EventRow {
   if (row.ledgerSequence === null) throw new Error("missing ledger sequence");
   if (!Number.isInteger(row.ledgerSequence) || row.ledgerSequence < 1) {
     throw new Error("invalid ledger sequence");
@@ -319,12 +329,12 @@ function toEventRowFromStored(row: UndecodableStoredEvent): EventRow {
   const contractId = row.contractId ?? "";
   const event = {
     contractId: { contractId: () => contractId },
-    topic: decodeStoredTopic(row.topicXdr),
+    topic: decodeStoredTopic(row.topicXdr, stellarXdr),
     ledger: row.ledgerSequence,
     ledgerClosedAt: "",
     id: row.eventId ?? undefined,
     txHash: null,
-    value: xdr.ScVal.fromXDR(row.valueXdr, "base64"),
+    value: stellarXdr.ScVal.fromXDR(row.valueXdr, "base64"),
   } as unknown as Api.EventResponse;
   return toEventRow(event, contractId);
 }
@@ -335,13 +345,15 @@ function toEventRowFromStored(row: UndecodableStoredEvent): EventRow {
  * to webhook subscribers, and remove the successfully recovered rows.
  */
 export async function retryUndecodableEvents(): Promise<UndecodableRetryResult> {
+  const { xdr: stellarXdrModule } = await import("@stellar/stellar-sdk");
+  const stellarXdr = stellarXdrModule as unknown as StellarXdrApi;
   const rows = getUndecodableEvents();
   const decoded: Array<{ id: number; row: EventRow }> = [];
   let stillFailing = 0;
 
   for (const stored of rows) {
     try {
-      decoded.push({ id: stored.id, row: toEventRowFromStored(stored) });
+      decoded.push({ id: stored.id, row: toEventRowFromStored(stored, stellarXdr) });
     } catch (err) {
       stillFailing += 1;
       logger.warn("Undecodable event still failing after retry", {

@@ -21,7 +21,6 @@ import {
   getLastSuccessfulPollAt,
   getLatestLedgerSequence,
   validateHistoricalRange,
-  retryUndecodableEvents,
   type HistoricalImportResult,
 } from "../indexer/poller.js";
 
@@ -284,6 +283,7 @@ router.get("/jobs", (req, res) => {
 // after a decoder failure, now that a fix is deployed (#933).
 router.post("/undecodable-events/retry", async (_req, res) => {
   try {
+    const { retryUndecodableEvents } = await import("../indexer/poller.js");
     const result = await retryUndecodableEvents();
     res.json({ success: true, ...result });
   } catch (err) {

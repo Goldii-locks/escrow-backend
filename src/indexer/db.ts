@@ -633,10 +633,17 @@ const MIGRATIONS: Migration[] = [
   {
     version: 20,
     description: "composite events index for keyset history paging (#932)",
-    up: `
-      CREATE INDEX IF NOT EXISTS idx_events_contract_ledger_id
-        ON events (contract_id, ledger_sequence, id);
-    `,
+    up: (database) => {
+      const eventsTable = database
+        .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'events'")
+        .get();
+      if (eventsTable) {
+        database.exec(`
+          CREATE INDEX IF NOT EXISTS idx_events_contract_ledger_id
+            ON events (contract_id, ledger_sequence, id);
+        `);
+      }
+    },
   },
 ];
 
