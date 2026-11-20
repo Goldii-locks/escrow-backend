@@ -8,21 +8,11 @@ import {
   dispatchSubscribe,
   dispatchUnsubscribe,
 } from "../utils/webhook_dispatcher.js";
+import { maskWebhookUrlQuery } from "../utils/log-redaction.js";
 // NOTE: src/utils/webhook_dispatcher.ts is the single live webhook dispatcher.
 // The unreachable src/indexer/webhook_dispatcher.ts was removed as part of this fix.
 
 const router = Router();
-
-function maskWebhookUrlQuery(webhookUrl: string): string {
-  try {
-    const url = new URL(webhookUrl);
-    url.search = "";
-    return url.toString();
-  } catch {
-    const queryIndex = webhookUrl.indexOf("?");
-    return queryIndex === -1 ? webhookUrl : webhookUrl.slice(0, queryIndex);
-  }
-}
 
 function parseEventTypes(eventTypes: string): unknown[] {
   if (eventTypes === "*") return ["*"];

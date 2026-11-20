@@ -69,3 +69,20 @@ export function xdrLogMeta(xdr: unknown): XdrLogMeta {
       .slice(0, XDR_HASH_PREFIX_LENGTH),
   };
 }
+
+/**
+ * Strip the query string from a webhook URL before it is logged or returned
+ * (#855). Receivers often embed secrets there (`?token=...`), and log
+ * storage must never hold them.
+ */
+export function maskWebhookUrlQuery(webhookUrl: string): string {
+  try {
+    const url = new URL(webhookUrl);
+    url.search = "";
+    return url.toString();
+  } catch {
+    const raw = String(webhookUrl);
+    const queryIndex = raw.indexOf("?");
+    return queryIndex === -1 ? raw : raw.slice(0, queryIndex);
+  }
+}

@@ -4,9 +4,11 @@ import {
   getActiveSubscriptions,
   recordSubscriptionFailure,
   recordSubscriptionSuccess,
+  parseSqliteUtcTimestamp,
   EventDbRow,
 } from "./db.js";
 import logger from "../utils/logger.js";
+import { maskWebhookUrlQuery } from "../utils/log-redaction.js";
 import { assertDeliveryTargetAllowed } from "../utils/webhook-url-guard.js";
 
 const MAX_RETRIES = 3;
@@ -206,7 +208,7 @@ export async function deliverToUrl(
   const targetCheck = await assertDeliveryTargetAllowed(webhookUrl);
   if (!targetCheck.ok) {
     logger.warn("Webhook delivery blocked by URL guard", {
-      webhookUrl,
+      webhookUrl: maskWebhookUrlQuery(webhookUrl),
       eventId: event.id,
       reason: targetCheck.error,
     });
@@ -474,11 +476,11 @@ export async function retryFailedDeliveries(): Promise<number> {
   let redelivered = 0;
   for (const row of rows) {
     let event: EventDbRow | undefined;
-    let sub: { webhook_url: string } | undefined;
+    let sub: { webhook_url: string; disabled_at: string | null } | undefined;
     try {
       event = eventStmt.get(row.event_id) as EventDbRow | undefined;
       sub = subStmt.get(row.subscription_id) as
-        | { webhook_url: string }
+        | { webhook_url: string; disabled_at: string | null }
         | undefined;
     } catch {
       continue;
@@ -495,8 +497,25 @@ export async function retryFailedDeliveries(): Promise<number> {
       }
       continue;
     }
+    // An auto-disabled subscription gets no more requests, including retries
+    // of events that failed before it was disabled (#852). Re-fetched per row,
+    // so a subscription disabled earlier in this sweep is skipped too.
+    if (sub.disabled_at != null) {
+      try {
+        db.prepare(
+          `UPDATE webhook_deliveries SET status = 'dead', last_error = 'subscription disabled',
+             updated_at = CURRENT_TIMESTAMP
+           WHERE subscription_id = ? AND event_id = ?`
+        ).run(row.subscription_id, row.event_id);
+      } catch {
+        /* ignore */
+      }
+      continue;
+    }
     // Expire rows older than the max age instead of retrying forever.
-    const eventAgeMs = Date.now() - new Date(event.created_at).getTime();
+    // created_at is SQLite CURRENT_TIMESTAMP (UTC, no zone): parse it as UTC
+    // so the age does not depend on the host timezone (#853).
+    const eventAgeMs = Date.now() - parseSqliteUtcTimestamp(event.created_at);
     if (
       row.attempts >= WEBHOOK_MAX_DELIVERY_ATTEMPTS ||
       (!Number.isNaN(eventAgeMs) && eventAgeMs > WEBHOOK_RETRY_MAX_AGE_MS)
@@ -518,15 +537,36 @@ export async function retryFailedDeliveries(): Promise<number> {
     });
     if (outcome.ok) {
       recordDeliveryOutcome(row.subscription_id, row.event_id, true, attempts);
+      // A recovered receiver clears its failure history, as in
+      // deliverWebhooks (#852).
+      recordSubscriptionSuccess(row.subscription_id);
       redelivered++;
     } else {
+      const error = outcome.errorCode ?? "retry failed";
       recordDeliveryOutcome(
         row.subscription_id,
         row.event_id,
         false,
         attempts,
-        outcome.errorCode ?? "retry failed"
+        error
       );
+      // Failed retries count toward auto-disable, as in deliverWebhooks (#852).
+      const failure = recordSubscriptionFailure(
+        row.subscription_id,
+        error,
+        WEBHOOK_DISABLE_AFTER,
+      );
+      if (failure.disabled) {
+        logger.warn(
+          "Webhook subscription auto-disabled after repeated delivery failures",
+          {
+            subscriptionId: row.subscription_id,
+            webhookUrl: maskWebhookUrlQuery(sub.webhook_url),
+            consecutiveFailures: failure.consecutiveFailures,
+            disableAfter: WEBHOOK_DISABLE_AFTER,
+          },
+        );
+      }
     }
   }
   return redelivered;
@@ -554,7 +594,7 @@ async function deliverEventToSubscriber(
 
     lastError = `Attempt ${attempt}/${MAX_RETRIES} failed`;
     logger.warn("Webhook delivery failed", {
-      webhookUrl,
+      webhookUrl: maskWebhookUrlQuery(webhookUrl),
       eventId: event.id,
       deliveryId,
       attempt,
@@ -693,7 +733,7 @@ export async function deliverWebhooks(
             subscriptionId: sub.id,
             eventId: event.id,
             deliveryId: result.deliveryId,
-            webhookUrl: sub.webhook_url,
+            webhookUrl: maskWebhookUrlQuery(sub.webhook_url),
             status: result.status,
             durationMs: result.durationMs,
           });
@@ -707,7 +747,7 @@ export async function deliverWebhooks(
             subscriptionId: sub.id,
             eventId: event.id,
             deliveryId: result.deliveryId,
-            webhookUrl: sub.webhook_url,
+            webhookUrl: maskWebhookUrlQuery(sub.webhook_url),
             status: result.status,
             errorCode: result.errorCode,
             durationMs: result.durationMs,
@@ -719,7 +759,7 @@ export async function deliverWebhooks(
               "Webhook subscription auto-disabled after repeated delivery failures",
               {
                 subscriptionId: sub.id,
-                webhookUrl: sub.webhook_url,
+                webhookUrl: maskWebhookUrlQuery(sub.webhook_url),
                 consecutiveFailures: failure.consecutiveFailures,
                 disableAfter: WEBHOOK_DISABLE_AFTER,
               },
