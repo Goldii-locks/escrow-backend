@@ -37,4 +37,18 @@ describe("numeric env validation (#624)", () => {
     process.env.POLL_INTERVAL_MS = "";
     expect(config.pollIntervalMs).toBe(15000);
   });
+
+  it("POLLER_MAX_PAGES_PER_POLL defaults to 20 and rejects non-numeric or <= 0 values", () => {
+    delete process.env.POLLER_MAX_PAGES_PER_POLL;
+    expect(config.pollerMaxPagesPerPoll).toBe(20);
+
+    process.env.POLLER_MAX_PAGES_PER_POLL = "abc";
+    expect(() => validateConfigAtStartup()).toThrow(/POLLER_MAX_PAGES_PER_POLL/);
+
+    process.env.POLLER_MAX_PAGES_PER_POLL = "0";
+    expect(() => validateConfigAtStartup()).toThrow(/POLLER_MAX_PAGES_PER_POLL/);
+
+    process.env.POLLER_MAX_PAGES_PER_POLL = "-1";
+    expect(() => validateConfigAtStartup()).toThrow(/POLLER_MAX_PAGES_PER_POLL/);
+  });
 });

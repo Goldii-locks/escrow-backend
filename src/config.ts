@@ -144,6 +144,9 @@ export const config = {
   get maxLedgersPerImport(): number {
     return readIntEnv("MAX_LEDGERS_PER_IMPORT", 10000, 1);
   },
+  get pollerMaxPagesPerPoll(): number {
+    return readIntEnv("POLLER_MAX_PAGES_PER_POLL", 20, 1);
+  },
 
   // Readiness probe (#622)
   get readyMaxPollAgeMs(): number {
