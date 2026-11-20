@@ -175,13 +175,13 @@ describe("GET /api/jobs/:contractId/history – HTTP", () => {
     insertEvent(cid, "initialized", 1, 100, JSON.stringify({ client: "GCLIENT" }));
 
     const res = await request(app)
-      .get(`/api/jobs/${cid}/history`)
+      .get(`/api/jobs/${cid}/history?includeTotal=true`)
       .expect(200);
 
     expect(res.body.success).toBe(true);
     expect(Array.isArray(res.body.data.events)).toBe(true);
     expect(res.body.data.events).toHaveLength(1);
-    expect(res.body.data.events[0].event_type).toBe("initialized");
+    expect(res.body.data.events[0].eventType).toBe("initialized");
     expect(res.body.data.total).toBeDefined();
     expect(res.body.data.page).toBeDefined();
     expect(res.body.data.limit).toBeDefined();
@@ -189,7 +189,7 @@ describe("GET /api/jobs/:contractId/history – HTTP", () => {
 
   it("returns empty events array for unknown contract", async () => {
     const res = await request(app)
-      .get(`/api/jobs/${validContractId(99)}/history`)
+      .get(`/api/jobs/${validContractId(99)}/history?includeTotal=true`)
       .expect(200);
 
     expect(res.body.success).toBe(true);
@@ -208,7 +208,7 @@ describe("GET /api/jobs/:contractId/history – HTTP", () => {
       .expect(200);
 
     expect(res.body.data.events).toHaveLength(3);
-    expect(res.body.data.events.map((e: any) => e.event_type)).toEqual([
+    expect(res.body.data.events.map((e: any) => e.eventType)).toEqual([
       "initialized",
       "funded",
       "approved",
@@ -222,7 +222,7 @@ describe("GET /api/jobs/:contractId/history – HTTP", () => {
     }
 
     const res = await request(app)
-      .get(`/api/jobs/${cid}/history?page=1&limit=2`)
+      .get(`/api/jobs/${cid}/history?page=1&limit=2&includeTotal=true`)
       .expect(200);
 
     expect(res.body.success).toBe(true);
@@ -241,14 +241,18 @@ describe("GET /api/jobs/:contractId/history – HTTP", () => {
       .expect(200);
 
     const event = res.body.data.events[0];
-    expect(event).toMatchObject({
-      id: expect.any(Number),
-      contract_id: expect.any(String),
-      event_type: expect.any(String),
-      ledger_sequence: expect.any(Number),
-      timestamp: expect.any(Number),
-      data_json: expect.any(String),
-      created_at: expect.any(String),
-    });
+    expect(Object.keys(event).sort()).toEqual([
+      "data",
+      "eventId",
+      "eventType",
+      "ledger",
+      "timestamp",
+      "txHash",
+    ]);
+    expect(event.eventType).toBe("funded");
+    expect(event.ledger).toBe(50);
+    expect(event.timestamp).toBe(5000);
+    expect(event.data).toEqual({ client: "GCLIENT" });
+    expect(event.txHash).toBeNull();
   });
 });

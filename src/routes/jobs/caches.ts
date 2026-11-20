@@ -101,6 +101,28 @@ export function resetFeePreviewCache(): void {
 }
 
 /**
+ * Drop every cached value that an indexed event may have changed for one
+ * contract (#934). All per-contract caches use a `<contractId>:` key prefix;
+ * the whitelist cache is keyed by the bare contract id and needs its own delete.
+ */
+export function invalidateContractCaches(contractId: string): void {
+  const prefix = `${contractId}:`;
+  const prefixedCaches = [
+    claimAutoReleaseCache,
+    buildTxCache,
+    timeRemainingCache,
+    partialReleaseCache,
+    feePreviewCache,
+  ];
+  for (const cache of prefixedCaches) {
+    for (const key of cache.keys()) {
+      if (key.startsWith(prefix)) cache.del(key);
+    }
+  }
+  whitelistCache.del(contractId);
+}
+
+/**
  * Cache key for a partial-release build. The amount and source address are
  * part of the key because each combination produces a different unsigned
  * transaction — keying on the contract and milestone alone would serve one

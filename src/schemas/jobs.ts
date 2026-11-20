@@ -573,7 +573,27 @@ export const feePreviewQuerySchema = z.object({
 
 export type FeePreviewQuery = z.infer<typeof feePreviewQuerySchema>;
 
-/** Query params: ?page=&limit= for GET /:contractId/history (#612). */
-export const historyQuerySchema = byWalletQuerySchema;
+const eventCursorSchema = z
+  .union([z.string(), z.number()])
+  .optional()
+  .transform((value) => (value === undefined ? undefined : Number(value)))
+  .refine(
+    (value) => value === undefined || (Number.isSafeInteger(value) && value > 0),
+    { message: "cursor must be a positive event row id" },
+  );
+
+/**
+ * Query params for GET /:contractId/history. `order`, cursors and opt-in totals
+ * implement the newest-first keyset paging introduced in #932.
+ */
+export const historyQuerySchema = byWalletQuerySchema.extend({
+  order: z.enum(["asc", "desc"]).optional(),
+  before: eventCursorSchema,
+  after: eventCursorSchema,
+  includeTotal: z
+    .union([z.string(), z.boolean()])
+    .optional()
+    .transform((value) => value === true || value === "true"),
+});
 
 export type HistoryQuery = z.infer<typeof historyQuerySchema>;

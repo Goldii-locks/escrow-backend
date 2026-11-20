@@ -630,6 +630,21 @@ const MIGRATIONS: Migration[] = [
         ON undecodable_events (ledger_sequence);
     `,
   },
+  {
+    version: 20,
+    description: "composite events index for keyset history paging (#932)",
+    up: (database) => {
+      const eventsTable = database
+        .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'events'")
+        .get();
+      if (eventsTable) {
+        database.exec(`
+          CREATE INDEX IF NOT EXISTS idx_events_contract_ledger_id
+            ON events (contract_id, ledger_sequence, id);
+        `);
+      }
+    },
+  },
 ];
 
 /** Index names created by the SQLite schema manager lookup-index migration (#259). */
@@ -2056,43 +2071,102 @@ export interface PaginatedEvents {
   total: number;
   page: number;
   limit: number;
+  nextCursor: string | null;
+}
+
+/** Options added for the versioned history endpoint (#932). */
+export interface EventHistoryOptions {
+  order?: "asc" | "desc";
+  before?: number | null;
+  after?: number | null;
+  includeTotal?: boolean;
+}
+
+function parseEventCursor(value: number | null | undefined): number | null {
+  if (value === null || value === undefined) return null;
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
 }
 
 export function getEventsByContract(
   contractId: string,
   page: number = 1,
-  limit: number = 10
+  limit: number = 10,
+  options: EventHistoryOptions = {},
 ): PaginatedEvents {
   const db = getDb();
   const safePage = Math.max(1, page);
   const safeLimit = Math.max(1, Math.min(100, limit));
   const offset = (safePage - 1) * safeLimit;
+  const direction = options.order === "desc" ? "DESC" : "ASC";
+  const beforeId = parseEventCursor(options.before);
+  const afterId = parseEventCursor(options.after);
+  const includeTotal = options.includeTotal !== false;
 
-  const totalRow = db
-    .prepare("SELECT COUNT(*) as count FROM events WHERE contract_id = ?")
-    .get(contractId) as { count: number };
+  // A cursor is a row id, but ordering is by (ledger_sequence, id), so fetch
+  // the cursor row's sort key and compare the tuple. This keeps continuation
+  // stable even when old-ledger events arrive between pages.
+  const cursorBounds = (cursorId: number | null): { ledger: number | null; id: number | null } => {
+    if (cursorId === null) return { ledger: null, id: null };
+    const row = db
+      .prepare("SELECT ledger_sequence, id FROM events WHERE id = ?")
+      .get(cursorId) as { ledger_sequence: number; id: number } | undefined;
+    return row ? { ledger: row.ledger_sequence, id: row.id } : { ledger: null, id: null };
+  };
+  const before = cursorBounds(beforeId);
+  const after = cursorBounds(afterId);
+
+  const cursorClauses = [
+    `(@beforeLedger IS NULL OR ledger_sequence < @beforeLedger
+      OR (ledger_sequence = @beforeLedger AND id < @beforeId))`,
+    `(@afterLedger IS NULL OR ledger_sequence > @afterLedger
+      OR (ledger_sequence = @afterLedger AND id > @afterId))`,
+  ];
 
   const rows = db
     .prepare(
       `SELECT * FROM events
-       WHERE contract_id = ?
-       ORDER BY ledger_sequence ASC, id ASC
-       LIMIT ? OFFSET ?`
+       WHERE contract_id = @contractId
+         AND ${cursorClauses[0]}
+         AND ${cursorClauses[1]}
+       ORDER BY ledger_sequence ${direction}, id ${direction}
+       LIMIT @limit OFFSET @offset`
     )
-    .all(contractId, safeLimit, offset) as EventDbRow[];
+    .all({
+      contractId,
+      beforeLedger: before.ledger,
+      beforeId: before.id,
+      afterLedger: after.ledger,
+      afterId: after.id,
+      limit: safeLimit + 1,
+      offset,
+    }) as EventDbRow[];
+
+  const hasMore = rows.length > safeLimit;
+  const pageRows = hasMore ? rows.slice(0, safeLimit) : rows;
 
   // Expose the transaction hash under its camel-case name as well, so the
   // history endpoint can hand it straight to a block explorer (#700).
-  const events = rows.map((row) => ({
+  const events = pageRows.map((row) => ({
     ...row,
     txHash: row.tx_hash ?? null,
   }));
+  const nextCursor = hasMore ? String(events[events.length - 1].id) : null;
+
+  let total = 0;
+  if (includeTotal) {
+    const totalRow = db
+      .prepare("SELECT COUNT(*) as count FROM events WHERE contract_id = ?")
+      .get(contractId) as { count: number };
+    total = totalRow.count;
+  }
 
   return {
     events,
-    total: totalRow.count,
+    total,
     page: safePage,
     limit: safeLimit,
+    nextCursor,
   };
 }
 
@@ -2615,6 +2689,51 @@ export function countUndecodableEvents(): number {
     .get() as { count: number };
 
   return row.count;
+}
+
+/** A stored raw event, including the row id needed to delete it after a retry. */
+export interface UndecodableStoredEvent extends UndecodableEventRecord {
+  id: number;
+  createdAt: string;
+}
+
+/** Read stored undecodable rows so a decoder fix can be retried (#933). */
+export function getUndecodableEvents(limit: number = 1000): UndecodableStoredEvent[] {
+  const safeLimit = Math.max(1, Math.min(10000, limit));
+  const rows = getDb()
+    .prepare(
+      `SELECT id, event_id, ledger_sequence, contract_id, topic_xdr, value_xdr,
+              error_message, created_at
+       FROM undecodable_events
+       ORDER BY id ASC
+       LIMIT ?`
+    )
+    .all(safeLimit) as Array<{
+      id: number;
+      event_id: string | null;
+      ledger_sequence: number | null;
+      contract_id: string | null;
+      topic_xdr: string | null;
+      value_xdr: string | null;
+      error_message: string;
+      created_at: string;
+    }>;
+
+  return rows.map((row) => ({
+    id: row.id,
+    eventId: row.event_id,
+    ledgerSequence: row.ledger_sequence,
+    contractId: row.contract_id,
+    topicXdr: row.topic_xdr,
+    valueXdr: row.value_xdr,
+    errorMessage: row.error_message,
+    createdAt: row.created_at,
+  }));
+}
+
+/** Remove a stored undecodable row once it has been recovered (#933). */
+export function deleteUndecodableEvent(id: number): void {
+  getDb().prepare("DELETE FROM undecodable_events WHERE id = ?").run(id);
 }
 
 // ---------------------------------------------------------------------------
