@@ -2,6 +2,7 @@ import Database from "better-sqlite3";
 import path from "path";
 import { fileURLToPath } from "url";
 import fs from "fs";
+import { randomBytes } from "crypto";
 import NodeCache from "node-cache";
 import logger from "../utils/logger.js";
 import {
@@ -629,6 +630,62 @@ const MIGRATIONS: Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_undecodable_events_ledger
         ON undecodable_events (ledger_sequence);
     `,
+  },
+  {
+    version: 20,
+    description: "per-subscription webhook signing secret (#849)",
+    // Deliveries are signed with HMAC-SHA256 using a secret held per
+    // subscription. Subscriptions created before this migration get a fresh
+    // random secret; their owners obtain it by re-subscribing, which rotates
+    // the secret and returns it once in the POST /subscribe response.
+    up: (database) => {
+      const columns = new Set(
+        (
+          database.prepare("PRAGMA table_info(webhook_subscriptions)").all() as {
+            name: string;
+          }[]
+        ).map((c) => c.name),
+      );
+      if (!columns.has("signing_secret")) {
+        database.exec("ALTER TABLE webhook_subscriptions ADD COLUMN signing_secret TEXT");
+      }
+      const rows = database
+        .prepare("SELECT id FROM webhook_subscriptions WHERE signing_secret IS NULL")
+        .all() as { id: number }[];
+      const setSecret = database.prepare(
+        "UPDATE webhook_subscriptions SET signing_secret = ? WHERE id = ?",
+      );
+      for (const row of rows) {
+        setSecret.run(generateWebhookSigningSecret(), row.id);
+      }
+    },
+  },
+  {
+    version: 21,
+    description: "persisted per-subscription webhook delivery cursor (#850)",
+    // Delivery used to be driven by an in-memory queue of ledger ranges, so
+    // events indexed but not yet delivered were lost on restart. Each
+    // subscription now records the last event id it has been handed; the
+    // delivery loop sends every matching event with a higher id. Existing
+    // subscriptions start at the current newest event, which is where the
+    // previous in-memory path left off.
+    up: (database) => {
+      const columns = new Set(
+        (
+          database.prepare("PRAGMA table_info(webhook_subscriptions)").all() as {
+            name: string;
+          }[]
+        ).map((c) => c.name),
+      );
+      if (!columns.has("last_delivered_event_id")) {
+        database.exec(
+          "ALTER TABLE webhook_subscriptions ADD COLUMN last_delivered_event_id INTEGER NOT NULL DEFAULT 0",
+        );
+        database.exec(
+          "UPDATE webhook_subscriptions SET last_delivered_event_id = (SELECT COALESCE(MAX(id), 0) FROM events)",
+        );
+      }
+    },
   },
 ];
 
@@ -2365,6 +2422,32 @@ export interface WebhookSubscription {
   disabled_at: string | null;
   /** Message of the last failed delivery attempt. */
   last_error: string | null;
+  /**
+   * Highest event row id already handed to the delivery loop for this
+   * subscription (#850). Events with a higher id are still to be delivered.
+   */
+  last_delivered_event_id: number;
+}
+
+/**
+ * A subscription row including its HMAC signing secret (#849). Only the
+ * delivery loop and the POST /subscribe response may see this shape; every
+ * listing returns `WebhookSubscription`, which omits the secret.
+ */
+export interface WebhookSubscriptionWithSecret extends WebhookSubscription {
+  signing_secret: string | null;
+}
+
+/**
+ * Columns returned by subscription listings. `signing_secret` is left out
+ * on purpose so it can never leak through a list response (#849).
+ */
+const PUBLIC_SUBSCRIPTION_COLUMNS = `id, contract_id, webhook_url, event_types, created_at,
+  consecutive_failures, disabled_at, last_error, last_delivered_event_id`;
+
+/** 32 random bytes, hex encoded, used to sign webhook deliveries (#849). */
+export function generateWebhookSigningSecret(): string {
+  return randomBytes(32).toString("hex");
 }
 
 /**
@@ -2374,35 +2457,44 @@ export interface WebhookSubscription {
  *
  * Re-subscribing to a pair that was auto-disabled re-enables it: the failure
  * counter is reset and the disable marker is cleared (#701).
+ *
+ * Every call generates a new 32-byte signing secret (#849) and returns it in
+ * `signing_secret`. This is the only place the secret is ever returned, so
+ * re-subscribing is also how a receiver rotates or recovers its secret.
+ *
+ * A new subscription starts its delivery cursor at the newest stored event
+ * (#850): it receives events indexed from now on, not the whole history.
  */
 export function addSubscription(
   contractId: string,
   webhookUrl: string,
   eventTypes: string[]
-): WebhookSubscription {
+): WebhookSubscriptionWithSecret {
   const db = getDb();
+  const signingSecret = generateWebhookSigningSecret();
 
   const addTx = db.transaction(() => {
     const stmt = db.prepare(`
       INSERT OR IGNORE INTO webhook_subscriptions
-      (contract_id, webhook_url, event_types)
-      VALUES (?, ?, ?)
+      (contract_id, webhook_url, event_types, last_delivered_event_id)
+      VALUES (?, ?, ?, (SELECT COALESCE(MAX(id), 0) FROM events))
     `);
     stmt.run(contractId, webhookUrl, JSON.stringify(eventTypes));
 
     // A fresh subscribe re-enables the subscription and clears the failure
-    // history (#701).
+    // history (#701), and rotates the signing secret (#849).
     db.prepare(
       `UPDATE webhook_subscriptions
        SET consecutive_failures = 0,
            disabled_at = NULL,
-           last_error = NULL
+           last_error = NULL,
+           signing_secret = ?
        WHERE contract_id = ? AND webhook_url = ?`
-    ).run(contractId, webhookUrl);
+    ).run(signingSecret, contractId, webhookUrl);
 
     return db
       .prepare("SELECT * FROM webhook_subscriptions WHERE contract_id = ? AND webhook_url = ?")
-      .get(contractId, webhookUrl) as WebhookSubscription;
+      .get(contractId, webhookUrl) as WebhookSubscriptionWithSecret;
   });
 
   try {
@@ -2445,7 +2537,9 @@ export function removeSubscription(contractId: string, webhookUrl: string): bool
 
 export function getSubscriptions(): WebhookSubscription[] {
   const db = getDb();
-  return db.prepare("SELECT * FROM webhook_subscriptions").all() as WebhookSubscription[];
+  return db
+    .prepare(`SELECT ${PUBLIC_SUBSCRIPTION_COLUMNS} FROM webhook_subscriptions`)
+    .all() as WebhookSubscription[];
 }
 
 /**
@@ -2457,9 +2551,36 @@ export function getActiveSubscriptions(): WebhookSubscription[] {
   const db = getDb();
   return db
     .prepare(
-      "SELECT * FROM webhook_subscriptions WHERE disabled_at IS NULL ORDER BY id ASC"
+      `SELECT ${PUBLIC_SUBSCRIPTION_COLUMNS} FROM webhook_subscriptions
+       WHERE disabled_at IS NULL ORDER BY id ASC`
     )
     .all() as WebhookSubscription[];
+}
+
+/**
+ * Enabled subscriptions including their signing secret, for the delivery
+ * loop only (#849). Never return these rows from an API response or log them.
+ */
+export function getActiveSubscriptionsForDelivery(): WebhookSubscriptionWithSecret[] {
+  const db = getDb();
+  return db
+    .prepare(
+      "SELECT * FROM webhook_subscriptions WHERE disabled_at IS NULL ORDER BY id ASC"
+    )
+    .all() as WebhookSubscriptionWithSecret[];
+}
+
+/**
+ * Move a subscription's delivery cursor forward to `eventId` (#850). The
+ * cursor never moves backwards, so a stale writer cannot cause redelivery.
+ */
+export function advanceSubscriptionCursor(subscriptionId: number, eventId: number): void {
+  const db = getDb();
+  db.prepare(
+    `UPDATE webhook_subscriptions
+     SET last_delivered_event_id = MAX(last_delivered_event_id, ?)
+     WHERE id = ?`
+  ).run(eventId, subscriptionId);
 }
 
 /** Subscriptions that were auto-disabled after repeated delivery failures. */
@@ -2467,7 +2588,8 @@ export function getDisabledSubscriptions(): WebhookSubscription[] {
   const db = getDb();
   return db
     .prepare(
-      "SELECT * FROM webhook_subscriptions WHERE disabled_at IS NOT NULL ORDER BY id ASC"
+      `SELECT ${PUBLIC_SUBSCRIPTION_COLUMNS} FROM webhook_subscriptions
+       WHERE disabled_at IS NOT NULL ORDER BY id ASC`
     )
     .all() as WebhookSubscription[];
 }
@@ -2544,7 +2666,7 @@ export function recordSubscriptionSuccess(subscriptionId: number): void {
 export function getSubscriptionsForContract(contractId: string): WebhookSubscription[] {
   const db = getDb();
   return db
-    .prepare("SELECT * FROM webhook_subscriptions WHERE contract_id = ?")
+    .prepare(`SELECT ${PUBLIC_SUBSCRIPTION_COLUMNS} FROM webhook_subscriptions WHERE contract_id = ?`)
     .all(contractId) as WebhookSubscription[];
 }
 

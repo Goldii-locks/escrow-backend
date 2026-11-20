@@ -166,18 +166,118 @@ describe("webhook delivery timeout (#606)", () => {
 
       expect(timedOut).toBeDefined();
       expect(timedOut?.success).toBe(false);
-      expect(timedOut?.attempts).toBe(3);
+      // One inline attempt; later attempts belong to the retry sweep (#851).
+      expect(timedOut?.attempts).toBe(1);
       expect(timedOut?.errorCode).toBe("TimeoutError");
 
       expect(delivered).toBeDefined();
       expect(delivered?.success).toBe(true);
       expect(okHits).toBe(1);
 
-      // 3 attempts * 250ms + 500ms and 1500ms backoff, plus the healthy POST.
-      expect(elapsed).toBeLessThan(4000);
+      // One 250ms attempt, run in parallel with the healthy POST.
+      expect(elapsed).toBeLessThan(2000);
     } finally {
       await hangingTracker.close();
       await healthyTracker.close();
+    }
+  });
+});
+
+describe("independent per-subscriber delivery (#851)", () => {
+  it("a healthy subscriber receives every event without waiting for a hanging one's timeouts", async () => {
+    // A long timeout makes any wait on the hanging receiver obvious.
+    const HANG_TIMEOUT_MS = 2000;
+    process.env.WEBHOOK_TIMEOUT_MS = String(HANG_TIMEOUT_MS);
+
+    let hangingHits = 0;
+    const hanging = http.createServer(() => {
+      hangingHits += 1;
+      // Deliberately never responds.
+    });
+    const hangingTracker = track(hanging);
+    const hangingPort = await listen(hanging);
+
+    const healthyLedgers: number[] = [];
+    let healthyDoneAt = 0;
+    const healthy = http.createServer((req, res) => {
+      let raw = "";
+      req.on("data", (chunk) => (raw += chunk));
+      req.on("end", () => {
+        healthyLedgers.push((JSON.parse(raw) as { ledger_sequence: number }).ledger_sequence);
+        healthyDoneAt = Date.now();
+        res.writeHead(200);
+        res.end();
+      });
+    });
+    const healthyTracker = track(healthy);
+    const healthyPort = await listen(healthy);
+
+    try {
+      // The hanging subscriber is registered first, so a sequential loop
+      // would reach it before the healthy one for every event.
+      addSubscription(CONTRACT, `http://127.0.0.1:${hangingPort}/never`, ["funded"]);
+      addSubscription(CONTRACT, `http://127.0.0.1:${healthyPort}/hook`, ["funded"]);
+      const ledgers = [100, 101, 102, 103, 104];
+      for (const ledger of ledgers) {
+        insertEvent(CONTRACT, "funded", ledger, 1_700_000_000 + ledger, JSON.stringify({ ledger }));
+      }
+
+      const startedAt = Date.now();
+      await deliverWebhooks(100, 104);
+
+      // Every event reached the healthy subscriber, in order, well before
+      // the hanging receiver's first attempt timed out.
+      expect(healthyLedgers).toEqual(ledgers);
+      expect(healthyDoneAt - startedAt).toBeLessThan(HANG_TIMEOUT_MS / 2);
+
+      // The hanging receiver cost one attempt for the whole run; its queue
+      // waits for the retry sweep instead of timing out once per event.
+      expect(hangingHits).toBe(1);
+    } finally {
+      await hangingTracker.close();
+      await healthyTracker.close();
+    }
+  });
+
+  it("preserves per-subscriber order across the retry sweep", async () => {
+    let failNext = true;
+    const ledgersSeen: number[] = [];
+    const flaky = http.createServer((req, res) => {
+      let raw = "";
+      req.on("data", (chunk) => (raw += chunk));
+      req.on("end", () => {
+        const ledger = (JSON.parse(raw) as { ledger_sequence: number }).ledger_sequence;
+        if (failNext) {
+          failNext = false;
+          res.writeHead(500);
+        } else {
+          ledgersSeen.push(ledger);
+          res.writeHead(200);
+        }
+        res.end();
+      });
+    });
+    const tracker = track(flaky);
+    const port = await listen(flaky);
+
+    try {
+      addSubscription(CONTRACT, `http://127.0.0.1:${port}/hook`, ["funded"]);
+      for (const ledger of [100, 101, 102]) {
+        insertEvent(CONTRACT, "funded", ledger, 1_700_000_000 + ledger, "{}");
+      }
+
+      // Ledger 100 fails: nothing later is sent while it waits for retry.
+      await deliverWebhooks(100, 102);
+      expect(ledgersSeen).toEqual([]);
+      await deliverWebhooks(100, 102);
+      expect(ledgersSeen).toEqual([]);
+
+      // Once its backoff expires the sweep delivers it, then the queue resumes.
+      testDb.exec("UPDATE webhook_deliveries SET next_attempt_at = 0 WHERE status = 'failed'");
+      await deliverWebhooks(100, 102);
+      expect(ledgersSeen).toEqual([100, 101, 102]);
+    } finally {
+      await tracker.close();
     }
   });
 });

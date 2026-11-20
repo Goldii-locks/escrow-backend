@@ -14,7 +14,7 @@ import {
   removeSubscription,
   getActiveSubscriptions,
   getActiveContractIds,
-  type WebhookSubscription,
+  type WebhookSubscriptionWithSecret,
 } from "../indexer/db.js";
 import { deliverWebhooks } from "../indexer/webhook-delivery.js";
 import { isValidStellarContractId } from "./stellar.js";
@@ -43,8 +43,12 @@ export type DispatchFailure = {
   traceId: string;
 };
 
+/**
+ * A successful subscribe carries the subscription's signing secret (#849).
+ * This is the only response that ever includes it; do not log it.
+ */
 export type SubscribeResult =
-  | { ok: true; subscription: WebhookSubscription; traceId: string }
+  | { ok: true; subscription: WebhookSubscriptionWithSecret; traceId: string }
   | DispatchFailure;
 
 export type UnsubscribeResult =

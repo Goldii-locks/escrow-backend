@@ -1,7 +1,7 @@
 import { calculateFeeDeduction, calculateFeeShares } from "../src/utils/fee-deduction-calculator.js";
 import { applyConversionRate, assertConversionSplitSum } from "../src/utils/conversion_rate_math.js";
 import { calculateTaxDeduction } from "../src/utils/tax_deduction_estimator.js";
-import { allocatePartialPayment } from "../src/utils/partial_payment_allocator.js";
+import { allocatePartialPayment } from "../src/utils/partial-payment-allocator.js";
 import { assertLedgerSplitSum } from "../src/utils/audit_ledger_sum_checker.js";
 import { AMOUNT_OUT_OF_RANGE, MAX_AMOUNT, MIN_AMOUNT } from "../src/utils/digit-limit-validator.js";
 

@@ -922,7 +922,11 @@ paths:
                     type: string
       responses:
         '200':
-          description: Subscription created successfully
+          description: >-
+            Subscription created successfully. `data.subscription.signing_secret`
+            is the HMAC-SHA256 secret used to sign every delivery
+            (`X-Webhook-Timestamp` / `X-Webhook-Signature`). It is returned only
+            in this response; subscribing again rotates it. See docs/webhooks.md.
         '400':
           description: Validation error
 

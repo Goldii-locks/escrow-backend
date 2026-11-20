@@ -1,18 +1,28 @@
 /**
  * Partial Payment Allocator
  *
- * Formats values calculated during milestone payment division to match
- * database precision schemas. Ensures full precision is preserved when
- * writing to database row attributes.
+ * The single allocator module for milestone payment division (#630). It
+ * covers two steps:
  *
- * Key responsibilities:
- * - Convert payment amounts to database-compatible formats
- * - Preserve full precision (no rounding errors)
- * - Validate format compliance before database writes
- * - Track allocation state atomically
+ * 1. Splitting a total across weighted shares (`allocatePartialPayment`),
+ *    using bigint arithmetic throughout.
+ * 2. Validating an explicit per-recipient split and formatting it to match
+ *    database precision schemas (`allocatePayment` and the row helpers),
+ *    so full precision is preserved when writing to database row attributes.
+ *
+ * Remainder policy: integer division can leave a few base units that no
+ * share receives. `allocatePartialPayment` never assigns them silently; it
+ * returns them as `remainder` so `sum(allocations) + remainder === total`
+ * always holds and the caller decides where they go (e.g. add them to the
+ * last recipient before calling `allocatePayment`). `allocatePayment`
+ * accepts no remainder at all: the recipient amounts must sum exactly to
+ * the total or the allocation is rejected with ALLOCATION_MISMATCH.
+ *
+ * Integer-string DB helpers live in db-precision.ts (#635).
  */
 
 import { validateLedgerAmount } from "./audit_ledger_sum_checker.js";
+import { isAmountWithinRange } from "./digit-limit-validator.js";
 import { formatAmountForDatabase, parseAmountFromDatabase } from "./db-precision.js";
 
 /**
@@ -285,7 +295,6 @@ export function allocatePayment(
 
   // Format all amounts for database storage
   const formattedRows: FormattedPaymentRow[] = [];
-  let precisionLoss = false;
 
   for (const recipient of recipients) {
     const formatted = formatPaymentRowForDatabase(
@@ -302,7 +311,6 @@ export function allocatePayment(
     );
 
     if (precisionCheck.precisionLoss) {
-      precisionLoss = true;
       return {
         success: false,
         error: `Precision loss detected for recipient ${recipient.address}`,
@@ -462,4 +470,176 @@ export function markAllocationWritten(
       status: "written",
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// Share-weighted allocation
+// ---------------------------------------------------------------------------
+
+/** Max decimal digits allowed for a single payment amount (below Number.MAX_SAFE_INTEGER). */
+export const MAX_SAFE_DIGITS = 15;
+
+/** Max decimal digits allowed for an intermediate multiplication product before it is divided. */
+export const MAX_INTERMEDIATE_DIGITS = MAX_SAFE_DIGITS * 2;
+
+/** Scaling factor used to convert floating-point shares into integer numerators. */
+const SHARE_SCALE = 1_000_000;
+
+export const SHARE_ALLOCATION_ERRORS = {
+  EXCESSIVE_DIGITS: "ALLOCATOR_EXCESSIVE_DIGITS",
+  AMOUNT_OUT_OF_RANGE: "AMOUNT_OUT_OF_RANGE",
+  INVALID_AMOUNT: "ALLOCATOR_INVALID_AMOUNT",
+  INVALID_SHARES: "ALLOCATOR_INVALID_SHARES",
+  ALLOCATION_OVERFLOW: "ALLOCATOR_OVERFLOW",
+} as const;
+
+export type ShareAllocationErrorCode =
+  (typeof SHARE_ALLOCATION_ERRORS)[keyof typeof SHARE_ALLOCATION_ERRORS];
+
+export type AmountValidationResult =
+  | { ok: true; value: bigint }
+  | { ok: false; error: string; code: ShareAllocationErrorCode };
+
+export type ShareAllocationOutcome =
+  | { ok: true; allocations: bigint[]; remainder: bigint }
+  | { ok: false; error: string; code: ShareAllocationErrorCode };
+
+/**
+ * Parse and validate a payment amount string/number/bigint. The amount must
+ * be an integer within the contract's i128 range.
+ */
+export function validatePaymentAmount(
+  input: string | number | bigint,
+  label = "amount"
+): AmountValidationResult {
+  let raw: string;
+
+  if (typeof input === "bigint") {
+    raw = input.toString();
+  } else if (typeof input === "number") {
+    if (!Number.isFinite(input) || !Number.isInteger(input)) {
+      return {
+        ok: false,
+        error: `${label} must be a finite integer`,
+        code: SHARE_ALLOCATION_ERRORS.INVALID_AMOUNT,
+      };
+    }
+    // A JS number above 2^53 has already lost precision; large amounts
+    // must arrive as strings or bigints.
+    if (!Number.isSafeInteger(input)) {
+      return {
+        ok: false,
+        error: `${label} exceeds Number.MAX_SAFE_INTEGER; pass large amounts as a string or bigint`,
+        code: SHARE_ALLOCATION_ERRORS.INVALID_AMOUNT,
+      };
+    }
+    raw = String(input);
+  } else {
+    raw = input.trim();
+    if (!/^-?\d+$/.test(raw)) {
+      return {
+        ok: false,
+        error: `${label} must be an integer numeric value`,
+        code: SHARE_ALLOCATION_ERRORS.INVALID_AMOUNT,
+      };
+    }
+  }
+
+  if (!isAmountWithinRange(BigInt(raw))) {
+    return {
+      ok: false,
+      error: `${label} exceeds the i128 amount range`,
+      code: SHARE_ALLOCATION_ERRORS.AMOUNT_OUT_OF_RANGE,
+    };
+  }
+
+  return { ok: true, value: BigInt(raw) };
+}
+
+/**
+ * Validate the shares array used to weight an allocation. Every share must
+ * be a positive, finite number; an empty array is rejected outright.
+ */
+function validateShares(shares: number[]): AmountValidationResult | null {
+  if (!Array.isArray(shares) || shares.length === 0) {
+    return {
+      ok: false,
+      error: "shares must be a non-empty array",
+      code: SHARE_ALLOCATION_ERRORS.INVALID_SHARES,
+    };
+  }
+
+  for (let i = 0; i < shares.length; i++) {
+    const share = shares[i];
+    if (
+      typeof share !== "number" ||
+      !Number.isFinite(share) ||
+      share <= 0
+    ) {
+      return {
+        ok: false,
+        error: `shares[${i}] must be a positive finite number`,
+        code: SHARE_ALLOCATION_ERRORS.INVALID_SHARES,
+      };
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Split a total milestone payment amount across the given shares (weights).
+ *
+ * Each share is scaled to an integer numerator (`round(share * 1e6)`) so
+ * floating-point share values are never mixed directly into bigint math;
+ * every allocation is then `floor(total * numerator / sum(numerators))`.
+ *
+ * Remainder policy: the base units left over by the floor division are NOT
+ * assigned to any recipient. They are returned as `remainder`, and
+ * `sum(allocations) + remainder === total` is guaranteed. The remainder is
+ * always in `[0, shares.length)` for a non-negative total.
+ */
+export function allocatePartialPayment(
+  totalAmount: string | number | bigint,
+  shares: number[]
+): ShareAllocationOutcome {
+  const amountCheck = validatePaymentAmount(totalAmount, "totalAmount");
+  if (!amountCheck.ok) {
+    return amountCheck;
+  }
+
+  const sharesError = validateShares(shares);
+  if (sharesError && !sharesError.ok) {
+    return sharesError;
+  }
+
+  const total = amountCheck.value;
+
+  // Scale each share into an integer numerator, and use a single shared
+  // denominator (the sum of scaled numerators) so the split is exact.
+  const scaledNumerators = shares.map((s) => BigInt(Math.round(s * SHARE_SCALE)));
+  const scaledDenominator = scaledNumerators.reduce((acc, n) => acc + n, 0n);
+
+  if (scaledDenominator <= 0n) {
+    return {
+      ok: false,
+      error: "shares must sum to a positive value",
+      code: SHARE_ALLOCATION_ERRORS.INVALID_SHARES,
+    };
+  }
+
+  const allocations: bigint[] = [];
+  let allocatedSum = 0n;
+
+  for (let i = 0; i < scaledNumerators.length; i++) {
+    const numerator = scaledNumerators[i];
+    const product = total * numerator;
+    const allocation = product / scaledDenominator;
+    allocations.push(allocation);
+    allocatedSum += allocation;
+  }
+
+  const remainder = total - allocatedSum;
+
+  return { ok: true, allocations, remainder };
 }
