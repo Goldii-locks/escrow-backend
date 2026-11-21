@@ -211,6 +211,43 @@ paths:
         '429':
           description: Rate limit exceeded (BY_WALLET_RATE_LIMIT_MAX)
 
+  /api/wallets/{address}/activity:
+    get:
+      summary: Query activity notifications for wallet address
+      description: Returns activity notifications for contracts the address participates in. Public read-only.
+      parameters:
+        - name: address
+          in: path
+          required: true
+          description: Stellar account address (G... 56 chars)
+          schema:
+            type: string
+        - name: since
+          in: query
+          required: false
+          description: Keyset pagination cursor on events.id
+          schema:
+            type: integer
+        - name: limit
+          in: query
+          required: false
+          description: Maximum items to return (1-100, default 50)
+          schema:
+            type: integer
+            default: 50
+            maximum: 100
+      responses:
+        '200':
+          description: Activity notification feed for wallet
+        '400':
+          description: Invalid address or query parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '429':
+          description: Rate limit exceeded (BY_WALLET_RATE_LIMIT_MAX)
+
   /api/jobs/create-job-draft:
     post:
       summary: Create off-chain job draft
