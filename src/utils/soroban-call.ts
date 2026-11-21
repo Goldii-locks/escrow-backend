@@ -157,6 +157,18 @@ function buildTx(
 }
 
 /**
+ * Helper to build transactions for read-only simulations (#883).
+ * Always uses BASE_FEE and simulationSource() without querying fee stats.
+ */
+export function buildSimulationTx(
+  contractId: string,
+  method: string,
+  ...args: xdr.ScVal[]
+) {
+  return buildTx(contractId, simulationSource(), method, args);
+}
+
+/**
  * Simulate a contract call from simulationSource() and return the raw
  * simulation response. RPC failures (simulateTransaction throwing)
  * propagate unchanged.

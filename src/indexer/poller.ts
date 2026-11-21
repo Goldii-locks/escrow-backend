@@ -1271,6 +1271,22 @@ export function runMaintenanceCycle(): void {
     return;
   }
 
+  // Expired job draft pruning (#881) – runs independently of EVENT_RETENTION_DAYS.
+  try {
+    const nowIso = new Date().toISOString();
+    const result = db
+      .prepare("DELETE FROM job_drafts WHERE expires_at IS NOT NULL AND expires_at < ?")
+      .run(nowIso);
+    logger.info("SQLite maintenance: deleted expired job drafts", {
+      count: result.changes,
+      cutoff: nowIso,
+    });
+  } catch (err) {
+    logger.error("SQLite maintenance: failed to delete expired job drafts", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
   // Retention pruning – only when EVENT_RETENTION_DAYS is explicitly configured.
   const retentionRaw = process.env.EVENT_RETENTION_DAYS;
   if (retentionRaw !== undefined && retentionRaw.trim() !== "") {

@@ -26,10 +26,11 @@ import {
   BUILD_TX_CACHE_TTL,
   UNSIGNED_TX_TIMEOUT_S,
   unsignedTxValidUntil,
-  getFreshCachedBuildTx,
   setCachedBuildTx,
+  isFreshBuildTx,
   type BuildTxPayload,
 } from "./caches.js";
+import { cachedSingleFlight } from "./dedupe.js";
 import { formatError } from "../../utils/format-error.js";
 
 
@@ -113,43 +114,39 @@ router.post(
       const cacheKey = buildTxCacheKey(contractId, method, sourceAddress, args || []);
 
       logger.debug("Checking build-tx cache", { traceId, ...pathVars, cacheKey });
-      const cached = getFreshCachedBuildTx(buildTxCache, cacheKey);
-      if (cached !== undefined) {
-        logger.info("Build-tx XDR served from cache", {
-          traceId,
-          ...pathVars,
-          source: "cache",
-          xdrLength: cached.xdr.length,
-        });
-        logger.debug("Build-tx response body prepared", {
-          traceId,
-          ...pathVars,
-          success: true,
-          xdrLength: cached.xdr.length,
-        });
-        logger.info("Build-tx response sent", {
-          traceId,
-          ...pathVars,
-          status: 200,
-          success: true,
-          cached: true,
-          xdrLength: cached.xdr.length,
-        });
-        sendBuildTxSuccess(res, cached);
-        return;
-      }
-
-      let requestPromise = inFlightBuildTxRequests.get(cacheKey);
-      const servedFromInFlight = Boolean(requestPromise);
-
-      logger.debug("Checking in-flight build-tx requests", {
-        traceId,
-        ...pathVars,
-        cacheKey,
-      });
-
-      if (!requestPromise) {
-        requestPromise = (async (): Promise<BuildTxPayload> => {
+      const sourceRef = { current: "rpc" as "cache" | "in-flight" | "rpc" };
+      const payload = await cachedSingleFlight({
+        cache: buildTxCache,
+        inFlight: inFlightBuildTxRequests,
+        key: cacheKey,
+        isFresh: isFreshBuildTx,
+        log: (s) => {
+          sourceRef.current = s;
+          if (s === "cache") {
+            const cached = buildTxCache.get<BuildTxPayload>(cacheKey);
+            logger.info("Build-tx XDR served from cache", {
+              traceId,
+              ...pathVars,
+              source: "cache",
+              xdrLength: cached?.xdr.length ?? 0,
+            });
+            logger.debug("Build-tx response body prepared", {
+              traceId,
+              ...pathVars,
+              success: true,
+              xdrLength: cached?.xdr.length ?? 0,
+            });
+            logger.info("Build-tx response sent", {
+              traceId,
+              ...pathVars,
+              status: 200,
+              success: true,
+              cached: true,
+              xdrLength: cached?.xdr.length ?? 0,
+            });
+          }
+        },
+        produce: async () => {
           logger.info("Fetching build-tx XDR from Stellar RPC", {
             traceId,
             ...pathVars,
@@ -236,38 +233,15 @@ router.post(
           });
           setCachedBuildTx(buildTxCache, cacheKey, payload, BUILD_TX_CACHE_TTL);
           return payload;
-        })();
+        },
+      });
 
-        inFlightBuildTxRequests.set(cacheKey, requestPromise);
-        logger.debug("In-flight build-tx promise registered", {
-          traceId,
-          ...pathVars,
-          cacheKey,
-        });
+      if (sourceRef.current === "cache") {
+        sendBuildTxSuccess(res, payload);
+        return;
       }
 
-      let payload: BuildTxPayload;
-      try {
-        payload = await requestPromise;
-      } catch (err: unknown) {
-        logger.debug("RPC promise rejected for build-tx, clearing cache entry", {
-          traceId,
-          ...pathVars,
-          cacheKey,
-          error: formatError(err),
-        });
-        buildTxCache.del(cacheKey);
-        throw err;
-      } finally {
-        inFlightBuildTxRequests.delete(cacheKey);
-        logger.debug("In-flight build-tx promise unregistered", {
-          traceId,
-          ...pathVars,
-          cacheKey,
-        });
-      }
-
-      if (servedFromInFlight) {
+      if (sourceRef.current === "in-flight") {
         logger.info("Build-tx XDR served from in-flight cache", {
           traceId,
           ...pathVars,

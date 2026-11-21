@@ -19,6 +19,7 @@ import {
   submitCache,
   inFlightSubmitRequests,
 } from "./caches.js";
+import { cachedSingleFlight } from "./dedupe.js";
 import {
   classifySubmitError,
 } from "./errors.js";
@@ -57,47 +58,40 @@ router.post(
     });
 
     try {
-      const cached = submitCache.get<unknown>(cacheKey);
-      if (cached !== undefined) {
-        logger.info("Submit result served from cache", { traceId, source: "cache" });
-        sendSuccess(res, cached);
-        return;
-      }
+      const sourceRef = { current: "rpc" as "cache" | "in-flight" | "rpc" };
+      const result = await cachedSingleFlight<unknown>({
+        cache: submitCache,
+        inFlight: inFlightSubmitRequests,
+        key: cacheKey,
+        log: (s) => {
+          sourceRef.current = s;
+          if (s === "cache") {
+            logger.info("Submit result served from cache", { traceId, source: "cache" });
+          } else if (s === "in-flight") {
+            logger.info("Submit result served from in-flight cache", { traceId, source: "in-flight" });
+          } else if (s === "rpc") {
+            logger.info("Submitting transaction to network", { traceId });
+          }
+        },
+        produce: async () => {
+          const { TransactionBuilder: TB } = await import("@stellar/stellar-sdk");
+          const tx = TB.fromXDR(signedXdr, NETWORK_PASSPHRASE);
+          const resTx = await server.sendTransaction(tx);
+          // Only cache successful submissions. ERROR and TRY_AGAIN_LATER must
+          // never be cached: the former would mask the failure as success on
+          // retry, the latter would serve stale advice instead of resubmitting
+          // (#614).
+          const txStatus = (resTx as { status?: string })?.status;
+          if (txStatus === "PENDING" || txStatus === "DUPLICATE") {
+            submitCache.set(cacheKey, resTx);
+          }
+          return resTx;
+        },
+      });
 
-      const inFlight = inFlightSubmitRequests.get(cacheKey);
-      if (inFlight) {
-        logger.info("Submit result served from in-flight cache", { traceId, source: "in-flight" });
-        const result = await inFlight;
+      if (sourceRef.current === "cache" || sourceRef.current === "in-flight") {
         sendSuccess(res, result);
         return;
-      }
-
-      logger.info("Submitting transaction to network", { traceId });
-
-      const requestPromise = (async (): Promise<unknown> => {
-        const { TransactionBuilder: TB } = await import("@stellar/stellar-sdk");
-        const tx = TB.fromXDR(signedXdr, NETWORK_PASSPHRASE);
-        const result = await server.sendTransaction(tx);
-        // Only cache successful submissions. ERROR and TRY_AGAIN_LATER must
-        // never be cached: the former would mask the failure as success on
-        // retry, the latter would serve stale advice instead of resubmitting
-        // (#614).
-        const txStatus = (result as { status?: string })?.status;
-        if (txStatus === "PENDING" || txStatus === "DUPLICATE") {
-          submitCache.set(cacheKey, result);
-        }
-        return result;
-      })();
-
-      inFlightSubmitRequests.set(cacheKey, requestPromise);
-      let result: unknown;
-      try {
-        result = await requestPromise;
-      } catch (err: unknown) {
-        submitCache.del(cacheKey);
-        throw err;
-      } finally {
-        inFlightSubmitRequests.delete(cacheKey);
       }
 
       const txResult = result as Record<string, unknown>;

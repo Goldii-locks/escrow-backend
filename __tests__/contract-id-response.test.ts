@@ -13,11 +13,13 @@ const VALID_CONTRACT =
 
 const mockGetAccount = jest.fn<() => Promise<unknown>>();
 const mockSimulateTransaction = jest.fn<() => Promise<unknown>>();
+const mockGetFeeStats = jest.fn<() => Promise<unknown>>();
 
 jest.unstable_mockModule("@stellar/stellar-sdk/rpc", () => ({
   Server: class MockServer {
     getAccount = mockGetAccount;
     simulateTransaction = mockSimulateTransaction;
+    getFeeStats = mockGetFeeStats;
   },
 }));
 
@@ -37,6 +39,8 @@ describe("GET /api/jobs/:contractId – response format and status codes", () =>
   beforeEach(() => {
     mockGetAccount.mockReset();
     mockSimulateTransaction.mockReset();
+    mockGetFeeStats.mockReset();
+    mockGetFeeStats.mockResolvedValue({ sorobanInclusionFee: { p90: "5000" } });
     mockGetAccount.mockResolvedValue({
       accountId: () =>
         "GAODBHVR63Z56MVQRBEJSYM2H5423LJ4WAPUUBOFG4JYY72S6ROKVZRX",
@@ -177,6 +181,8 @@ describe("GET /api/jobs/:contractId – logging traces", () => {
   beforeEach(() => {
     mockGetAccount.mockReset();
     mockSimulateTransaction.mockReset();
+    mockGetFeeStats.mockReset();
+    mockGetFeeStats.mockResolvedValue({ sorobanInclusionFee: { p90: "5000" } });
     mockGetAccount.mockResolvedValue({
       accountId: () =>
         "GAODBHVR63Z56MVQRBEJSYM2H5423LJ4WAPUUBOFG4JYY72S6ROKVZRX",
@@ -266,5 +272,30 @@ describe("GET /api/jobs/:contractId – logging traces", () => {
       funded: true,
       milestoneCount: 1,
     });
+  });
+
+  it("with feeStats enabled, GET /:contractId makes no getFeeStats call (#883)", async () => {
+    const origStrategy = process.env.INCLUSION_FEE_STRATEGY;
+    process.env.INCLUSION_FEE_STRATEGY = "feeStats";
+    mockSimulateTransaction.mockResolvedValue({
+      result: {
+        retval: jobScVal(),
+      },
+    });
+
+    try {
+      const res = await request(buildApp())
+        .get(`/api/jobs/${VALID_CONTRACT}`)
+        .expect(200);
+
+      expect(res.body.success).toBe(true);
+      expect(mockGetFeeStats).not.toHaveBeenCalled();
+    } finally {
+      if (origStrategy === undefined) {
+        delete process.env.INCLUSION_FEE_STRATEGY;
+      } else {
+        process.env.INCLUSION_FEE_STRATEGY = origStrategy;
+      }
+    }
   });
 });

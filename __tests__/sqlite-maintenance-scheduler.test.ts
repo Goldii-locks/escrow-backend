@@ -299,6 +299,34 @@ describe("SQLite maintenance scheduler", () => {
   });
 
   // -------------------------------------------------------------------------
+  // 8. Expired job draft pruning (#881)
+  // -------------------------------------------------------------------------
+  it("deletes expired job drafts while keeping live ones (#881)", () => {
+    delete process.env.EVENT_RETENTION_DAYS;
+    const now = Date.now();
+    const expiredTime = new Date(now - 10_000).toISOString();
+    const liveTime = new Date(now + 100_000).toISOString();
+
+    db.prepare(`
+      INSERT INTO job_drafts (id, creator_address, payload_json, expires_at)
+      VALUES (?, ?, ?, ?)
+    `).run("expired-draft", "GB5C...1", "{}", expiredTime);
+
+    db.prepare(`
+      INSERT INTO job_drafts (id, creator_address, payload_json, expires_at)
+      VALUES (?, ?, ?, ?)
+    `).run("live-draft", "GB5C...2", "{}", liveTime);
+
+    runMaintenanceCycle();
+
+    const expired = db.prepare("SELECT * FROM job_drafts WHERE id = ?").get("expired-draft");
+    const live = db.prepare("SELECT * FROM job_drafts WHERE id = ?").get("live-draft");
+
+    expect(expired).toBeUndefined();
+    expect(live).toBeDefined();
+  });
+
+  // -------------------------------------------------------------------------
   // 8. Default interval constant is 6 hours
   // -------------------------------------------------------------------------
   it("DEFAULT_DB_MAINTENANCE_INTERVAL_MS is 6 hours (21 600 000 ms)", () => {

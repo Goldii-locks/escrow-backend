@@ -17,8 +17,8 @@ import {
   logger,
   NETWORK_PASSPHRASE,
   server,
-  simulationSource,
   scValToNative,
+  buildSimulationTx,
 } from "./shared.js";
 import { rejectedRequestLogMeta } from "../../utils/log-redaction.js";
 import { getInclusionFee } from "../../utils/fee-helper.js";
@@ -82,16 +82,7 @@ router.get(
           ? "get_allowed_tokens"
           : "get_whitelisted_tokens";
       const requestPromise = (async (): Promise<string[]> => {
-        const contract = new Contract(contractId as string);
-        const account = simulationSource();
-        const tx = new TransactionBuilder(account, {
-          fee: await getInclusionFee(server),
-          networkPassphrase: NETWORK_PASSPHRASE,
-        })
-          .addOperation(contract.call(tokensMethod))
-          .setTimeout(30)
-          .build();
-
+        const tx = buildSimulationTx(contractId as string, tokensMethod);
         const result = await server.simulateTransaction(tx);
 
         // Handle simulation error
@@ -267,16 +258,7 @@ router.post(
     // point the caller at the single-token form instead of replying
     // `updated: true` for work that was never done (#613).
     try {
-      const contract = new Contract(contractId);
-      const account = simulationSource();
-      const tx = new TransactionBuilder(account, {
-        fee: await getInclusionFee(server),
-        networkPassphrase: NETWORK_PASSPHRASE,
-      })
-        .addOperation(contract.call("get_whitelisted_tokens"))
-        .setTimeout(30)
-        .build();
-
+      const tx = buildSimulationTx(contractId, "get_whitelisted_tokens");
       const result = await server.simulateTransaction(tx);
 
       if ("error" in result) {

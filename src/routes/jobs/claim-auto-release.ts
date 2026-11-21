@@ -27,10 +27,11 @@ import {
   CLAIM_AUTO_RELEASE_TTL,
   UNSIGNED_TX_TIMEOUT_S,
   unsignedTxValidUntil,
-  getFreshCachedBuildTx,
   setCachedBuildTx,
+  isFreshBuildTx,
   type BuildTxPayload,
 } from "./caches.js";
+import { cachedSingleFlight } from "./dedupe.js";
 import { formatError } from "../../utils/format-error.js";
 
 const router = Router();
@@ -74,36 +75,118 @@ router.post(
 
     try {
       logger.debug("Checking claim auto-release cache", { traceId, ...pathVars, cacheKey });
-      const cached = getFreshCachedBuildTx(claimAutoReleaseCache, cacheKey);
-      if (cached !== undefined) {
-        logger.info("Claim auto-release XDR served from cache", {
-          traceId,
-          ...pathVars,
-          source: "cache",
-          xdrLength: cached.xdr.length,
-        });
-        logger.debug("Claim auto-release response body prepared", {
-          traceId,
-          ...pathVars,
-          success: true,
-          xdrLength: cached.xdr.length,
-        });
-        logger.info("Claim auto-release response sent", {
-          traceId,
-          ...pathVars,
-          status: 200,
-          success: true,
-          cached: true,
-          xdrLength: cached.xdr.length,
-        });
-        sendSuccess(res, cached);
+      logger.debug("Checking in-flight claim auto-release requests", { traceId, ...pathVars, cacheKey });
+      const sourceRef = { current: "rpc" as "cache" | "in-flight" | "rpc" };
+      const payload = await cachedSingleFlight({
+        cache: claimAutoReleaseCache,
+        inFlight: inFlightClaimAutoReleaseRequests,
+        key: cacheKey,
+        isFresh: isFreshBuildTx,
+        onInFlightRegister: () => {
+          logger.debug("In-flight promise registered", { traceId, ...pathVars, cacheKey });
+        },
+        onInFlightUnregister: () => {
+          logger.debug("In-flight promise unregistered", { traceId, ...pathVars, cacheKey });
+        },
+        onError: (err) => {
+          logger.debug("RPC promise rejected, clearing cache entry", {
+            traceId,
+            ...pathVars,
+            cacheKey,
+            error: formatError(err),
+          });
+        },
+        log: (s) => {
+          sourceRef.current = s;
+          if (s === "cache") {
+            const cached = claimAutoReleaseCache.get<BuildTxPayload>(cacheKey);
+            logger.info("Claim auto-release XDR served from cache", {
+              traceId,
+              ...pathVars,
+              source: "cache",
+              xdrLength: cached?.xdr.length ?? 0,
+            });
+            logger.debug("Claim auto-release response body prepared", {
+              traceId,
+              ...pathVars,
+              success: true,
+              xdrLength: cached?.xdr.length ?? 0,
+            });
+            logger.info("Claim auto-release response sent", {
+              traceId,
+              ...pathVars,
+              status: 200,
+              success: true,
+              cached: true,
+              xdrLength: cached?.xdr.length ?? 0,
+            });
+          }
+        },
+        produce: async () => {
+          logger.info("Fetching claim auto-release XDR from Stellar RPC", {
+            traceId,
+            ...pathVars,
+          });
+
+          const inclusionFee = await getInclusionFee(server);
+          logger.debug("Building Stellar transaction for claim auto-release", {
+            traceId,
+            ...pathVars,
+            fee: inclusionFee,
+            timeout: UNSIGNED_TX_TIMEOUT_S,
+          });
+          const contract = new Contract(contractId);
+          logger.debug("Fetching Stellar account", { traceId, ...pathVars });
+          const account = await server.getAccount(sourceAddress as string);
+          logger.debug("Stellar account fetched", { traceId, ...pathVars });
+
+          const tx = new TransactionBuilder(account, {
+            fee: inclusionFee,
+            networkPassphrase: NETWORK_PASSPHRASE,
+          })
+            .addOperation(
+              contract.call(
+                "claim_auto_release",
+                Address.fromString(sourceAddress).toScVal(),
+                nativeToScVal(Number(index), { type: "u32" }),
+              ),
+            )
+            .setTimeout(UNSIGNED_TX_TIMEOUT_S)
+            .build();
+
+          logger.debug("Calling prepareTransaction on Stellar RPC", { traceId, ...pathVars });
+          const prepared = await server.prepareTransaction(tx);
+          const xdr = prepared.toXDR();
+          const totalFee = String(prepared.fee);
+          const resourceFee = String(
+            BigInt(totalFee) >= BigInt(inclusionFee)
+              ? BigInt(totalFee) - BigInt(inclusionFee)
+              : 0n,
+          );
+          const payload: BuildTxPayload = {
+            xdr,
+            hash: Buffer.from(prepared.hash()).toString("hex"),
+            validUntil: unsignedTxValidUntil(tx),
+            fee: { total: totalFee, inclusion: String(inclusionFee), resource: resourceFee },
+          };
+          logger.debug("Storing claim auto-release XDR in cache", {
+            traceId,
+            ...pathVars,
+            cacheKey,
+            xdrLength: xdr.length,
+            ttlSeconds: CLAIM_AUTO_RELEASE_TTL,
+          });
+          setCachedBuildTx(claimAutoReleaseCache, cacheKey, payload, CLAIM_AUTO_RELEASE_TTL);
+          return payload;
+        },
+      });
+
+      if (sourceRef.current === "cache") {
+        sendSuccess(res, payload);
         return;
       }
 
-      logger.debug("Checking in-flight claim auto-release requests", { traceId, ...pathVars, cacheKey });
-      const inFlight = inFlightClaimAutoReleaseRequests.get(cacheKey);
-      if (inFlight) {
-        const payload = await inFlight;
+      if (sourceRef.current === "in-flight") {
         logger.info("Claim auto-release XDR served from in-flight cache", {
           traceId,
           ...pathVars,
@@ -127,83 +210,6 @@ router.post(
         });
         sendSuccess(res, payload);
         return;
-      }
-
-      logger.info("Fetching claim auto-release XDR from Stellar RPC", {
-        traceId,
-        ...pathVars,
-      });
-
-      const requestPromise = (async (): Promise<BuildTxPayload> => {
-        const inclusionFee = await getInclusionFee(server);
-        logger.debug("Building Stellar transaction for claim auto-release", {
-          traceId,
-          ...pathVars,
-          fee: inclusionFee,
-          timeout: UNSIGNED_TX_TIMEOUT_S,
-        });
-        const contract = new Contract(contractId);
-        logger.debug("Fetching Stellar account", { traceId, ...pathVars });
-        const account = await server.getAccount(sourceAddress as string);
-        logger.debug("Stellar account fetched", { traceId, ...pathVars });
-
-        const tx = new TransactionBuilder(account, {
-          fee: inclusionFee,
-          networkPassphrase: NETWORK_PASSPHRASE,
-        })
-          .addOperation(
-            contract.call(
-              "claim_auto_release",
-              Address.fromString(sourceAddress).toScVal(),
-              nativeToScVal(Number(index), { type: "u32" }),
-            ),
-          )
-          .setTimeout(UNSIGNED_TX_TIMEOUT_S)
-          .build();
-
-        logger.debug("Calling prepareTransaction on Stellar RPC", { traceId, ...pathVars });
-        const prepared = await server.prepareTransaction(tx);
-        const xdr = prepared.toXDR();
-        const totalFee = String(prepared.fee);
-        const resourceFee = String(
-          BigInt(totalFee) >= BigInt(inclusionFee)
-            ? BigInt(totalFee) - BigInt(inclusionFee)
-            : 0n,
-        );
-        const payload: BuildTxPayload = {
-          xdr,
-          hash: Buffer.from(prepared.hash()).toString("hex"),
-          validUntil: unsignedTxValidUntil(tx),
-          fee: { total: totalFee, inclusion: String(inclusionFee), resource: resourceFee },
-        };
-        logger.debug("Storing claim auto-release XDR in cache", {
-          traceId,
-          ...pathVars,
-          cacheKey,
-          xdrLength: xdr.length,
-          ttlSeconds: CLAIM_AUTO_RELEASE_TTL,
-        });
-        setCachedBuildTx(claimAutoReleaseCache, cacheKey, payload, CLAIM_AUTO_RELEASE_TTL);
-        return payload;
-      })();
-
-      inFlightClaimAutoReleaseRequests.set(cacheKey, requestPromise);
-      logger.debug("In-flight promise registered", { traceId, ...pathVars, cacheKey });
-      let payload: BuildTxPayload;
-      try {
-        payload = await requestPromise;
-      } catch (err: unknown) {
-        logger.debug("RPC promise rejected, clearing cache entry", {
-          traceId,
-          ...pathVars,
-          cacheKey,
-          error: formatError(err),
-        });
-        claimAutoReleaseCache.del(cacheKey);
-        throw err;
-      } finally {
-        inFlightClaimAutoReleaseRequests.delete(cacheKey);
-        logger.debug("In-flight promise unregistered", { traceId, ...pathVars, cacheKey });
       }
 
       logger.info("Claim auto-release XDR built successfully", {
