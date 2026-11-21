@@ -1,3 +1,4 @@
+import { jest } from "@jest/globals";
 import request from "supertest";
 import express from "express";
 
@@ -348,6 +349,30 @@ describe("POST /api/jobs/create-job-draft – CORS and security headers", () => 
 
       expect(res.body.success).toBe(false);
       expect(res.body.error).toBe("Draft not found");
+    });
+
+    it("returns 503 and contains no draft id when saveJobDraft fails (#880)", async () => {
+      const origPrepare = db.prepare.bind(db);
+      const prepareSpy = jest.spyOn(db, "prepare").mockImplementation((sql: string) => {
+        if (sql.includes("INSERT INTO job_drafts")) {
+          throw new Error("disk full");
+        }
+        return origPrepare(sql);
+      });
+
+      try {
+        const res = await request(buildApp())
+          .post("/api/jobs/create-job-draft")
+          .send(VALID_BODY)
+          .expect(503);
+
+        expect(res.body.success).toBe(false);
+        expect(res.body.error).toBe("Could not save draft");
+        expect(res.body.data).toBeUndefined();
+        expect(res.body.id).toBeUndefined();
+      } finally {
+        prepareSpy.mockRestore();
+      }
     });
   });
 });

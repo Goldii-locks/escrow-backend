@@ -150,6 +150,11 @@ export function unsignedTxValidUntil(tx: { timeBounds?: { maxTime: string } }): 
   return Math.floor(Date.now() / 1000) + UNSIGNED_TX_TIMEOUT_S;
 }
 
+export function isFreshBuildTx(entry: BuildTxPayload): boolean {
+  const remaining = entry.validUntil - Date.now() / 1000;
+  return remaining >= UNSIGNED_TX_MIN_REMAINING_S;
+}
+
 /**
  * Returns the cached build-tx payload only if it still has the minimum signing
  * window left. Stale entries are evicted so the caller rebuilds.

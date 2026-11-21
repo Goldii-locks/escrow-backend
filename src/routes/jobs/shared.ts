@@ -81,6 +81,7 @@ import {
   server,
   getRpcUrl,
   simulationSource,
+  buildSimulationTx,
 } from "../../utils/soroban-call.js";
 import logger from "../../utils/logger.js";
 import { isValidStellarContractId } from "../../utils/stellar.js";
@@ -106,7 +107,7 @@ export function maskAddress(address: string | undefined | null): string {
 export const CONTRACT_ID = process.env.CONTRACT_ID || "";
 // The RPC Server, network config and read-simulation source live in
 // utils/soroban-call.ts (#620); re-exported here for the route modules.
-export { NETWORK_PASSPHRASE, server, getRpcUrl, simulationSource };
+export { NETWORK_PASSPHRASE, server, getRpcUrl, simulationSource, buildSimulationTx };
 
 
 /**
