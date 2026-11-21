@@ -93,6 +93,7 @@ Legend:
 | `src/routes/jobs/whitelist.ts` | live | — |
 | `src/routes/stats.ts` | live | — |
 | `src/routes/tokens.ts` | live | — |
+| `src/routes/wallets.ts` | live | — |
 | `src/routes/webhooks.ts` | live | — |
 | `src/routes/whitelist.test.ts` | unwired | [#718](https://github.com/Goldii-locks/escrow-backend/issues/718) |
 | `src/schemas/jobs.ts` | live | — |
