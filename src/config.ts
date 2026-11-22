@@ -154,6 +154,11 @@ export const config = {
     );
   },
 
+  // Webhook delivery bookkeeping retention (#940)
+  get webhookDeliveryRetentionDays(): number {
+    return readIntEnv("WEBHOOK_DELIVERY_RETENTION_DAYS", 7, 1);
+  },
+
   // Graceful shutdown (#623)
   get shutdownTimeoutMs(): number {
     return readIntEnv("SHUTDOWN_TIMEOUT_MS", 10000, 1);
