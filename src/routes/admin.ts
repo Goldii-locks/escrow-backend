@@ -1,6 +1,7 @@
 import { Router } from "express";
+import type { Request, Response } from "express";
 import { randomUUID } from "crypto";
-import { requireAdmin } from "../middleware/adminAuth.js";
+import { requireAdmin, type AdminRequest } from "../middleware/adminAuth.js";
 import {
   getIndexerStatusData,
   getSubscriptions,
@@ -31,6 +32,8 @@ import {
   getAllContracts,
   registerContract,
   deregisterContract,
+  recordAdminAuditLog,
+  getAdminAuditLogs,
 } from "../indexer/db.js";
 import { sendSuccess } from "../utils/api-response.js";
 import logger from "../utils/logger.js";
@@ -40,6 +43,45 @@ import { collectIndexerMetrics } from "../indexer/indexer_metrics_collector.js";
 const router = Router();
 
 router.use(requireAdmin);
+
+type TargetResolver = string | null | undefined | ((req: Request) => unknown);
+type ParamsResolver = unknown;
+
+function isCallableResolver(val: unknown): val is (req: Request) => unknown {
+  return typeof val === "function";
+}
+
+function auditAction(
+  req: Request,
+  res: Response,
+  action: string,
+  targetOrFn: TargetResolver,
+  paramsOrFn?: ParamsResolver,
+): void {
+  res.on("finish", () => {
+    try {
+      const adminReq = req as AdminRequest;
+      const keyIndex = adminReq.adminKeyIndex ?? 0;
+      const rawTarget = isCallableResolver(targetOrFn) ? targetOrFn(req) : targetOrFn;
+      const target = Array.isArray(rawTarget)
+        ? rawTarget.join(",")
+        : (rawTarget !== undefined && rawTarget !== null ? String(rawTarget) : null);
+      const params = isCallableResolver(paramsOrFn) ? paramsOrFn(req) : (paramsOrFn ?? req.body);
+      recordAdminAuditLog({
+        key_index: keyIndex,
+        request_id: req.id ?? null,
+        method: req.method,
+        path: req.originalUrl || req.path,
+        action,
+        target,
+        params,
+        status: res.statusCode,
+      });
+    } catch (err) {
+      logger.error("Failed to record admin audit log", { error: formatError(err) });
+    }
+  });
+}
 
 type BackfillJob = HistoricalImportResult & {
   jobId: string;
@@ -53,6 +95,7 @@ let backfillJob: BackfillJob | null = null;
 let backfillStarting = false;
 
 router.post("/backfill", async (req, res) => {
+  auditAction(req, res, "backfill", () => (req.body?.contractId as string) || "all", () => req.body);
   const body = req.body as Record<string, unknown> | undefined;
   const startLedger = body?.startLedger;
   const endLedger = body?.endLedger;
@@ -164,6 +207,7 @@ router.get("/contracts", (_req, res) => {
 });
 
 router.post("/contracts", validate(registerContractBodySchema, "body"), (req, res) => {
+  auditAction(req, res, "register_contract", () => req.body?.contractId, () => req.body);
   const { contractId, label, startLedger } = req.body as {
     contractId: string;
     label?: string;
@@ -183,6 +227,7 @@ router.post("/contracts", validate(registerContractBodySchema, "body"), (req, re
 });
 
 router.delete("/contracts/:contractId", validate(contractParamSchema, "params"), (req, res) => {
+  auditAction(req, res, "deregister_contract", () => req.params?.contractId, () => req.params);
   const { contractId } = req.params as { contractId: string };
   deregisterContract(contractId);
   res.json({
@@ -275,6 +320,21 @@ router.get("/jobs", (req, res) => {
     res.json({ success: true, ...result });
   } catch (err) {
     logger.error("Failed to list admin jobs", { error: formatError(err) });
+    res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
+router.get("/audit-log", (req, res) => {
+  const limit = typeof req.query.limit === "string" ? parseInt(req.query.limit, 10) : undefined;
+  const before = typeof req.query.before === "string" ? req.query.before : undefined;
+  try {
+    const entries = getAdminAuditLogs({
+      limit: typeof limit === "number" && Number.isFinite(limit) ? limit : undefined,
+      before,
+    });
+    res.json({ success: true, entries, auditLog: entries, logs: entries });
+  } catch (err) {
+    logger.error("Failed to list admin audit log", { error: formatError(err) });
     res.status(500).json({ success: false, error: "Internal server error" });
   }
 });

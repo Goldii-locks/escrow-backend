@@ -160,6 +160,45 @@ describe("/api/v1 versioning (#697)", () => {
     const res = await request(buildApp()).get("/api/v1/jobs/whitelisted-tokens?contractId=");
     expect(res.headers.deprecation).toBeUndefined();
   });
+
+  describe("successor-version Link and Sunset headers (#929)", () => {
+    const originalSunset = process.env.LEGACY_API_SUNSET;
+
+    afterEach(() => {
+      if (originalSunset !== undefined) {
+        process.env.LEGACY_API_SUNSET = originalSunset;
+      } else {
+        delete process.env.LEGACY_API_SUNSET;
+      }
+    });
+
+    it("GET /api/jobs/x returns Link: </api/v1/jobs/x>; rel=\"successor-version\"", async () => {
+      delete process.env.LEGACY_API_SUNSET;
+      const res = await request(buildApp()).get("/api/jobs/some-contract-id");
+      expect(res.headers.link).toBe("</api/v1/jobs/some-contract-id>; rel=\"successor-version\"");
+      expect(res.headers.deprecation).toBe("true");
+      expect(res.headers.sunset).toBeUndefined();
+    });
+
+    it("includes Sunset only when LEGACY_API_SUNSET is configured", async () => {
+      process.env.LEGACY_API_SUNSET = "2027-06-30T00:00:00Z";
+      const res = await request(buildApp()).get("/api/jobs/some-contract-id");
+      expect(res.headers.link).toBe("</api/v1/jobs/some-contract-id>; rel=\"successor-version\"");
+      expect(res.headers.sunset).toBe(new Date("2027-06-30T00:00:00Z").toUTCString());
+
+      delete process.env.LEGACY_API_SUNSET;
+      const resWithoutSunset = await request(buildApp()).get("/api/jobs/some-contract-id");
+      expect(resWithoutSunset.headers.sunset).toBeUndefined();
+    });
+
+    it("/api/v1/* requests receive neither the Link nor Sunset headers", async () => {
+      process.env.LEGACY_API_SUNSET = "2027-06-30T00:00:00Z";
+      const res = await request(buildApp()).get("/api/v1/jobs/whitelisted-tokens?contractId=");
+      expect(res.headers.link).toBeUndefined();
+      expect(res.headers.sunset).toBeUndefined();
+      expect(res.headers.deprecation).toBeUndefined();
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -25,6 +25,7 @@ export function requestLogger(
 ): void {
   const start = Date.now();
   res.on("finish", () => {
+    const legacyReq = req as Request & { isLegacyApi?: boolean; legacyRequestCount?: number };
     logger.info("HTTP request", {
       requestId: req.id,
       method: req.method,
@@ -32,6 +33,7 @@ export function requestLogger(
       status: res.statusCode,
       durationMs: Date.now() - start,
       ip: req.ip ?? req.socket?.remoteAddress,
+      ...(legacyReq.isLegacyApi ? { isLegacyApi: true, legacyRequestCount: legacyReq.legacyRequestCount } : {}),
     });
   });
   next();
