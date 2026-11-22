@@ -73,7 +73,13 @@ type SimulateResponse = Awaited<ReturnType<Server["simulateTransaction"]>>;
  *  - Contract assertion / revert (error codes) → 422
  *  - Everything else → 500
  */
-export function classifySimError(rawError: string): { status: number; message: string } {
+export type SimErrorClassification = {
+  status: number;
+  message: string;
+  code?: number;
+};
+
+export function classifySimError(rawError: string): SimErrorClassification {
   // 504 – upstream RPC stalled or timed out (#691)
   if (/timeout|ETIMEDOUT|ECONNRESET|socket hang up|request timeout|connect timeout/i.test(rawError)) {
     return { status: 504, message: "Upstream RPC timeout" };
@@ -84,20 +90,26 @@ export function classifySimError(rawError: string): { status: number; message: s
     return { status: 404, message: "Source account not found on network" };
   }
 
-  // 404 – contract missing / unregistered on the network
+  // 404 – contract missing / unregistered on the network (never map contract error codes to 404)
   if (
-    /not found|NotFound|contract not found/i.test(rawError) ||
-    /contract error #1\b/i.test(rawError)
+    /Error\(Storage,\s*MissingValue\)/i.test(rawError) ||
+    /\bcontract not found\b/i.test(rawError) ||
+    /\bContractNotFound\b/i.test(rawError) ||
+    /\bno such contract\b/i.test(rawError)
   ) {
     return { status: 404, message: "Contract not found on network" };
   }
 
   // 422 – contract executed but reverted / assertion failed
-  const contractErrMatch = rawError.match(/contract error #(\d+)/i);
+  const contractErrMatch =
+    rawError.match(/Error\(Contract,\s*#?(\d+)\)/i) ||
+    rawError.match(/contract error #?(\d+)/i);
   if (contractErrMatch) {
+    const code = Number(contractErrMatch[1]);
     return {
       status: 422,
-      message: `Contract execution reverted (error code ${contractErrMatch[1]})`,
+      message: `Contract execution reverted (error code ${code})`,
+      code,
     };
   }
   if (/revert|assert|panic|trap/i.test(rawError)) {
@@ -115,12 +127,14 @@ export function classifySimError(rawError: string): { status: number; message: s
  */
 export class SimError extends Error {
   status: number;
+  code?: number;
   rawError?: string;
-  constructor(status: number, message: string, rawError?: string) {
+  constructor(status: number, message: string, rawError?: string, code?: number) {
     super(message);
     this.name = "SimError";
     this.status = status;
     this.rawError = rawError;
+    this.code = code;
   }
 }
 
@@ -187,8 +201,8 @@ export async function simulateRead(
 
   if ("error" in result) {
     const rawError = String(result.error);
-    const { status, message } = classifySimError(rawError);
-    throw new SimError(status, message, rawError);
+    const { status, message, code } = classifySimError(rawError);
+    throw new SimError(status, message, rawError, code);
   }
   if ("result" in result && result.result?.retval) {
     return scValToNative(result.result.retval);
