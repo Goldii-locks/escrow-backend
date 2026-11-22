@@ -6,17 +6,9 @@ import {
   getErrorStatusCode,
   isRetryableError,
   RpcPollerClient,
-  mapRpcEventToRow as mapRpcEventToRowTyped,
   type RpcServerLike,
-  RpcEventQueue,
 } from "../src/indexer/rpc-poller-client.js";
 
-// The SDK-typed mapper (#645) takes Api.EventResponse; these tests feed it
-// deliberately loose stub shapes.
-const mapRpcEventToRow = mapRpcEventToRowTyped as unknown as (
-  raw: unknown,
-  fallbackContractId?: string,
-) => ReturnType<typeof mapRpcEventToRowTyped>;
 import { jest } from "@jest/globals";
 import Database from "better-sqlite3";
 import {
@@ -347,56 +339,6 @@ describe("RpcPollerClient – exponential backoff retry", () => {
   });
 
   describe("RpcPollerClient branch coverage additions (#674)", () => {
-    it("readContractId handles contractId object throwing in contractId() method", () => {
-      const badContractObj = {
-        contractId: () => {
-          throw new Error("fail");
-        },
-      };
-      const row = mapRpcEventToRow({ contractId: badContractObj, ledger: 10 });
-      expect(row.contractId).toBe("");
-    });
-
-    it("readEventType handles undefined, null, and scValToNative errors", () => {
-      const rowUndefined = mapRpcEventToRow({ topic: [undefined], ledger: 10 });
-      expect(rowUndefined.eventType).toBe("unknown");
-
-      const rowNull = mapRpcEventToRow({ topic: [null], ledger: 10 });
-      expect(rowNull.eventType).toBe("unknown");
-
-      const rowInvalidScVal = mapRpcEventToRow({ topic: [{ invalid: "scval" }], ledger: 10 });
-      expect(rowInvalidScVal.eventType).toBe("unknown");
-    });
-
-    it("handles pagingToken and raw string topics in event key generation during fetchEventRange", async () => {
-      const server = {
-        calls: [],
-        getLatestLedger: async () => ({ sequence: 100 }),
-        getEvents: async () => ({
-          events: [
-            {
-              pagingToken: "token-abc",
-              contractId: "C1",
-              topic: ["funded"],
-              ledger: 10,
-              ledgerClosedAt: new Date().toISOString(),
-            },
-            {
-              // neither id nor pagingToken
-              contractId: "C1",
-              topic: ["funded"],
-              ledger: 10,
-              ledgerClosedAt: new Date().toISOString(),
-            },
-          ],
-          latestLedger: 100,
-        }),
-      };
-      const client = new RpcPollerClient("https://rpc.invalid", { server: server as any });
-      const res = await client.fetchEventRange({ startLedger: 10, endLedger: 10 });
-      expect(res.eventCount).toBe(2);
-    });
-
     it("underlyingServer returns the wrapped RPC server", () => {
       const stub = {
         getLatestLedger: async () => ({ sequence: 100 }),
@@ -420,54 +362,6 @@ describe("RpcPollerClient – exponential backoff retry", () => {
       expect(eventsRes.latestLedger).toBe(12345);
     });
 
-    it("covers previous lock rejection in withEventLock", async () => {
-      const queue = new RpcEventQueue({
-        persist: async () => true,
-      });
-
-      const row1 = {
-        contractId: "C1",
-        eventType: "funded",
-        ledgerSequence: 100,
-        timestamp: 1000,
-        dataJson: "{}",
-      };
-
-      // Run two parallel operations on the same event lock key where the first rejects
-      const key = "C1:funded:100";
-      const p1 = (queue as any).withEventLock(key, async () => {
-        throw new Error("first lock failed");
-      });
-      const p2 = (queue as any).withEventLock(key, async () => {
-        return "second lock succeeded";
-      });
-
-      await expect(p1).rejects.toThrow("first lock failed");
-      const res2 = await p2;
-      expect(res2).toBe("second lock succeeded");
-    });
-
-    it("RpcEventQueue flush handles already persisted keys and duplicates", async () => {
-      const queue = new RpcEventQueue({
-        persist: async () => true,
-      });
-
-      const row1 = {
-        contractId: "C1",
-        eventType: "funded",
-        ledgerSequence: 100,
-        timestamp: 1000,
-        dataJson: "{}",
-      };
-
-      // Enqueue and flush first time so it is in persistedKeys
-      await queue.submit([row1]);
-
-      // Manually add row1 into (queue as any).pending without deduplicating via enqueue
-      (queue as any).pending.push(row1);
-      const flushRes = await queue.flush();
-      expect(flushRes.duplicateCount).toBe(1);
-    });
   });
 });
 

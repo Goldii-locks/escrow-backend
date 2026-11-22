@@ -6,7 +6,6 @@ import {
   nativeToScVal,
   scValToNative,
   jobContractRateLimit,
-  jobContractCors,
   jobContractSecurityHeaders,
   sendError,
   sendSuccess,
@@ -104,8 +103,8 @@ async function handleReadOnlyQuery(req: Request, res: Response): Promise<void> {
   }
 }
 
-router.get("/query", jobContractCors, jobContractSecurityHeaders, jobContractRateLimit, handleReadOnlyQuery);
-router.post("/query", jobContractCors, jobContractSecurityHeaders, jobContractRateLimit, handleReadOnlyQuery);
+router.get("/query", jobContractSecurityHeaders, jobContractRateLimit, handleReadOnlyQuery);
+router.post("/query", jobContractSecurityHeaders, jobContractRateLimit, handleReadOnlyQuery);
 
 // GET /api/jobs/whitelisted-tokens?contractId= – alias the frontend calls (#696).
 router.get("/whitelisted-tokens", (req: Request, res: Response) => {
@@ -124,7 +123,6 @@ router.get("/whitelisted-tokens", (req: Request, res: Response) => {
 
 router.get(
   "/:contractId/fee-preview",
-  jobContractCors,
   jobContractSecurityHeaders,
   jobContractRateLimit,
   validate(contractIdParamsSchema, "params", (req) =>
@@ -220,7 +218,6 @@ router.get(
 // GET /api/jobs/:contractId - get job state
 router.get(
   "/:contractId",
-  jobContractCors,
   jobContractSecurityHeaders,
   jobContractRateLimit,
   validate(contractIdParamsSchema, "params", (req) =>

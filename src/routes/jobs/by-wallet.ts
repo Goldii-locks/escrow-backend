@@ -2,7 +2,6 @@ import { Router } from "express";
 import type { Request, Response } from "express";
 import {
   getJobsByWallet,
-  byWalletCors,
   byWalletSecurityHeaders,
   sendError,
   sendSuccess,
@@ -26,11 +25,9 @@ const router = Router();
 // Query params: ?page=1&limit=10
 // ---------------------------------------------------------------------------
 
-router.options("/by-wallet/:address", byWalletCors);
 
 router.get(
   "/by-wallet/:address",
-  byWalletCors,
   byWalletSecurityHeaders,
   validate(byWalletParamsSchema, "params", (req) =>
     logger.warn("Invalid by-wallet address", { address: req.params.address }),

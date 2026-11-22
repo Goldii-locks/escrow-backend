@@ -79,3 +79,54 @@ describe("global CORS allowlist (#601)", () => {
     expect(offenders).toEqual([]);
   });
 });
+
+describe("global CORS exposed headers (#936)", () => {
+  const original = process.env.ALLOWED_ORIGINS;
+  beforeEach(() => {
+    process.env.ALLOWED_ORIGINS = ALLOWED;
+  });
+  afterAll(() => {
+    if (original === undefined) delete process.env.ALLOWED_ORIGINS;
+    else process.env.ALLOWED_ORIGINS = original;
+  });
+
+  it("exposes X-Request-Id and the rate-limit headers to an allowed origin", async () => {
+    const res = await request(buildApp())
+      .post("/api/webhooks/subscribe")
+      .set("Origin", ALLOWED)
+      .send({});
+    const exposed = String(res.headers["access-control-expose-headers"]);
+    for (const h of [
+      "X-Request-Id",
+      "RateLimit-Limit",
+      "RateLimit-Remaining",
+      "RateLimit-Reset",
+      "Retry-After",
+    ]) {
+      expect(exposed).toContain(h);
+    }
+  });
+
+  it("returns the same preflight header set on every route", async () => {
+    const paths = [
+      "/api/jobs/by-wallet/GAODBHVR63Z56MVQRBEJSYM2H5423LJ4WAPUUBOFG4JYY72S6ROKVZRX",
+      "/api/jobs/submit",
+      "/api/jobs/build-tx",
+      "/api/webhooks/subscribe",
+    ];
+    const sets = [];
+    for (const path of paths) {
+      const res = await request(buildApp())
+        .options(path)
+        .set("Origin", ALLOWED)
+        .set("Access-Control-Request-Method", "POST");
+      sets.push([
+        res.status,
+        res.headers["access-control-allow-methods"],
+        res.headers["access-control-allow-headers"],
+        res.headers["access-control-expose-headers"],
+      ]);
+    }
+    for (const s of sets) expect(s).toEqual(sets[0]);
+  });
+});

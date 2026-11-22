@@ -6,7 +6,6 @@ import {
   nativeToScVal,
   Address,
   buildTxRateLimit,
-  buildTxCors,
   buildTxSecurityHeaders,
   sendError,
   validateWithFields,
@@ -49,7 +48,6 @@ const router = Router();
 // ---------------------------------------------------------------------------
 router.post(
   "/build-tx",
-  buildTxCors,
   buildTxSecurityHeaders,
   // buildTxRateLimit supersedes the generic strictLimiter for this route.
   buildTxRateLimit,

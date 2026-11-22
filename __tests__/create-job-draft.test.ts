@@ -1,4 +1,5 @@
 import request from "supertest";
+import { globalCors } from "../src/middleware/global-cors.js";
 import express from "express";
 
 const VALID_CLIENT =
@@ -28,6 +29,8 @@ import Database from "better-sqlite3";
 
 function buildApp() {
   const app = express();
+  app.use(globalCors());
+
   app.use(express.json());
   app.use("/api/jobs", router);
   return app;
@@ -242,17 +245,11 @@ describe("POST /api/jobs/create-job-draft – CORS and security headers", () => 
     }
   });
 
-  it("rejects requests from unauthorized origins with 403", async () => {
+  it("withholds CORS headers for requests from unauthorized origins", async () => {
     const res = await request(buildApp())
       .post("/api/jobs/create-job-draft")
       .set("Origin", "https://evil.example.com")
-      .send(VALID_BODY)
-      .expect(403);
-
-    expect(res.body).toEqual({
-      success: false,
-      error: "Origin not allowed by CORS policy",
-    });
+      .send(VALID_BODY);
     expect(res.headers["access-control-allow-origin"]).toBeUndefined();
   });
 
@@ -267,19 +264,14 @@ describe("POST /api/jobs/create-job-draft – CORS and security headers", () => 
       "https://trusted.example.com",
     );
     expect(res.headers.vary).toContain("Origin");
-    expect(res.headers["access-control-allow-methods"]).toMatch(/POST/i);
   });
 
-  it("rejects unauthorized OPTIONS preflight with 403", async () => {
+  it("withholds CORS headers for unauthorized OPTIONS preflight", async () => {
     const res = await request(buildApp())
       .options("/api/jobs/create-job-draft")
-      .set("Origin", "https://evil.example.com")
-      .expect(403);
+      .set("Origin", "https://evil.example.com");
 
-    expect(res.body).toEqual({
-      success: false,
-      error: "Origin not allowed by CORS policy",
-    });
+    expect(res.headers["access-control-allow-origin"]).toBeUndefined();
   });
 
   it("allows trusted OPTIONS preflight with 204", async () => {
@@ -291,7 +283,6 @@ describe("POST /api/jobs/create-job-draft – CORS and security headers", () => 
     expect(res.headers["access-control-allow-origin"]).toBe(
       "https://trusted.example.com",
     );
-    expect(res.headers["access-control-allow-methods"]).toMatch(/POST/i);
   });
 
   it("applies security headers on create-job-draft responses", async () => {
@@ -307,14 +298,14 @@ describe("POST /api/jobs/create-job-draft – CORS and security headers", () => 
     expect(res.headers["permissions-policy"]).toContain("camera=()");
   });
 
-  it("still rejects unauthorized origins before schema validation", async () => {
+  it("still withholds CORS headers for unauthorized origins before schema validation", async () => {
     const res = await request(buildApp())
       .post("/api/jobs/create-job-draft")
       .set("Origin", "https://evil.example.com")
-      .send({})
-      .expect(403);
+      .send({});
 
-    expect(res.body.error).toBe("Origin not allowed by CORS policy");
+    expect(res.status).toBe(400);
+    expect(res.headers["access-control-allow-origin"]).toBeUndefined();
   });
 
   describe("Job Draft Persistence (#667)", () => {

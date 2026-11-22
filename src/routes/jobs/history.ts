@@ -5,7 +5,6 @@ import {
   sendError,
   sendSuccess,
   logger,
-  jobContractCors,
   jobContractSecurityHeaders,
   jobContractRateLimit,
   validate,
@@ -19,11 +18,9 @@ const router = Router();
 
 // GET /api/jobs/:contractId/history - event timeline for a single job
 
-router.options("/:contractId/history", jobContractCors);
 
 router.get(
   "/:contractId/history",
-  jobContractCors,
   jobContractSecurityHeaders,
   jobContractRateLimit,
   validate(contractIdParamsSchema, "params", (req) =>

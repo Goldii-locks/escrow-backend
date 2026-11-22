@@ -1,4 +1,5 @@
 import { jest } from "@jest/globals";
+import { globalCors } from "../src/middleware/global-cors.js";
 import request from "supertest";
 import express from "express";
 import Database from "better-sqlite3";
@@ -24,6 +25,8 @@ beforeAll(async () => {
   initSchema();
   const { default: router } = await import("../src/routes/jobs.js");
   app = express();
+  app.use(globalCors());
+
   app.use(express.json());
   app.use("/api/jobs", router);
 });
@@ -70,16 +73,10 @@ describe("GET /api/jobs/:contractId – CORS and security headers", () => {
     }
   });
 
-  it("rejects requests from unauthorized origins with 403", async () => {
+  it("withholds CORS headers for requests from unauthorized origins", async () => {
     const res = await request(app)
       .get(`/api/jobs/${VALID_CONTRACT}`)
-      .set("Origin", "https://evil.example.com")
-      .expect(403);
-
-    expect(res.body).toEqual({
-      success: false,
-      error: "Origin not allowed by CORS policy",
-    });
+      .set("Origin", "https://evil.example.com");
     expect(res.headers["access-control-allow-origin"]).toBeUndefined();
   });
 
