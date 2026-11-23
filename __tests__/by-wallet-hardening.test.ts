@@ -59,7 +59,7 @@ describe("GET /api/jobs/by-wallet/:address – hardening", () => {
     expect(debugEntries.some(([, meta]) => (meta as any).address === "GAODBHVR63Z56MVQRBEJSYM2H5423LJ4WAPUUBOFG4JYY72S6ROKVZRX")).toBe(true);
   });
 
-  it("logs the address on error", async () => {
+  it("logs the masked address on error", async () => {
     mockGetJobsByWallet.mockImplementation(() => {
       throw new Error("boom");
     });
@@ -70,7 +70,7 @@ describe("GET /api/jobs/by-wallet/:address – hardening", () => {
 
     const errorEntries = mockLogger.error.mock.calls as unknown as [string, Record<string, unknown>][];
     expect(errorEntries.some(([message]) => message === "Jobs lookup failed")).toBe(true);
-    expect(errorEntries.some(([, meta]) => (meta as any).address === "GB5CRPXUGXZCG6BESL4CM4F3VUAGQGFNYNBHPBRJAGLXXSRYJSEGZHUV")).toBe(true);
+    expect(errorEntries.some(([, meta]) => (meta as any).address === "GB5C\u2026ZHUV")).toBe(true);
   });
 
   it("returns 429 after exceeding the request threshold", async () => {
@@ -87,6 +87,19 @@ describe("GET /api/jobs/by-wallet/:address – hardening", () => {
     const second = await request(app).get("/test");
     expect(second.status).toBe(429);
     expect(second.body).toEqual({ success: false, error: "Too many requests, please try again later" });
+  });
+
+  it("enforces BY_WALLET_RATE_LIMIT_MAX on the mounted by-wallet route (#864)", async () => {
+    process.env.BY_WALLET_RATE_LIMIT_MAX = "2";
+    try {
+      const app = buildApp();
+      const path = "/api/jobs/by-wallet/GAODBHVR63Z56MVQRBEJSYM2H5423LJ4WAPUUBOFG4JYY72S6ROKVZRX";
+      await request(app).get(path).expect(200);
+      await request(app).get(path).expect(200);
+      await request(app).get(path).expect(429);
+    } finally {
+      delete process.env.BY_WALLET_RATE_LIMIT_MAX;
+    }
   });
 
   it("resets the rate limit window after the window elapses", async () => {

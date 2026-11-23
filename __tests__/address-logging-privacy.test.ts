@@ -7,7 +7,7 @@
  * logger.debug so post-incident debugging is unimpaired.
  *
  * See CONTRIBUTING.md §"Logging Policy – Wallet address privacy" and
- * maskAddress() in src/routes/jobs.ts.
+ * maskAddress() in src/utils/log-redaction.ts.
  */
 
 import { jest } from "@jest/globals";
@@ -113,6 +113,8 @@ jest.unstable_mockModule("@stellar/stellar-sdk", () => ({
 const { default: router }        = await import("../src/routes/jobs.js");
 const { maskAddress }            = await import("../src/routes/jobs.js");
 const { setDb, initSchema }      = await import("../src/indexer/db.js");
+const { walletLookupLimiter, resetByWalletRateLimitBuckets } =
+  await import("../src/middleware/rateLimiter.js");
 
 // ---------------------------------------------------------------------------
 // In-memory SQLite – seed one event so by-wallet returns a hit.
@@ -279,5 +281,55 @@ describe("GET /api/jobs/:contractId – info-level address privacy", () => {
     expect(dbg).toContain(G_CLIENT);
     expect(dbg).toContain(G_FREELANCER);
     expect(dbg).toContain(G_ARBITER);
+  });
+});
+
+// #866: call sites that previously logged a raw address at warn/error/info.
+describe("remaining log call sites mask addresses (#866)", () => {
+  /** Stringify every logger call at every level. */
+  function allOutput(): string {
+    return [mockLogger.info, mockLogger.warn, mockLogger.error]
+      .flatMap((fn) => fn.mock.calls)
+      .flatMap((call) => call.map((a) => (typeof a === "string" ? a : JSON.stringify(a))))
+      .join("\n");
+  }
+  const FULL_ADDR_RE = /[GC][A-Z0-9]{55}/;
+
+  it("'Invalid by-wallet address' logs a truncated value", async () => {
+    const { StrKey } = await import("@stellar/stellar-sdk");
+    (StrKey.isValidEd25519PublicKey as jest.Mock).mockReturnValueOnce(false);
+    (StrKey.isValidContract as jest.Mock).mockReturnValueOnce(false);
+    await request(buildApp()).get(`/api/jobs/by-wallet/${G_CLIENT}`).expect(400);
+    const warns = mockLogger.warn.mock.calls.map((c) => c[0]);
+    expect(warns).toContain("Invalid by-wallet address");
+    expect(allOutput()).not.toMatch(FULL_ADDR_RE);
+  });
+
+  it("'Rate limit exceeded' logs a masked address", async () => {
+    process.env.BY_WALLET_RATE_LIMIT_MAX = "1";
+    resetByWalletRateLimitBuckets();
+    try {
+      const app = express();
+      app.get("/w/:address", walletLookupLimiter, (_req, res) => { res.json({}); });
+      await request(app).get(`/w/${G_CLIENT}`).expect(200);
+      await request(app).get(`/w/${G_CLIENT}`).expect(429);
+    } finally {
+      delete process.env.BY_WALLET_RATE_LIMIT_MAX;
+      resetByWalletRateLimitBuckets();
+    }
+    const warns = mockLogger.warn.mock.calls.map((c) => c[0]);
+    expect(warns).toContain("Rate limit exceeded");
+    expect(allOutput()).toContain(maskOf(G_CLIENT));
+    expect(allOutput()).not.toMatch(FULL_ADDR_RE);
+  });
+
+  it("'Submit transaction request received' logs a masked sourceAddress", async () => {
+    await request(buildApp())
+      .post("/api/jobs/submit")
+      .send({ signedXdr: "AAAA", sourceAddress: G_CLIENT });
+    const infos = mockLogger.info.mock.calls.map((c) => c[0]);
+    expect(infos).toContain("Submit transaction request received");
+    expect(allOutput()).toContain(maskOf(G_CLIENT));
+    expect(allOutput()).not.toMatch(FULL_ADDR_RE);
   });
 });

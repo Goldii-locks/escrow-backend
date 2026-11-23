@@ -69,3 +69,34 @@ export function xdrLogMeta(xdr: unknown): XdrLogMeta {
       .slice(0, XDR_HASH_PREFIX_LENGTH),
   };
 }
+
+/**
+ * Truncate a Stellar address to `GABC…WXYZ` for info-level logs.
+ *
+ * Full addresses must never appear at `info` (the production log level)
+ * because the HTTP request logger records the caller's IP on every request,
+ * so logging the full address alongside it builds a durable IP↔wallet map.
+ * Four leading + four trailing characters are enough for same-session
+ * correlation without exposing the complete key.
+ *
+ * Pass the raw value to `logger.debug` wherever the full address is needed
+ * for post-incident debugging.
+ */
+export function maskAddress(address: string | undefined | null): string {
+  if (!address || address.length < 10) return address ?? "";
+  return `${address.slice(0, 4)}\u2026${address.slice(-4)}`;
+}
+
+/** Max characters of an untrusted, unvalidated value kept in a log line. */
+const UNTRUSTED_LOG_PREFIX_LENGTH = 8;
+
+/**
+ * Shorten a possibly attacker-controlled value (e.g. a path param that
+ * failed validation) before logging it (#866).
+ */
+export function truncateForLog(value: unknown): string {
+  const str = typeof value === "string" ? value : String(value ?? "");
+  return str.length > UNTRUSTED_LOG_PREFIX_LENGTH
+    ? `${str.slice(0, UNTRUSTED_LOG_PREFIX_LENGTH)}\u2026`
+    : str;
+}

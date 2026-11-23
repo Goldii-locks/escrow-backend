@@ -2,6 +2,7 @@ import type { NextFunction, Request, Response } from "express";
 import rateLimit from "express-rate-limit";
 import { config } from "../config.js";
 import logger from "../utils/logger.js";
+import { maskAddress } from "../utils/log-redaction.js";
 
 type RateBucket = {
   count: number;
@@ -90,7 +91,7 @@ export function walletLookupLimiter(req: Request, res: Response, next: NextFunct
 
   if (bucket.count > walletLookupMax) {
     const address = typeof req.params?.address === "string" ? req.params.address : undefined;
-    logger.warn("Rate limit exceeded", { label: "by-wallet", address, status: 429 });
+    logger.warn("Rate limit exceeded", { label: "by-wallet", address: maskAddress(address), status: 429 });
     res.status(429).json(rateLimitMessage);
     return;
   }

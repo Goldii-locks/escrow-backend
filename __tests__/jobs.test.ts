@@ -142,10 +142,13 @@ describe("GET /api/jobs/:contractId – real ScVal decoding (#597)", () => {
       arbiter: ARBITER,
       token: TOKEN,
       funded: true,
+      autoReleaseSeconds: 0,
       milestones: [
         { index: 0, amount: "500", status: "Pending" },
         { index: 1, amount: big.toString(), status: "Released" },
-      ],
+      ].map((m) => ({
+        ...m, releasedAmount: "0", deliveredAt: 0, funded: false, specHash: null, deliverable: null,
+      })),
     });
   });
 
