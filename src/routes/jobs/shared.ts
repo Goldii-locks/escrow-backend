@@ -101,6 +101,26 @@ export { NETWORK_PASSPHRASE, server, getRpcUrl, simulationSource };
 
 
 /**
+ * #876: Map a network passphrase to a human-readable label for startup logs.
+ * Unknown passphrases (quickstart, futurenet forks, custom networks) are
+ * reported as "custom" so the log never implies mainnet by default.
+ */
+export function describeNetwork(passphrase: string): string {
+  switch (passphrase) {
+    case Networks.PUBLIC:
+      return "public";
+    case Networks.TESTNET:
+      return "testnet";
+    case Networks.FUTURENET:
+      return "futurenet";
+    case Networks.STANDALONE:
+      return "standalone";
+    default:
+      return "custom";
+  }
+}
+
+/**
  * #692: Validate that the configured SOROBAN_NETWORK_PASSPHRASE matches the
  * passphrase the RPC server actually reports. Called once at startup.
  *
@@ -131,7 +151,7 @@ export async function assertRpcNetworkMatches(): Promise<void> {
   }
 
   logger.info("RPC network verified", {
-    network: rpcPassphrase === Networks.TESTNET ? "testnet" : "public",
+    network: describeNetwork(rpcPassphrase),
     rpc: RPC_URL,
   });
 }
