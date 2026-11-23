@@ -638,7 +638,19 @@ const MIGRATIONS: Migration[] = [
   {
     version: 21,
     description: "add checked_at index on reconciliation_results for retention cleanup (#925)",
-    up: "CREATE INDEX IF NOT EXISTS idx_reconciliation_checked_at ON reconciliation_results (checked_at);",
+    up: (database) => {
+      // reconciliation_results was created in migration 10; guard in case the
+      // schema_migrations table was pre-populated without the matching DDL.
+      const tableExists = database
+        .prepare(
+          "SELECT 1 FROM sqlite_master WHERE type='table' AND name='reconciliation_results'"
+        )
+        .get();
+      if (!tableExists) return;
+      database.exec(
+        "CREATE INDEX IF NOT EXISTS idx_reconciliation_checked_at ON reconciliation_results (checked_at);"
+      );
+    },
   },
 ];
 

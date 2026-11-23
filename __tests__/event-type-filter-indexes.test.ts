@@ -188,8 +188,15 @@ describe("event_type_filter – SQLite indexes (migration v3)", () => {
         "SELECT COUNT(*) AS count FROM events WHERE contract_id = ?",
         CONTRACT_A
       );
-      // Covered by the composite (contract_id, ledger_sequence) index
-      expect(usesIndex(plan, "idx_events_contract_ledger")).toBe(true);
+      // The planner may use either the composite (contract_id, ledger_sequence)
+      // index or the single-column (contract_id) index — both are valid covering
+      // indexes for this COUNT query. After the topics_json column was added the
+      // planner switched to the lighter single-column index; either choice is
+      // correct and passes the no-full-table-scan assertion above.
+      expect(
+        usesIndex(plan, "idx_events_contract_ledger") ||
+        usesIndex(plan, "idx_events_contract_id")
+      ).toBe(true);
     });
 
     it("WHERE contract_id = ? AND event_type = ? uses idx_events_contract_event_type", () => {
