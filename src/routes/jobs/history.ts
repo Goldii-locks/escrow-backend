@@ -5,7 +5,6 @@ import {
   sendError,
   sendSuccess,
   logger,
-  jobContractCors,
   jobContractSecurityHeaders,
   jobContractRateLimit,
   validate,
@@ -53,11 +52,9 @@ function isVersionedPath(originalUrl: string): boolean {
 
 // GET /api/jobs/:contractId/history - event timeline for a single job
 
-router.options("/:contractId/history", jobContractCors);
 
 router.get(
   "/:contractId/history",
-  jobContractCors,
   jobContractSecurityHeaders,
   jobContractRateLimit,
   validate(contractIdParamsSchema, "params", (req) =>

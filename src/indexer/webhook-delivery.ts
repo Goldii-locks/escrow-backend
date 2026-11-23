@@ -408,6 +408,79 @@ export function getDeadDeliveries(limit = 100): DeadDelivery[] {
   }
 }
 
+export const DELIVERY_STATUSES = ["pending", "delivered", "failed", "dead"] as const;
+
+export interface SubscriptionDelivery {
+  id: number;
+  deliveryId: string;
+  status: string;
+  attempts: number;
+  lastError: string | null;
+  nextAttemptAt: number | null;
+  updatedAt: string | null;
+  eventType: string | null;
+  ledgerSequence: number | null;
+  eventId: string | null;
+}
+
+/**
+ * One subscription's delivery rows, newest first, joined to the event they
+ * carry (#941). Keyset-paginated on the delivery row id: pass the last id of
+ * the previous page as `before`.
+ */
+export function getSubscriptionDeliveries(
+  subscriptionId: number,
+  opts: { status?: string; limit?: number; before?: number } = {}
+): SubscriptionDelivery[] {
+  ensureDeliveriesTable();
+  const where = ["d.subscription_id = ?"];
+  const params: Array<number | string> = [subscriptionId];
+  if (opts.status) {
+    where.push("d.status = ?");
+    params.push(opts.status);
+  }
+  if (opts.before !== undefined) {
+    where.push("d.id < ?");
+    params.push(opts.before);
+  }
+  params.push(opts.limit ?? 50);
+  const rows = getDb()
+    .prepare(
+      `SELECT d.id, d.subscription_id, d.event_id AS event_row_id, d.status,
+              d.attempts, d.last_error, d.next_attempt_at, d.updated_at,
+              e.event_type, e.ledger_sequence, e.event_id
+       FROM webhook_deliveries d
+       LEFT JOIN events e ON e.id = d.event_id
+       WHERE ${where.join(" AND ")}
+       ORDER BY d.id DESC LIMIT ?`
+    )
+    .all(...params) as Array<{
+    id: number;
+    subscription_id: number;
+    event_row_id: number;
+    status: string;
+    attempts: number;
+    last_error: string | null;
+    next_attempt_at: number | null;
+    updated_at: string | null;
+    event_type: string | null;
+    ledger_sequence: number | null;
+    event_id: string | null;
+  }>;
+  return rows.map((r) => ({
+    id: r.id,
+    deliveryId: webhookDeliveryId(r.subscription_id, r.event_row_id),
+    status: r.status,
+    attempts: r.attempts,
+    lastError: r.last_error,
+    nextAttemptAt: r.next_attempt_at,
+    updatedAt: r.updated_at,
+    eventType: r.event_type,
+    ledgerSequence: r.ledger_sequence,
+    eventId: r.event_id,
+  }));
+}
+
 export function getFailedDeliveryCount(): number {
   try {
     ensureDeliveriesTable();

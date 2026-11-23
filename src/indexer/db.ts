@@ -2517,6 +2517,12 @@ export function removeSubscription(contractId: string, webhookUrl: string): bool
   }
 }
 
+export function getSubscriptionById(id: number): WebhookSubscription | undefined {
+  return getDb()
+    .prepare("SELECT * FROM webhook_subscriptions WHERE id = ?")
+    .get(id) as WebhookSubscription | undefined;
+}
+
 export function getSubscriptions(): WebhookSubscription[] {
   const db = getDb();
   return db.prepare("SELECT * FROM webhook_subscriptions").all() as WebhookSubscription[];

@@ -5,7 +5,6 @@ import {
   TransactionBuilder,
   nativeToScVal,
   timeRemainingRateLimit,
-  timeRemainingCors,
   timeRemainingSecurityHeaders,
   sendError,
   sendSuccess,
@@ -40,7 +39,6 @@ router.get(
     "/:contractId/milestones/:index/time-remaining",
     "/:contractId/milestones/:index/auto-release",
   ],
-  timeRemainingCors,
   timeRemainingSecurityHeaders,
   timeRemainingRateLimit,
   validate(contractMilestoneParamsSchema, "params", (req) =>

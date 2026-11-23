@@ -6,7 +6,6 @@ import {
   nativeToScVal,
   Address,
   claimAutoReleaseRateLimit,
-  claimAutoReleaseCors,
   claimAutoReleaseSecurityHeaders,
   validate,
   contractMilestoneParamsSchema,
@@ -38,11 +37,9 @@ const router = Router();
 // ---------------------------------------------------------------------------
 // POST /api/jobs/:contractId/milestones/:index/claim-auto-release
 // ---------------------------------------------------------------------------
-router.options("/:contractId/milestones/:index/claim-auto-release", claimAutoReleaseCors);
 
 router.post(
   "/:contractId/milestones/:index/claim-auto-release",
-  claimAutoReleaseCors,
   claimAutoReleaseSecurityHeaders,
   claimAutoReleaseRateLimit,
   validate(contractMilestoneParamsSchema, "params", (req) =>

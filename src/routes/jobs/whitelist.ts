@@ -6,7 +6,6 @@ import {
   Address,
   jobWhitelistRateLimit,
   whitelistUpdateRateLimit,
-  jobContractCors,
   jobContractSecurityHeaders,
   sendError,
   sendSuccess,
@@ -38,7 +37,6 @@ const router = Router();
 // ---------------------------------------------------------------------------
 router.get(
   "/:contractId/whitelist",
-  jobContractCors,
   jobContractSecurityHeaders,
   jobWhitelistRateLimit,
   (req: Request, _res: Response, next: NextFunction) => {
@@ -180,7 +178,6 @@ router.get(
 // ---------------------------------------------------------------------------
 router.post(
   "/:contractId/whitelist/update",
-  jobContractCors,
   jobContractSecurityHeaders,
   whitelistUpdateRateLimit,
   validate(contractIdParamsSchema, "params", (req) =>
