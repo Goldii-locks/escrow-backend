@@ -1286,6 +1286,25 @@ export function runMaintenanceCycle(): void {
     return;
   }
 
+  // Reconciliation results retention (#925). Runs unconditionally; default 14 days.
+  try {
+    const retentionDays = config.reconciliationRetentionDays;
+    const cutoff = Math.floor(Date.now() / 1000) - retentionDays * 86400;
+    const result = getDb()
+      .prepare("DELETE FROM reconciliation_results WHERE checked_at < ?")
+      .run(cutoff);
+    if (result.changes > 0) {
+      logger.info("SQLite maintenance: pruned reconciliation results", {
+        retentionDays,
+        deleted: result.changes,
+      });
+    }
+  } catch (err) {
+    logger.error("SQLite maintenance: reconciliation retention pruning failed", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
   // Retention pruning – only when EVENT_RETENTION_DAYS is explicitly configured.
   const retentionRaw = process.env.EVENT_RETENTION_DAYS;
   if (retentionRaw !== undefined && retentionRaw.trim() !== "") {
