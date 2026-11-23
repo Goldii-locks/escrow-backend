@@ -31,6 +31,8 @@ export function getDb(): Database.Database {
     fs.mkdirSync(dataDir, { recursive: true });
   }
   dbInstance = new Database(dbPath);
+  // Must precede table creation to take effect on a new file (#871).
+  dbInstance.pragma("auto_vacuum = INCREMENTAL");
   dbInstance.pragma("journal_mode = WAL");
   return dbInstance;
 }

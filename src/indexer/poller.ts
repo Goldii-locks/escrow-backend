@@ -25,8 +25,8 @@ import {
 import {
   isVacuumLocked,
   pruneOldEvents,
-  runVacuum,
 } from "./sqlite_vacuum_cleaner.js";
+import type Database from "better-sqlite3";
 import { RpcPollerClient, type RpcPollerClientOptions } from "./rpc-poller-client.js";
 import {
   createFailoverServer,
@@ -1239,6 +1239,39 @@ export const DEFAULT_DB_MAINTENANCE_INTERVAL_MS = 21_600_000;
 
 let maintenanceTimeout: NodeJS.Timeout | null = null;
 
+/** Pages reclaimed per `PRAGMA incremental_vacuum` step. */
+const INCREMENTAL_VACUUM_PAGES_PER_STEP = 1_000;
+/** Upper bound on incremental-vacuum steps per maintenance cycle. */
+const INCREMENTAL_VACUUM_MAX_STEPS = 1_000;
+
+/**
+ * Reclaim free pages with `PRAGMA incremental_vacuum` in small steps, yielding
+ * to the event loop between steps so HTTP, the poller and the webhook queue
+ * keep running (#871). A full `VACUUM` rewrites the whole file synchronously
+ * and is never run from the maintenance cycle. On databases created before
+ * `auto_vacuum = INCREMENTAL` was enabled this is a no-op.
+ */
+function runIncrementalVacuum(db: Database.Database, step = 0, startedAt = Date.now()): void {
+  try {
+    const free = db.pragma("freelist_count", { simple: true }) as number;
+    if (free <= 0 || step >= INCREMENTAL_VACUUM_MAX_STEPS) {
+      logger.info("SQLite maintenance: incremental vacuum complete", {
+        steps: step,
+        remainingFreePages: free,
+        durationMs: Date.now() - startedAt,
+      });
+      return;
+    }
+    db.pragma(`incremental_vacuum(${INCREMENTAL_VACUUM_PAGES_PER_STEP})`);
+  } catch (err) {
+    logger.error("SQLite maintenance: incremental vacuum failed", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return;
+  }
+  setImmediate(() => runIncrementalVacuum(db, step + 1, startedAt));
+}
+
 /**
  * Execute one SQLite maintenance cycle:
  *   1. Skip (reschedule) when `isVacuumLocked()` is true so we never overlap
@@ -1247,7 +1280,8 @@ let maintenanceTimeout: NodeJS.Timeout | null = null;
  *      disk space accumulated since the last checkpoint.
  *   3. Run `PRAGMA optimize` to update internal query-planner statistics.
  *   4. If `EVENT_RETENTION_DAYS` is explicitly set in the environment, prune
- *      events older than that many days and then run a full `VACUUM`.
+ *      events older than that many days and then reclaim space with a
+ *      stepped `PRAGMA incremental_vacuum` (never a full `VACUUM`, #871).
  *
  * Errors are caught and logged so a maintenance failure never crashes the
  * poller.
@@ -1261,9 +1295,13 @@ export function runMaintenanceCycle(): void {
   const db = getDb();
 
   try {
+    const startedAt = Date.now();
     db.pragma("wal_checkpoint(TRUNCATE)");
     db.pragma("optimize");
-    logger.info("SQLite maintenance completed", { operation: "wal_checkpoint+optimize" });
+    logger.info("SQLite maintenance completed", {
+      operation: "wal_checkpoint+optimize",
+      durationMs: Date.now() - startedAt,
+    });
   } catch (err) {
     logger.error("SQLite maintenance failed (wal_checkpoint/optimize)", {
       error: err instanceof Error ? err.message : String(err),
@@ -1282,12 +1320,16 @@ export function runMaintenanceCycle(): void {
       return;
     }
     try {
+      const startedAt = Date.now();
       const pruned = pruneOldEvents(db, retentionDays);
-      logger.info("SQLite maintenance: pruned old events", { retentionDays, pruned });
-      runVacuum(db);
-      logger.info("SQLite maintenance: VACUUM complete after retention prune");
+      logger.info("SQLite maintenance: pruned old events", {
+        retentionDays,
+        pruned,
+        durationMs: Date.now() - startedAt,
+      });
+      runIncrementalVacuum(db);
     } catch (err) {
-      logger.error("SQLite maintenance: retention prune/vacuum failed", {
+      logger.error("SQLite maintenance: retention prune failed", {
         error: err instanceof Error ? err.message : String(err),
         retentionDays,
       });
@@ -1295,43 +1337,38 @@ export function runMaintenanceCycle(): void {
   }
 }
 
-function scheduleNextMaintenance(intervalMs: number): void {
+function readMaintenanceIntervalMs(): number {
+  const ms = parseInt(
+    process.env.DB_MAINTENANCE_INTERVAL_MS ?? String(DEFAULT_DB_MAINTENANCE_INTERVAL_MS),
+    10,
+  );
+  return Number.isFinite(ms) && ms > 0 ? ms : DEFAULT_DB_MAINTENANCE_INTERVAL_MS;
+}
+
+function scheduleNextMaintenance(delayMs: number): void {
   maintenanceTimeout = setTimeout(() => {
     runMaintenanceCycle();
-    const next = parseInt(
-      process.env.DB_MAINTENANCE_INTERVAL_MS ?? String(DEFAULT_DB_MAINTENANCE_INTERVAL_MS),
-      10,
-    );
-    scheduleNextMaintenance(
-      Number.isFinite(next) && next > 0 ? next : DEFAULT_DB_MAINTENANCE_INTERVAL_MS,
-    );
-  }, intervalMs);
+    scheduleNextMaintenance(readMaintenanceIntervalMs());
+  }, delayMs);
   // The maintenance interval is hours; it must not hold a worker open (#951).
   maintenanceTimeout.unref?.();
 }
 
-/** Start the maintenance scheduler and run the first cycle immediately. */
+/**
+ * Start the maintenance scheduler. Nothing runs at startup (#871): the first
+ * cycle fires after one interval plus up to 10% jitter, so restarts and
+ * deploys don't all trigger maintenance at once.
+ */
 export function startMaintenanceScheduler(): void {
   if (maintenanceTimeout !== null) return; // already running
 
-  // Run once immediately at startup, then on the configured interval.
-  runMaintenanceCycle();
-
-  const intervalMs = parseInt(
-    process.env.DB_MAINTENANCE_INTERVAL_MS ?? String(DEFAULT_DB_MAINTENANCE_INTERVAL_MS),
-    10,
-  );
-  scheduleNextMaintenance(
-    Number.isFinite(intervalMs) && intervalMs > 0
-      ? intervalMs
-      : DEFAULT_DB_MAINTENANCE_INTERVAL_MS,
-  );
+  const intervalMs = readMaintenanceIntervalMs();
+  const jitterMs = Math.floor(Math.random() * intervalMs * 0.1);
+  scheduleNextMaintenance(intervalMs + jitterMs);
 
   logger.info("SQLite maintenance scheduler started", {
-    intervalMs:
-      Number.isFinite(intervalMs) && intervalMs > 0
-        ? intervalMs
-        : DEFAULT_DB_MAINTENANCE_INTERVAL_MS,
+    intervalMs,
+    firstRunInMs: intervalMs + jitterMs,
     retentionPruningEnabled: process.env.EVENT_RETENTION_DAYS !== undefined,
   });
 }

@@ -61,22 +61,22 @@ describe("GET /api/admin/jobs (#961)", () => {
 
     const disputed = await request(app).get("/api/admin/jobs").set(auth).query({ status: "disputed" }).expect(200);
     expect(disputed.body.success).toBe(true);
-    expect(disputed.body.jobs.map((j: any) => j.contractId)).toEqual([C2]);
-    expect(disputed.body.jobs[0].hasOpenDispute).toBe(true);
+    expect(disputed.body.data.jobs.map((j: any) => j.contractId)).toEqual([C2]);
+    expect(disputed.body.data.jobs[0].hasOpenDispute).toBe(true);
 
     const completed = await request(app).get("/api/admin/jobs").set(auth).query({ status: "completed" }).expect(200);
-    expect(completed.body.jobs.map((j: any) => j.contractId)).toEqual([C3]);
+    expect(completed.body.data.jobs.map((j: any) => j.contractId)).toEqual([C3]);
 
     const active = await request(app).get("/api/admin/jobs").set(auth).query({ status: "active" }).expect(200);
-    expect(active.body.jobs.map((j: any) => j.contractId)).toEqual([C1]);
+    expect(active.body.data.jobs.map((j: any) => j.contractId)).toEqual([C1]);
 
     const page1 = await request(app).get("/api/admin/jobs").set(auth).query({ limit: 2 }).expect(200);
-    expect(page1.body.jobs).toHaveLength(2);
+    expect(page1.body.data.jobs).toHaveLength(2);
     expect(page1.body.nextCursor).toBeTruthy();
-    const firstIds = page1.body.jobs.map((j: any) => j.contractId);
+    const firstIds = page1.body.data.jobs.map((j: any) => j.contractId);
 
     const page2 = await request(app).get("/api/admin/jobs").set(auth).query({ limit: 2, cursor: page1.body.nextCursor }).expect(200);
-    expect(page2.body.jobs).toHaveLength(1);
-    expect(firstIds).not.toContain(page2.body.jobs[0].contractId);
+    expect(page2.body.data.jobs).toHaveLength(1);
+    expect(firstIds).not.toContain(page2.body.data.jobs[0].contractId);
   });
 });

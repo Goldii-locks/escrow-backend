@@ -15,7 +15,7 @@ import { z } from "zod";
 
 const intSchema = z.coerce.number().int();
 
-function readIntEnv(name: string, fallback: number, min = 0): number {
+export function readIntEnv(name: string, fallback: number, min = 0): number {
   const raw = process.env[name];
   if (raw === undefined || raw === "") return fallback;
   const parsed = intSchema.safeParse(raw);
@@ -92,6 +92,9 @@ export const config = {
   get byWalletRateLimitMax(): number {
     return readIntEnv("BY_WALLET_RATE_LIMIT_MAX", 30, 1);
   },
+  get webhookRateLimitMax(): number {
+    return readIntEnv("WEBHOOK_RATE_LIMIT_MAX", 30, 1);
+  },
 
   // Indexer RPC retry/backoff
   get indexerRpcMaxRetries(): number {
@@ -160,10 +163,28 @@ export const config = {
   },
 } as const;
 
+/**
+ * Per-route rate limiters read `${prefix}_MAX` / `${prefix}_WINDOW_MS` (#873).
+ * Each limiter registers its prefix here so validateConfigAtStartup checks it.
+ */
+const routeRateLimitEnvs = new Map<string, { defaultMax: number; defaultWindowMs: number }>();
+
+export function registerRouteRateLimitEnv(
+  prefix: string,
+  defaultMax: number,
+  defaultWindowMs: number,
+): void {
+  routeRateLimitEnvs.set(prefix, { defaultMax, defaultWindowMs });
+}
+
 /** Throw at startup when any numeric env var is invalid, naming the variable. */
 export function validateConfigAtStartup(): void {
   // Accessing each property invokes its getter, which throws on invalid input.
   for (const key of Object.keys(config) as Array<keyof typeof config>) {
     void config[key];
+  }
+  for (const [prefix, { defaultMax, defaultWindowMs }] of routeRateLimitEnvs) {
+    readIntEnv(`${prefix}_MAX`, defaultMax, 1);
+    readIntEnv(`${prefix}_WINDOW_MS`, defaultWindowMs, 1);
   }
 }
