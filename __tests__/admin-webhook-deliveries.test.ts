@@ -2,7 +2,7 @@ import { jest } from "@jest/globals";
 import Database from "better-sqlite3";
 import request from "supertest";
 import express from "express";
-import { initSchema, setDb, addSubscription, insertEvent } from "../src/indexer/db.js";
+import { runMigrations, setDb, addSubscription, insertEvent } from "../src/indexer/db.js";
 import { webhookDeliveryId } from "../src/indexer/webhook-delivery.js";
 
 process.env.ADMIN_API_KEY = "test-admin-key";
@@ -31,21 +31,10 @@ describe("GET /api/admin/webhook-subscriptions/:id/deliveries (#941)", () => {
   beforeAll(async () => {
     db = new Database(":memory:");
     setDb(db);
-    initSchema();
+    runMigrations();
     subId = addSubscription(CONTRACT, "https://hooks.example.com/in?token=secret", ["funded"]).id;
     otherSubId = addSubscription(CONTRACT, "https://other.example.com/in", ["funded"]).id;
 
-    db.exec(`CREATE TABLE IF NOT EXISTS webhook_deliveries (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      subscription_id INTEGER NOT NULL,
-      event_id INTEGER NOT NULL,
-      status TEXT NOT NULL DEFAULT 'pending',
-      attempts INTEGER NOT NULL DEFAULT 0,
-      last_error TEXT,
-      next_attempt_at INTEGER,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      UNIQUE(subscription_id, event_id)
-    )`);
     statuses.forEach((status, i) => {
       insertEvent(CONTRACT, "funded", 100 + i, 1000 + i, "{}", `evt-${i}`);
       const eventRowId = (db.prepare("SELECT id FROM events WHERE event_id = ?").get(`evt-${i}`) as { id: number }).id;
