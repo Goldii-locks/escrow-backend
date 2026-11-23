@@ -7,8 +7,18 @@ services:
   backend:
     image: ${ECR_REGISTRY}/escrow-backend:${BACKEND_TAG:-latest}
     restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     env_file:
       - ./backend.env           # chmod 600 — see DECISIONS.md for required keys
+    # Requests reach the backend through exactly one proxy (the frontend
+    # nginx), which is what TRUST_PROXY_HOPS defaults to in production. Set
+    # TRUST_PROXY_HOPS in backend.env if another proxy/LB is put in front.
     expose:
       - "3001"                  # internal only, never published to the host
     volumes:
@@ -22,6 +32,14 @@ services:
       # GET /health is registered before the rate limiter, so frequent
       # probing won't trip it. Note it's liveness only — it returns ok
       # even if SQLite is broken or the poller has died.
+      #
+      # GET /ready is the readiness probe: 200 only when SELECT 1 succeeds
+      # and the last successful poll is within READY_MAX_POLL_AGE_MS
+      # (default 3x the max poll interval), 503 naming the failing check
+      # otherwise. Point uptime checks and nginx at /ready
+      # (e.g. `location /ready { proxy_pass http://backend:3001; }`);
+      # keep this Compose healthcheck on /health so a stuck indexer does not
+      # restart-loop the container before it can be inspected.
       #
       # Probe with node, not wget: node:24-bookworm-slim ships neither wget
       # nor curl, so a wget probe exits 127 (command not found) and Compose

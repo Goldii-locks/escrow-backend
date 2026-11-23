@@ -18,7 +18,7 @@
  * (banker's rounding) protocol: halfway cases round to the nearest *even*
  * digit. This eliminates the systematic upward bias produced by the more
  * common "round half up" rule and is consistent with IEEE 754 default rounding
- * and the approach used by `fee_deduction_calculator`.
+ * and the approach used by `fee-deduction-calculator`.
  *
  * ### Unknown tickers
  * `resolveAssetTicker` returns a `TickerResolution` that always succeeds —
@@ -40,6 +40,16 @@ import {
   isAmountWithinRange,
 } from "./digit-limit-validator.js";
 import { divRound } from "./rounding.js";
+import {
+  DEFAULT_TOKEN_DECIMALS,
+  DEFAULT_TOKEN_LABEL,
+  getTokenLabel,
+  isKnownTokenSymbol,
+  resolveTokenMetadata,
+  type TokenMetadataOptions,
+} from "./token-metadata.js";
+import { escapeCsvField, parseCsvLine } from "./csv-serializer.js";
+import { formatDecimalForDb } from "./db-precision.js";
 
 export { MAX_SAFE_DIGITS };
 
@@ -60,6 +70,7 @@ export const ERROR_CODES = {
   UNKNOWN_ERROR_DEFINITION: "UNKNOWN_ERROR_DEFINITION",
   CALCULATION_EXCEPTION: "CALCULATION_EXCEPTION",
   PARAM_STRUCTURE_MISMATCH: "PARAM_STRUCTURE_MISMATCH",
+  NEGATIVE_AMOUNT: "NEGATIVE_AMOUNT",
 } as const;
 
 export type ScraperErrorCode =
@@ -191,12 +202,72 @@ export function checkConversionRateLimit(clientKey: string): RateLimitResult {
   };
 }
 
+export type ConversionRateLimiter =
+  | {
+      consume?: () => boolean | { ok: boolean; error?: string; code?: ScraperErrorCode };
+      check?: () => boolean | { ok: boolean; error?: string; code?: ScraperErrorCode };
+      checkRateLimit?: () => boolean | { ok: boolean; error?: string; code?: ScraperErrorCode };
+      tryConsume?: () => boolean;
+    }
+  | (() => boolean | { ok: boolean; error?: string; code?: ScraperErrorCode });
+
+export function createConversionRateTokenBucket(config: { maxCalls: number; windowMs?: number }): ConversionRateLimiter {
+  let count = 0;
+  let start = Date.now();
+  const windowMs = config.windowMs ?? 60_000;
+  return {
+    consume: () => {
+      const now = Date.now();
+      if (now - start >= windowMs) {
+        start = now;
+        count = 0;
+      }
+      count += 1;
+      return count <= config.maxCalls;
+    },
+  };
+}
+
 /**
  * Validate an oracle conversion rate against digit limits.
  */
 export function validateConversionRate(
-  rate: string | number | bigint
+  rate: string | number | bigint,
+  options?: { limiter?: ConversionRateLimiter }
 ): ValidationResult {
+  if (options?.limiter) {
+    let res: unknown;
+    const limiter = options.limiter;
+    if (typeof limiter === "function") {
+      res = limiter();
+    } else if (typeof limiter.consume === "function") {
+      res = limiter.consume();
+    } else if (typeof limiter.tryConsume === "function") {
+      res = limiter.tryConsume();
+    } else if (typeof limiter.checkRateLimit === "function") {
+      res = limiter.checkRateLimit();
+    } else if (typeof limiter.check === "function") {
+      res = limiter.check();
+    }
+    if (typeof res === "boolean" && !res) {
+      return {
+        ok: false,
+        error: "conversion rate limit exceeded",
+        code: ERROR_CODES.RATE_LIMIT_EXCEEDED,
+      };
+    }
+    if (res && typeof res === "object") {
+      const obj = res as { ok?: boolean; error?: string; code?: ScraperErrorCode };
+      if (obj.ok === false) {
+        return {
+          ok: false,
+          error: obj.error ?? "conversion rate limit exceeded",
+          code: obj.code ?? ERROR_CODES.RATE_LIMIT_EXCEEDED,
+        };
+      }
+    }
+  }
+
   const parsed = parseIntegerInput(
     rate,
     "rate",
@@ -227,7 +298,7 @@ export function applyConversionRate(
   const amount = parseIntegerInput(
     notional,
     "notional",
-    ERROR_CODES.INVALID_RATE,
+    ERROR_CODES.INVALID_AMOUNT,
     ERROR_CODES.AMOUNT_OUT_OF_RANGE
   );
   if (!amount.ok) {
@@ -237,7 +308,7 @@ export function applyConversionRate(
     return {
       ok: false,
       error: "notional cannot be negative",
-      code: ERROR_CODES.NEGATIVE_RATE,
+      code: ERROR_CODES.NEGATIVE_AMOUNT,
     };
   }
 
@@ -321,14 +392,6 @@ export interface KnownAssetConfig {
   label: string;
 }
 
-const KNOWN_ASSETS: Record<string, KnownAssetConfig> = {
-  XLM:  { ticker: "XLM",  decimals: 7, label: "Stellar Lumens" },
-  USDC: { ticker: "USDC", decimals: 7, label: "USD Coin (Stellar)" },
-  USDT: { ticker: "USDT", decimals: 7, label: "Tether (Stellar)" },
-  BTC:  { ticker: "BTC",  decimals: 7, label: "Bitcoin (Stellar)" },
-  ETH:  { ticker: "ETH",  decimals: 7, label: "Ether (Stellar)" },
-};
-
 /**
  * Result of a ticker resolution. Callers must inspect `known` before relying
  * on `config` — an unknown ticker always carries the default fallback config.
@@ -338,14 +401,15 @@ export type TickerResolution =
   | { known: false; ticker: string; config: KnownAssetConfig; fallback: true };
 
 /**
- * Default fallback configuration used for any ticker not present in
- * `KNOWN_ASSETS`. Uses 7 decimal places (Stellar-native precision) so that
- * downstream formatters produce a valid DB value even for novel token types.
+ * Default fallback configuration used for any ticker that is not part of the
+ * centralized label registry. Uses 7 decimal places (Stellar-native precision)
+ * so that downstream formatters produce a valid DB value even for novel token
+ * types.
  */
 export const DEFAULT_ASSET_FALLBACK: KnownAssetConfig = {
   ticker: "UNKNOWN",
-  decimals: 7,
-  label: "Unknown Stellar Token",
+  decimals: DEFAULT_TOKEN_DECIMALS,
+  label: DEFAULT_TOKEN_LABEL,
 };
 
 /**
@@ -363,10 +427,17 @@ export const DEFAULT_ASSET_FALLBACK: KnownAssetConfig = {
  */
 export function resolveAssetTicker(rawTicker: string): TickerResolution {
   const ticker = rawTicker.trim().toUpperCase();
-  const config = KNOWN_ASSETS[ticker];
 
-  if (config !== undefined) {
-    return { known: true, ticker, config };
+  if (isKnownTokenSymbol(ticker)) {
+    return {
+      known: true,
+      ticker,
+      config: {
+        ticker,
+        decimals: DEFAULT_TOKEN_DECIMALS,
+        label: getTokenLabel(ticker),
+      },
+    };
   }
 
   return {
@@ -374,6 +445,27 @@ export function resolveAssetTicker(rawTicker: string): TickerResolution {
     ticker: rawTicker.trim(),
     config: { ...DEFAULT_ASSET_FALLBACK, ticker: rawTicker.trim() },
     fallback: true,
+  };
+}
+
+/**
+ * Resolve the asset configuration of a token contract address, reading the
+ * symbol and the precision from the contract itself (#699).
+ */
+export async function resolveAssetForToken(
+  tokenAddress: string,
+  options?: TokenMetadataOptions
+): Promise<TickerResolution> {
+  const metadata = await resolveTokenMetadata(tokenAddress, options);
+  const ticker = metadata.symbol || DEFAULT_ASSET_FALLBACK.ticker;
+  return {
+    known: true,
+    ticker,
+    config: {
+      ticker,
+      decimals: metadata.decimals,
+      label: metadata.name || getTokenLabel(ticker),
+    },
   };
 }
 
@@ -400,28 +492,7 @@ export function resolveAssetTicker(rawTicker: string): TickerResolution {
  * formatForDb(100n, 0)          // "100"
  */
 export function formatForDb(value: bigint, decimals: number): string {
-  if (!Number.isInteger(decimals) || decimals < 0) {
-    throw new RangeError(
-      `formatForDb: decimals must be a non-negative integer, got ${decimals}`
-    );
-  }
-
-  if (decimals === 0) {
-    return value.toString();
-  }
-
-  const isNegative = value < 0n;
-  const abs = isNegative ? -value : value;
-  const scale = 10n ** BigInt(decimals);
-
-  const integerPart = abs / scale;
-  const fractionalPart = abs % scale;
-
-  // Pad fractional part with leading zeros to `decimals` width
-  const fracStr = fractionalPart.toString().padStart(decimals, "0");
-  const formatted = `${integerPart.toString()}.${fracStr}`;
-
-  return isNegative ? `-${formatted}` : formatted;
+  return formatDecimalForDb(value, decimals, { label: "formatForDb" });
 }
 
 /**
@@ -442,6 +513,19 @@ export function formatRateForDb(rate: bigint, ticker: string): string {
 }
 
 /**
+ * Format a conversion rate bigint for DB storage using the precision read
+ * from the token contract itself (#699).
+ */
+export async function formatRateForDbForToken(
+  rate: bigint,
+  tokenAddress: string,
+  options?: TokenMetadataOptions
+): Promise<string> {
+  const resolution = await resolveAssetForToken(tokenAddress, options);
+  return formatForDb(rate, resolution.config.decimals);
+}
+
+/**
  * Format a notional amount bigint for DB storage with the precision specified
  * by the asset's ticker configuration.
  *
@@ -454,6 +538,19 @@ export function formatRateForDb(rate: bigint, ticker: string): string {
  */
 export function formatNotionalForDb(notional: bigint, ticker: string): string {
   const resolution = resolveAssetTicker(ticker);
+  return formatForDb(notional, resolution.config.decimals);
+}
+
+/**
+ * Format a notional amount bigint for DB storage using the precision read
+ * from the token contract itself (#699).
+ */
+export async function formatNotionalForDbForToken(
+  notional: bigint,
+  tokenAddress: string,
+  options?: TokenMetadataOptions
+): Promise<string> {
+  const resolution = await resolveAssetForToken(tokenAddress, options);
   return formatForDb(notional, resolution.config.decimals);
 }
 
@@ -474,18 +571,6 @@ export interface ConversionRateRow {
 export type CsvExportResult =
   | { ok: true; csv: string }
   | { ok: false; error: string; code: OverflowErrorCode };
-
-/**
- * Escape a single CSV cell value.
- * Wraps the value in double-quotes if it contains a comma, double-quote, or
- * newline, and escapes embedded double-quotes by doubling them.
- */
-function escapeCsvCell(value: string): string {
-  if (/[",\r\n]/.test(value)) {
-    return `"${value.replace(/"/g, '""')}"`;
-  }
-  return value;
-}
 
 /**
  * Serialize an array of conversion-rate rows to RFC 4180-compatible CSV text.
@@ -534,8 +619,8 @@ export function exportConversionRatesToCsv(
     }
 
     const cells: string[] = [
-      escapeCsvCell(row.pair.trim()),
-      escapeCsvCell(rateCheck.value.toString()),
+      escapeCsvField(row.pair.trim()),
+      escapeCsvField(rateCheck.value.toString()),
     ];
 
     if (includeTimestamp) {
@@ -590,7 +675,7 @@ export function parseConversionRatesCsv(
     };
   }
 
-  const header = rawLines[0].split(",").map((h) => h.trim());
+  const header = parseCsvLine(rawLines[0]).map((h) => h.trim());
   const hasPair = header[0] === "pair";
   const hasRate = header[1] === "rate";
   const hasTimestamp = header[2] === "timestamp";
@@ -606,7 +691,7 @@ export function parseConversionRatesCsv(
   const rows: ConversionRateRow[] = [];
 
   for (let i = 1; i < rawLines.length; i++) {
-    const cols = rawLines[i].split(",");
+    const cols = parseCsvLine(rawLines[i]);
 
     const pair = cols[0]?.trim() ?? "";
     if (pair === "") {

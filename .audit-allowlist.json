@@ -1,0 +1,11 @@
+{
+  "_comment": "High/critical npm advisories the CI audit gate (scripts/audit-gate.mjs) tolerates. Each entry needs a reason; remove it once the fix lands.",
+  "advisories": {
+    "GHSA-82x6-q7mm-w9cf": "toml via @stellar/stellar-sdk 15 (parses SEP stellar.toml, unused by this service); fixed only in stellar-sdk 17, a major upgrade.",
+    "GHSA-v5mp-jgw5-2x6j": "toml via @stellar/stellar-sdk 15 (parses SEP stellar.toml, unused by this service); fixed only in stellar-sdk 17, a major upgrade.",
+    "GHSA-4qx8-w7c3-pj3p": "toml via @stellar/stellar-sdk 15 (parses SEP stellar.toml, unused by this service); fixed only in stellar-sdk 17, a major upgrade.",
+    "GHSA-9j65-hcg3-gc64": "toml via @stellar/stellar-sdk 15 (parses SEP stellar.toml, unused by this service); fixed only in stellar-sdk 17, a major upgrade.",
+    "GHSA-9qmh-m7c6-f92p": "toml via @stellar/stellar-sdk 15 (parses SEP stellar.toml, unused by this service); fixed only in stellar-sdk 17, a major upgrade.",
+    "GHSA-mrhx-c7xc-m3w5": "zod 3: memory exhaustion on oversized constrained collections. Request bodies are capped by express.json's 100kb limit; the fix is zod 4, a major migration of every schema."
+  }
+}

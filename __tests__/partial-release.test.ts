@@ -1,9 +1,10 @@
 import { jest } from "@jest/globals";
+import { globalCors } from "../src/middleware/global-cors.js";
 import request from "supertest";
 import express from "express";
-import { autoAuth, TEST_API_KEY } from "./helpers/api-key-helper.js";
+import { autoAuth } from "./helpers/api-key-helper.js";
 
-const VALID_CONTRACT = "CDD5WKK3WT3QVKXMXTJNDIXE4T73FK6GGXDSD6UTJAH6YYZU52SQ4MUH";
+const VALID_CONTRACT = "CARZQMYKDGA4TTIE2XBDJ42EX27VYLLJGGG4WGUIXXWIVHPDTX3UCLJA";
 const VALID_ADDRESS = "GAODBHVR63Z56MVQRBEJSYM2H5423LJ4WAPUUBOFG4JYY72S6ROKVZRX";
 
 const mockGetAccount = jest.fn<() => Promise<unknown>>();
@@ -23,6 +24,8 @@ const { resetPartialReleaseRateLimitBuckets } = await import(
 
 function buildApp() {
   const app = express();
+  app.use(globalCors());
+
   app.use(express.json());
   app.use(autoAuth);
   app.use("/api/jobs", router);
@@ -33,17 +36,11 @@ const ENDPOINT = `/api/jobs/${VALID_CONTRACT}/milestones/0/partial-release`;
 const VALID_BODY = { amount: "100", sourceAddress: VALID_ADDRESS };
 
 describe("POST /api/jobs/:contractId/milestones/:index/partial-release – CORS and security headers", () => {
-  it("rejects requests from unauthorized origins", async () => {
+  it("withholds CORS headers for requests from unauthorized origins", async () => {
     const res = await request(buildApp())
       .post(ENDPOINT)
       .set("Origin", "http://malicious.com")
-      .send(VALID_BODY)
-      .expect(403);
-
-    expect(res.body).toEqual({
-      success: false,
-      error: "Origin not allowed by CORS policy",
-    });
+      .send(VALID_BODY);
     expect(res.headers["access-control-allow-origin"]).toBeUndefined();
   });
 
@@ -53,7 +50,7 @@ describe("POST /api/jobs/:contractId/milestones/:index/partial-release – CORS 
       sequenceNumber: () => "1",
       incrementSequenceNumber: () => {},
     });
-    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==" });
+    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==", hash: () => Buffer.alloc(32, 0xaa), fee: "100" });
 
     const res = await request(buildApp())
       .post(ENDPOINT)
@@ -62,8 +59,6 @@ describe("POST /api/jobs/:contractId/milestones/:index/partial-release – CORS 
       .expect(200);
 
     expect(res.headers["access-control-allow-origin"]).toBe("http://localhost:3000");
-    expect(res.headers["access-control-allow-methods"]).toContain("POST");
-    expect(res.headers["access-control-allow-methods"]).toContain("OPTIONS");
     expect(res.body.success).toBe(true);
   });
 
@@ -73,7 +68,7 @@ describe("POST /api/jobs/:contractId/milestones/:index/partial-release – CORS 
       sequenceNumber: () => "1",
       incrementSequenceNumber: () => {},
     });
-    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==" });
+    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==", hash: () => Buffer.alloc(32, 0xaa), fee: "100" });
 
     const res = await request(buildApp())
       .post(ENDPOINT)
@@ -302,21 +297,21 @@ describe("POST /api/jobs/:contractId/milestones/:index/partial-release", () => {
   // ── success path ──────────────────────────────────────────────────────────
 
   it("returns 200 with XDR on valid input", async () => {
-    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==" });
+    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==", hash: () => Buffer.alloc(32, 0xaa), fee: "100" });
     const res = await request(buildApp())
       .post(ENDPOINT)
       .send(VALID_BODY)
       .expect(200);
-    expect(res.body).toEqual({ success: true, xdr: "AAAAAQ==" });
+    expect(res.body.success).toBe(true); expect(res.body.data.xdr).toBe("AAAAAQ=="); expect(typeof res.body.data.hash).toBe('string');
   });
 
-  it("accepts amount provided as a JSON number", async () => {
-    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==" });
+  it("rejects amount provided as a JSON number (#678)", async () => {
     const res = await request(buildApp())
       .post(ENDPOINT)
       .send({ amount: 100, sourceAddress: VALID_ADDRESS })
-      .expect(200);
-    expect(res.body.success).toBe(true);
+      .expect(400);
+    expect(res.body.fields).toEqual({ amount: "amount must be a string of digits" });
+    expect(mockGetAccount).not.toHaveBeenCalled();
   });
 
   // ── error path ────────────────────────────────────────────────────────────
@@ -396,7 +391,7 @@ describe("POST /api/jobs/:contractId/milestones/:index/partial-release", () => {
 
     beforeEach(() => {
       process.env.API_KEY = "secret-test-key";
-      mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==" });
+      mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==", hash: () => Buffer.alloc(32, 0xaa), fee: "100" });
     });
 
     afterEach(() => {
@@ -412,7 +407,7 @@ describe("POST /api/jobs/:contractId/milestones/:index/partial-release", () => {
         .post(ENDPOINT)
         .send(VALID_BODY)
         .expect(200);
-      expect(res.body).toEqual({ success: true, xdr: "AAAAAQ==" });
+      expect(res.body.success).toBe(true); expect(res.body.data.xdr).toBe("AAAAAQ=="); expect(typeof res.body.data.hash).toBe('string');
     });
 
     it("ignores a wrong x-api-key header instead of rejecting it", async () => {
@@ -421,7 +416,7 @@ describe("POST /api/jobs/:contractId/milestones/:index/partial-release", () => {
         .set("x-api-key", "wrong-key")
         .send(VALID_BODY)
         .expect(200);
-      expect(res.body).toEqual({ success: true, xdr: "AAAAAQ==" });
+      expect(res.body.success).toBe(true); expect(res.body.data.xdr).toBe("AAAAAQ=="); expect(typeof res.body.data.hash).toBe('string');
     });
 
     it("returns 200 when API_KEY is set and correct key is provided", async () => {
@@ -439,7 +434,7 @@ describe("POST /api/jobs/:contractId/milestones/:index/partial-release", () => {
         .post(ENDPOINT)
         .send(VALID_BODY)
         .expect(200);
-      expect(res.body).toEqual({ success: true, xdr: "AAAAAQ==" });
+      expect(res.body.success).toBe(true); expect(res.body.data.xdr).toBe("AAAAAQ=="); expect(typeof res.body.data.hash).toBe('string');
     });
   });
 
@@ -453,7 +448,7 @@ describe("POST /api/jobs/:contractId/milestones/:index/partial-release", () => {
       resetPartialReleaseRateLimitBuckets();
       process.env.PARTIAL_RELEASE_RATE_MAX = "3";
       process.env.PARTIAL_RELEASE_RATE_WINDOW_MS = "60000";
-      mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==" });
+      mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==", hash: () => Buffer.alloc(32, 0xaa), fee: "100" });
     });
 
     afterEach(() => {
@@ -504,7 +499,7 @@ describe("POST /api/jobs/:contractId/milestones/:index/partial-release", () => {
   // --- ISSUE #116: Node-Cache in-memory caching ---
   describe("Node-Cache in-memory caching (Issue #116)", () => {
     beforeEach(() => {
-      mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==" });
+      mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==", hash: () => Buffer.alloc(32, 0xaa), fee: "100" });
     });
 
     it("serves concurrent requests from the in-flight cache, hitting Soroban only once", async () => {
@@ -521,14 +516,14 @@ describe("POST /api/jobs/:contractId/milestones/:index/partial-release", () => {
       const req2 = request(app).post(ENDPOINT).send(VALID_BODY);
 
       await new Promise((r) => setTimeout(r, 50));
-      resolvePrepare!({ toXDR: () => "AAAAAQ==" });
+      resolvePrepare!({ toXDR: () => "AAAAAQ==", hash: () => Buffer.alloc(32, 0xaa), fee: "100" });
 
       const [res1, res2] = await Promise.all([req1, req2]);
 
       expect(res1.status).toBe(200);
       expect(res2.status).toBe(200);
-      expect(res1.body).toEqual({ success: true, xdr: "AAAAAQ==" });
-      expect(res2.body).toEqual({ success: true, xdr: "AAAAAQ==" });
+      expect(res1.body.success).toBe(true); expect(res1.body.data.xdr).toBe("AAAAAQ=="); expect(typeof res1.body.data.hash).toBe("string");
+      expect(res2.body.success).toBe(true); expect(res2.body.data.xdr).toBe("AAAAAQ=="); expect(typeof res2.body.data.hash).toBe("string");
       expect(mockPrepareTransaction).toHaveBeenCalledTimes(1);
     });
 

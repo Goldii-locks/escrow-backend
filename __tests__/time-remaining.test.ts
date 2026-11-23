@@ -1,22 +1,30 @@
 import request from "supertest";
+import { globalCors } from "../src/middleware/global-cors.js";
 import express from "express";
 import Database from "better-sqlite3";
 import { initSchema, setDb } from "../src/indexer/db.js";
 import { resetTimeRemainingRateLimitBuckets } from "../src/middleware/job-contract-rate-limit.js";
-import { getAllowedOrigins } from "../src/middleware/job-contract-security.js";
+
 
 const VALID_CONTRACT =
-  "CDD5WKK3WT3QVKXMXTJNDIXE4T73FK6GGXDSD6UTJAH6YYZU52SQ4MUH";
+  "CARZQMYKDGA4TTIE2XBDJ42EX27VYLLJGGG4WGUIXXWIVHPDTX3UCLJA";
 
 let testDb: Database.Database;
 let app: express.Express;
 
 beforeAll(async () => {
+  // These tests cover validation, CORS and rate limiting, not the contract
+  // read itself. Point the RPC at a closed local port so the simulation
+  // behind each request fails at once instead of reaching testnet (#616:
+  // reads no longer stop at a getAccount lookup first).
+  process.env.SOROBAN_RPC_URL = "https://127.0.0.1:9";
   testDb = new Database(":memory:");
   setDb(testDb);
   initSchema();
   const { default: router } = await import("../src/routes/jobs.js");
   app = express();
+  app.use(globalCors());
+
   app.use(express.json());
   app.use("/api/jobs", router);
 });
@@ -71,16 +79,10 @@ describe("GET /api/jobs/:contractId/milestones/:index/time-remaining", () => {
     });
 
     describe("CORS validation", () => {
-      it("rejects requests from unauthorized origins with 403", async () => {
+      it("withholds CORS headers for requests from unauthorized origins", async () => {
         const res = await request(app)
           .get(`/api/jobs/${VALID_CONTRACT}/milestones/0/time-remaining`)
-          .set("Origin", "https://evil.example.com")
-          .expect(403);
-
-        expect(res.body).toEqual({
-          success: false,
-          error: "Origin not allowed by CORS policy",
-        });
+          .set("Origin", "https://evil.example.com");
         expect(res.headers["access-control-allow-origin"]).toBeUndefined();
       });
 
@@ -100,17 +102,15 @@ describe("GET /api/jobs/:contractId/milestones/:index/time-remaining", () => {
 
       it("allows GET and OPTIONS methods in CORS headers", async () => {
         const res = await request(app)
-          .get(`/api/jobs/${VALID_CONTRACT}/milestones/0/time-remaining`)
+          .options(`/api/jobs/${VALID_CONTRACT}/milestones/0/time-remaining`)
           .set("Origin", "https://trusted.example.com");
 
-        if (res.status !== 403) {
-          expect(res.headers["access-control-allow-methods"]).toContain("GET");
-        }
+        expect(res.headers["access-control-allow-methods"]).toContain("GET");
       });
 
       it("allows Content-Type and Authorization headers in CORS", async () => {
         const res = await request(app)
-          .get(`/api/jobs/${VALID_CONTRACT}/milestones/0/time-remaining`)
+          .options(`/api/jobs/${VALID_CONTRACT}/milestones/0/time-remaining`)
           .set("Origin", "https://trusted.example.com");
 
         if (res.status !== 403) {

@@ -1,6 +1,5 @@
 import {
   MAX_SAFE_DIGITS,
-  MAX_INTERMEDIATE_DIGITS,
   DEFAULT_TAX_SCALE,
   ERROR_CODES,
   validateGrossAmount,

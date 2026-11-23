@@ -1,4 +1,14 @@
-import { computeBackoffMs, withRetry } from "../src/indexer/rpc-poller-client.js";
+import {
+  computeBackoffMs,
+  withRetry,
+  parseRetryAfterMs,
+  getRetryAfterMs,
+  getErrorStatusCode,
+  isRetryableError,
+  RpcPollerClient,
+  type RpcServerLike,
+} from "../src/indexer/rpc-poller-client.js";
+
 import { jest } from "@jest/globals";
 import Database from "better-sqlite3";
 import {
@@ -21,7 +31,7 @@ import {
   initializeSyncRangesTable,
   getSyncedRanges,
   countEventsInRange,
-} from "../src/indexer/duplicate-prevention.js";
+} from "../src/indexer/db.js";
 
 describe("RpcPollerClient – exponential backoff retry", () => {
   describe("computeBackoffMs", () => {
@@ -46,6 +56,15 @@ describe("RpcPollerClient – exponential backoff retry", () => {
       expect(computeBackoffMs(5, config)).toBe(30000);
       expect(computeBackoffMs(10, config)).toBe(30000);
       expect(computeBackoffMs(100, config)).toBe(30000);
+    });
+
+    it("asserts the backoff sequence never exceeds maxBackoffMs across a full sequence", () => {
+      const maxBackoffMs = 5000;
+      const testConfig = { initialBackoffMs: 200, backoffMultiplier: 2, maxBackoffMs };
+      for (let attempt = 0; attempt < 50; attempt++) {
+        const delay = computeBackoffMs(attempt, testConfig);
+        expect(delay).toBeLessThanOrEqual(maxBackoffMs);
+      }
     });
 
     it("respects custom multiplier", () => {
@@ -177,6 +196,172 @@ describe("RpcPollerClient – exponential backoff retry", () => {
       ).rejects.toThrow("string error");
       expect(calls).toBe(1);
     });
+
+    it("retries 429 and 503 status errors (#688)", async () => {
+      for (const status of [429, 503]) {
+        let calls = 0;
+        const fn = async () => {
+          calls++;
+          if (calls === 1) {
+            const err = new Error(`Request failed with status code ${status}`) as any;
+            err.status = status;
+            throw err;
+          }
+          return "recovered";
+        };
+        const result = await withRetry(
+          fn,
+          { maxRetries: 3, initialBackoffMs: 1, maxBackoffMs: 5 },
+          "test"
+        );
+        expect(result).toBe("recovered");
+        expect(calls).toBe(2);
+      }
+    });
+
+    it("honours Retry-After without exceeding maxBackoffMs (#688)", () => {
+      expect(parseRetryAfterMs("2")).toBe(2000);
+      expect(parseRetryAfterMs(0)).toBe(0);
+      expect(parseRetryAfterMs("not-a-date")).toBeNull();
+      expect(
+        getRetryAfterMs({ response: { headers: { "Retry-After": "3" } } })
+      ).toBe(3000);
+      expect(
+        getRetryAfterMs({ response: { headers: { "retry-after": "1" } } })
+      ).toBe(1000);
+      expect(getErrorStatusCode({ status: 429 })).toBe(429);
+      expect(isRetryableError(new Error("Request failed with status code 429"))).toBe(true);
+      expect(isRetryableError(new Error("Request failed with status code 503"))).toBe(true);
+    });
+
+    it("recovers through RpcPollerClient.getEvents after two 429s (#688)", async () => {
+      let calls = 0;
+      const server = {
+        getLatestLedger: async () => ({ sequence: 1 }),
+        getEvents: async () => {
+          calls++;
+          if (calls <= 2) {
+            const err = new Error("Request failed with status code 429") as any;
+            err.status = 429;
+            err.response = { status: 429, headers: { "Retry-After": "0" } };
+            throw err;
+          }
+          return { events: [], cursor: undefined };
+        },
+      };
+      const client = new RpcPollerClient("http://localhost", {
+        server: server as any,
+        maxRetries: 5,
+        initialBackoffMs: 1,
+        maxBackoffMs: 5,
+      });
+      const result = await client.getEvents({ startLedger: 1, limit: 10 });
+      expect(result.events).toEqual([]);
+      expect(calls).toBe(3);
+    });
+
+    it("resets backoff progression after a success", async () => {
+      // First operation fails once then succeeds
+      let firstOpCalls = 0;
+      await withRetry(
+        async () => {
+          firstOpCalls++;
+          if (firstOpCalls === 1) throw new Error("ETIMEDOUT");
+          return "ok1";
+        },
+        { maxRetries: 3, initialBackoffMs: 10 },
+        "test"
+      );
+      expect(firstOpCalls).toBe(2);
+
+      // Second operation should start fresh from attempt 0
+      let secondOpCalls = 0;
+      await withRetry(
+        async () => {
+          secondOpCalls++;
+          return "ok2";
+        },
+        { maxRetries: 3, initialBackoffMs: 10 },
+        "test"
+      );
+      expect(secondOpCalls).toBe(1);
+    });
+  });
+
+  describe("isRetryableError error classifier (#674)", () => {
+    it("returns false for falsy errors", () => {
+      expect(isRetryableError(null)).toBe(false);
+      expect(isRetryableError(undefined)).toBe(false);
+      expect(isRetryableError("")).toBe(false);
+    });
+
+    it("classifies network errors (ECONNRESET, ETIMEDOUT, ECONNREFUSED) as retryable", () => {
+      expect(isRetryableError(new Error("ECONNRESET"))).toBe(true);
+      expect(isRetryableError({ code: "ECONNRESET" })).toBe(true);
+      expect(isRetryableError(new Error("ETIMEDOUT"))).toBe(true);
+      expect(isRetryableError({ code: "ETIMEDOUT" })).toBe(true);
+      expect(isRetryableError(new Error("connect ECONNREFUSED 127.0.0.1:8000"))).toBe(true);
+      expect(isRetryableError({ code: "ECONNREFUSED" })).toBe(true);
+    });
+
+    it("classifies AbortError as retryable", () => {
+      const abortErr = new Error("The user aborted a request.");
+      abortErr.name = "AbortError";
+      expect(isRetryableError(abortErr)).toBe(true);
+      expect(isRetryableError({ name: "AbortError" })).toBe(true);
+    });
+
+    it("classifies HTTP 429, 500, 502, 503 as retryable", () => {
+      expect(isRetryableError(new Error("Request failed with status 429"))).toBe(true);
+      expect(isRetryableError({ status: 429 })).toBe(true);
+      expect(isRetryableError({ statusCode: 429 })).toBe(true);
+      expect(isRetryableError(new Error("Internal Server Error status 500"))).toBe(true);
+      expect(isRetryableError({ status: 500 })).toBe(true);
+      expect(isRetryableError({ statusCode: 502 })).toBe(true);
+      expect(isRetryableError(new Error("Service Unavailable status 503"))).toBe(true);
+      expect(isRetryableError({ status: 503 })).toBe(true);
+      expect(isRetryableError({ response: { status: 504 } })).toBe(true);
+    });
+
+    it("classifies HTTP 400 and other 4xx client errors as NOT retryable", () => {
+      expect(isRetryableError(new Error("Request failed with status 400"))).toBe(false);
+      expect(isRetryableError({ status: 400 })).toBe(false);
+      expect(isRetryableError({ statusCode: 404 })).toBe(false);
+      expect(isRetryableError({ status: 422 })).toBe(false);
+    });
+
+    it("does NOT retry JSON-RPC -32602 invalid params errors", () => {
+      expect(isRetryableError(new Error('JSON-RPC error -32602: "invalid params"'))).toBe(false);
+      expect(isRetryableError(new Error('Rpc error: invalid parameters ... illegal base64 data'))).toBe(false);
+      expect(isRetryableError({ code: -32602, message: "Invalid params" })).toBe(false);
+      expect(isRetryableError({ error: { code: -32602, message: "Invalid params" } })).toBe(false);
+    });
+  });
+
+  describe("RpcPollerClient branch coverage additions (#674)", () => {
+    it("underlyingServer returns the wrapped RPC server", () => {
+      const stub = {
+        getLatestLedger: async () => ({ sequence: 100 }),
+        getEvents: async () => ({ events: [] }),
+      };
+      const client = new RpcPollerClient("https://rpc.invalid", { server: stub as unknown as RpcServerLike });
+      expect(client.underlyingServer).toBe(stub);
+      expect(client.rpcServer).toBe(stub);
+    });
+
+    it("delegates getLatestLedger and getEvents to the server with retry", async () => {
+      const stub = {
+        getLatestLedger: async () => ({ sequence: 12345 }),
+        getEvents: async (params: any) => ({ events: [], latestLedger: 12345, params }),
+      };
+      const client = new RpcPollerClient("https://rpc.invalid", { server: stub as unknown as RpcServerLike });
+      const ledgerRes = await client.getLatestLedger();
+      expect(ledgerRes.sequence).toBe(12345);
+
+      const eventsRes = await client.getEvents({ startLedger: 100 });
+      expect(eventsRes.latestLedger).toBe(12345);
+    });
+
   });
 });
 
@@ -410,5 +595,102 @@ describe("RpcPollerClient – database transaction isolation", () => {
       const subs = testDb.prepare("SELECT COUNT(*) AS cnt FROM webhook_subscriptions").get() as { cnt: number };
       expect(subs.cnt).toBe(0);
     });
+  });
+});
+
+describe("RPC retry jitter (#947)", () => {
+  const config = {
+    initialBackoffMs: 1000,
+    backoffMultiplier: 2,
+    maxBackoffMs: 30000,
+  };
+
+  function seeded(values: number[]): () => number {
+    let index = 0;
+    return () => values[index++ % values.length];
+  }
+
+  it("applies full jitter within [0, deterministic cap]", () => {
+    for (const attempt of [0, 1, 2, 5, 10]) {
+      const cap = Math.min(1000 * Math.pow(2, attempt), 30000);
+      expect(computeBackoffMs(attempt, config, seeded([0]))).toBe(0);
+      expect(computeBackoffMs(attempt, config, seeded([0.5]))).toBe(cap / 2);
+      expect(computeBackoffMs(attempt, config, seeded([1]))).toBe(cap);
+      expect(computeBackoffMs(attempt, config, seeded([0.999999]))).toBeLessThanOrEqual(cap);
+    }
+  });
+
+  it("clamps out-of-range and non-finite samples", () => {
+    expect(computeBackoffMs(0, config, () => -1)).toBe(0);
+    expect(computeBackoffMs(0, config, () => 2)).toBe(1000);
+    expect(computeBackoffMs(0, config, () => Number.NaN)).toBe(1000);
+  });
+
+  it("keeps the deterministic upper bound by default", () => {
+    expect(computeBackoffMs(0, config)).toBe(1000);
+    expect(computeBackoffMs(1, config)).toBe(2000);
+    expect(computeBackoffMs(6, config)).toBe(30000);
+  });
+
+  it("uses the injected random source in withRetry", async () => {
+    jest.useFakeTimers();
+    try {
+      const samples: number[] = [];
+      let calls = 0;
+      const result = withRetry(
+        async () => {
+          calls++;
+          if (calls === 1) throw new Error("status 429");
+          return "ok";
+        },
+        {
+          maxRetries: 1,
+          initialBackoffMs: 1000,
+          maxBackoffMs: 5000,
+          random: () => {
+            samples.push(0.25);
+            return 0.25;
+          },
+        },
+        "jitter-test"
+      );
+      await jest.advanceTimersByTimeAsync(250);
+      expect(await result).toBe("ok");
+      expect(samples).toEqual([0.25]);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it("keeps Retry-After as a lower bound even when jitter returns zero", async () => {
+    jest.useFakeTimers();
+    try {
+      let calls = 0;
+      const throttled = Object.assign(new Error("status 429"), {
+        status: 429,
+        response: { headers: { "Retry-After": "1" } },
+      });
+      const result = withRetry(
+        async () => {
+          calls++;
+          if (calls === 1) throw throttled;
+          return "ok";
+        },
+        {
+          maxRetries: 1,
+          initialBackoffMs: 1000,
+          maxBackoffMs: 5000,
+          random: () => 0,
+        },
+        "jitter-retry-after-test"
+      );
+      await jest.advanceTimersByTimeAsync(999);
+      expect(calls).toBe(1);
+      await jest.advanceTimersByTimeAsync(1);
+      expect(await result).toBe("ok");
+      expect(calls).toBe(2);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });

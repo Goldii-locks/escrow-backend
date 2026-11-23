@@ -11,11 +11,21 @@ import {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 let dbInstance: Database.Database | null = null;
+let dbFilePath: string | null = null;
+let lastPreMigrationBackupPath: string | null = null;
+
+const MAX_PRE_MIGRATION_BACKUPS = 2;
+
+export function resolveDbFilePath(): string {
+  if (dbFilePath) return dbFilePath;
+  dbFilePath = process.env.DB_PATH || path.join(__dirname, "../../data/escrow.db");
+  return dbFilePath;
+}
 
 export function getDb(): Database.Database {
   if (dbInstance) return dbInstance;
 
-  const dbPath = process.env.DB_PATH || path.join(__dirname, "../../data/escrow.db");
+  const dbPath = resolveDbFilePath();
   const dataDir = path.dirname(dbPath);
   if (!fs.existsSync(dataDir)) {
     fs.mkdirSync(dataDir, { recursive: true });
@@ -25,8 +35,12 @@ export function getDb(): Database.Database {
   return dbInstance;
 }
 
-export function setDb(newDb: Database.Database) {
+// For tests - allows injecting an in-memory db
+export function setDb(newDb: Database.Database, filePath?: string | null) {
   dbInstance = newDb;
+  if (filePath !== undefined) {
+    dbFilePath = filePath;
+  }
 }
 
 /**
@@ -38,15 +52,69 @@ export function setDb(newDb: Database.Database) {
  * lets test teardown release it.
  */
 export function closeDb(): void {
-  if (!dbInstance) return;
+  if (dbInstance) {
+    try {
+      dbInstance.close();
+    } catch (err) {
+      logger.warn("Failed to close database connection", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      dbInstance = null;
+    }
+  }
+  dbFilePath = null;
+  lastPreMigrationBackupPath = null;
+}
+
+export function getLastPreMigrationBackupPath(): string | null {
+  return lastPreMigrationBackupPath;
+}
+
+function prunePreMigrationBackups(dbPath: string): void {
   try {
-    dbInstance.close();
+    const dir = path.dirname(dbPath);
+    const base = path.basename(dbPath);
+    const backups = fs
+      .readdirSync(dir)
+      .filter((name) => name.startsWith(`${base}.pre-v`) && name.endsWith(".bak"))
+      .map((name) => {
+        const full = path.join(dir, name);
+        return { full, mtime: fs.statSync(full).mtimeMs };
+      })
+      .sort((a, b) => b.mtime - a.mtime);
+    for (const stale of backups.slice(MAX_PRE_MIGRATION_BACKUPS)) {
+      fs.rmSync(stale.full, { force: true });
+    }
   } catch (err) {
-    logger.warn("Failed to close database connection", {
+    logger.warn("Failed to prune pre-migration backups", {
       error: err instanceof Error ? err.message : String(err),
     });
-  } finally {
-    dbInstance = null;
+  }
+}
+
+function createPreMigrationBackup(database: Database.Database, nextVersion: number): void {
+  const dbPath = resolveDbFilePath();
+  if (!dbPath || dbPath === ":memory:" || path.basename(dbPath) === ":memory:") {
+    return;
+  }
+  const backupPath = `${dbPath}.pre-v${nextVersion}.bak`;
+  try {
+    // Synchronous snapshot: better-sqlite3's backup() is async and would race
+    // the migrations it is meant to protect.
+    fs.writeFileSync(backupPath, database.serialize());
+    lastPreMigrationBackupPath = backupPath;
+    logger.info("Created pre-migration SQLite backup", {
+      backupPath,
+      nextVersion,
+    });
+    prunePreMigrationBackups(dbPath);
+  } catch (err) {
+    logger.warn("Failed to create pre-migration SQLite backup", {
+      backupPath,
+      nextVersion,
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
 }
 
@@ -63,6 +131,60 @@ const inFlightJobsByWalletRequests = new Map<string, Promise<PaginatedJobs>>();
 export function resetJobsByWalletCache(): void {
   jobsByWalletCache.flushAll();
   inFlightJobsByWalletRequests.clear();
+}
+
+/**
+ * Invalidate jobs-by-wallet cache entries for specific addresses, or all entries
+ * if no addresses are passed.
+ */
+export function invalidateJobsByWalletCache(addresses?: string[]): void {
+  if (!addresses || addresses.length === 0) {
+    resetJobsByWalletCache();
+    return;
+  }
+  const allKeys = jobsByWalletCache.keys();
+  for (const rawAddress of addresses) {
+    if (!rawAddress || typeof rawAddress !== "string") continue;
+    const prefix = `${rawAddress.trim().toLowerCase()}::`;
+    for (const key of allKeys) {
+      if (key.startsWith(prefix)) {
+        jobsByWalletCache.del(key);
+      }
+    }
+    // Also remove from inFlightJobsByWalletRequests if pending
+    for (const key of inFlightJobsByWalletRequests.keys()) {
+      if (key.startsWith(prefix)) {
+        inFlightJobsByWalletRequests.delete(key);
+      }
+    }
+  }
+}
+
+function extractAddressesFromEvents(events: EventRow[]): string[] {
+  const addresses = new Set<string>();
+  for (const ev of events) {
+    const type = (ev.eventType || "").toLowerCase();
+    if (
+      type === "init" ||
+      type === "initialized" ||
+      type === "funded" ||
+      type === "dispute_raised" ||
+      type === "dispute_resolved" ||
+      type === "partial_release" ||
+      type === "approved" ||
+      type === "delivered"
+    ) {
+      try {
+        const data = JSON.parse(ev.dataJson) as Record<string, unknown>;
+        if (typeof data.client === "string") addresses.add(data.client);
+        if (typeof data.freelancer === "string") addresses.add(data.freelancer);
+        if (typeof data.arbiter === "string") addresses.add(data.arbiter);
+      } catch {
+        // Ignore unparseable data_json
+      }
+    }
+  }
+  return Array.from(addresses);
 }
 
 /**
@@ -85,7 +207,8 @@ export const INDEXER_RUNNER_INDEXES = {
 interface Migration {
   version: number;
   description: string;
-  up: string;
+  /** SQL to execute, or a function for steps that must inspect the schema. */
+  up: string | ((database: Database.Database) => void);
 }
 
 const MIGRATIONS: Migration[] = [
@@ -284,6 +407,229 @@ const MIGRATIONS: Migration[] = [
       ALTER TABLE monitored_contracts ADD COLUMN start_ledger INTEGER NOT NULL DEFAULT 0;
     `,
   },
+  {
+    version: 12,
+    description: "webhook delivery outbox with retry state (#611)",
+    up: `
+      CREATE TABLE IF NOT EXISTS webhook_deliveries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        subscription_id INTEGER NOT NULL,
+        event_id INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        attempts INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        next_attempt_at INTEGER,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(subscription_id, event_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_retry
+        ON webhook_deliveries (status, next_attempt_at);
+
+      CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_event
+        ON webhook_deliveries (event_id);
+    `,
+  },
+  {
+    version: 13,
+    description: "dedupe events by RPC event id (#607)",
+    up: `
+      CREATE TABLE events_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        contract_id TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        ledger_sequence INTEGER NOT NULL,
+        timestamp INTEGER,
+        data_json TEXT NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        event_id TEXT,
+        UNIQUE(event_id)
+      );
+      INSERT INTO events_new
+        (id, contract_id, event_type, ledger_sequence, timestamp, data_json, created_at, event_id)
+        SELECT id, contract_id, event_type, ledger_sequence, timestamp, data_json, created_at,
+          ('legacy-' || id)
+        FROM events;
+      DROP TABLE events;
+      ALTER TABLE events_new RENAME TO events;
+
+      CREATE INDEX IF NOT EXISTS idx_events_contract_id
+        ON events (contract_id);
+      CREATE INDEX IF NOT EXISTS idx_events_ledger_sequence
+        ON events (ledger_sequence);
+      CREATE INDEX IF NOT EXISTS idx_events_contract_ledger
+        ON events (contract_id, ledger_sequence);
+      CREATE INDEX IF NOT EXISTS idx_events_contract_type
+        ON events (contract_id, event_type);
+      CREATE INDEX IF NOT EXISTS idx_events_ledger_event_type
+        ON events (ledger_sequence, event_type);
+      CREATE INDEX IF NOT EXISTS idx_events_created_at
+        ON events (created_at);
+      CREATE INDEX IF NOT EXISTS idx_events_contract_type_ledger
+        ON events (contract_id, event_type, ledger_sequence);
+      CREATE INDEX IF NOT EXISTS idx_events_created_at_ledger
+        ON events (created_at, ledger_sequence);
+      CREATE INDEX IF NOT EXISTS idx_events_ledger_created_at
+        ON events (ledger_sequence, created_at);
+      CREATE INDEX IF NOT EXISTS idx_events_event_type
+        ON events (event_type);
+      CREATE INDEX IF NOT EXISTS idx_events_contract_event_type
+        ON events (contract_id, event_type);
+    `,
+  },
+  {
+    version: 14,
+    description: "create job_drafts table (#667)",
+    up: `
+      CREATE TABLE IF NOT EXISTS job_drafts (
+        id TEXT PRIMARY KEY,
+        creator_address TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        expires_at DATETIME
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_job_drafts_creator
+        ON job_drafts (creator_address);
+      CREATE INDEX IF NOT EXISTS idx_job_drafts_expires_at
+        ON job_drafts (expires_at);
+    `,
+  },
+  {
+    version: 15,
+    description: "RPC node failover tables (#531)",
+    // Mirrors initializeNodeHealthTables() in failover-recovery.ts.
+    up: `
+      CREATE TABLE IF NOT EXISTS rpc_node_health (
+        node_url TEXT PRIMARY KEY,
+        is_healthy INTEGER NOT NULL DEFAULT 1,
+        failure_count INTEGER NOT NULL DEFAULT 0,
+        last_failure_at INTEGER,
+        last_success_at INTEGER,
+        next_retry_at INTEGER,
+        backoff_duration_ms INTEGER NOT NULL DEFAULT 1000,
+        consecutive_successes INTEGER NOT NULL DEFAULT 0
+      );
+
+      CREATE TABLE IF NOT EXISTS failover_state (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        active_node_url TEXT,
+        total_failovers INTEGER NOT NULL DEFAULT 0,
+        last_failover_at INTEGER
+      );
+
+      CREATE TABLE IF NOT EXISTS node_failure_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        node_url TEXT NOT NULL,
+        error_message TEXT,
+        retry_count INTEGER NOT NULL DEFAULT 0,
+        recovery_attempt_at INTEGER,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (node_url) REFERENCES rpc_node_health(node_url)
+      );
+
+      INSERT OR IGNORE INTO failover_state (id, active_node_url, total_failovers, last_failover_at)
+        VALUES (1, NULL, 0, NULL);
+    `,
+  },
+  {
+    version: 16,
+    description: "store the transaction hash with each indexed event (#700)",
+    // The UI needs the transaction hash to link an event to a block explorer.
+    // event_id already exists since migration 13 (#607). Rows written before
+    // this migration keep a NULL tx_hash.
+    up: `
+      ALTER TABLE events ADD COLUMN tx_hash TEXT;
+
+      CREATE INDEX IF NOT EXISTS idx_events_tx_hash
+        ON events (tx_hash);
+    `,
+  },
+  {
+    version: 17,
+    description: "webhook subscription failure tracking and auto-disable (#701)",
+    // A subscription whose endpoint is permanently dead used to be retried
+    // for every matching event, forever. The consecutive failure counter
+    // lets the delivery loop disable such a subscription after
+    // WEBHOOK_DISABLE_AFTER failures.
+    // webhook_subscriptions is created by the bootstrap block in
+    // runMigrations(), not by a migration, so it can outlive a replay of the
+    // migration list. Add only the columns that are missing.
+    up: (database) => {
+      const columns = new Set(
+        (
+          database.prepare("PRAGMA table_info(webhook_subscriptions)").all() as {
+            name: string;
+          }[]
+        ).map((c) => c.name),
+      );
+      if (!columns.has("consecutive_failures")) {
+        database.exec(
+          "ALTER TABLE webhook_subscriptions ADD COLUMN consecutive_failures INTEGER NOT NULL DEFAULT 0",
+        );
+      }
+      if (!columns.has("disabled_at")) {
+        database.exec("ALTER TABLE webhook_subscriptions ADD COLUMN disabled_at DATETIME");
+      }
+      if (!columns.has("last_error")) {
+        database.exec("ALTER TABLE webhook_subscriptions ADD COLUMN last_error TEXT");
+      }
+      database.exec(`
+        CREATE INDEX IF NOT EXISTS idx_webhook_subscriptions_disabled_at
+          ON webhook_subscriptions (disabled_at);
+      `);
+    },
+  },
+  {
+    version: 18,
+    description: "create job_participants table and backfill init events (#640)",
+    up: `
+      CREATE TABLE IF NOT EXISTS job_participants (
+        contract_id TEXT NOT NULL,
+        address TEXT NOT NULL,
+        role TEXT NOT NULL,
+        PRIMARY KEY (contract_id, address, role)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_job_participants_address
+        ON job_participants (address);
+
+      INSERT OR IGNORE INTO job_participants (contract_id, address, role)
+      SELECT contract_id, json_extract(data_json, '$.client'), 'client'
+      FROM events
+      WHERE json_extract(data_json, '$.client') IS NOT NULL
+        AND json_extract(data_json, '$.client') != ''
+      UNION
+      SELECT contract_id, json_extract(data_json, '$.freelancer'), 'freelancer'
+      FROM events
+      WHERE json_extract(data_json, '$.freelancer') IS NOT NULL
+        AND json_extract(data_json, '$.freelancer') != ''
+      UNION
+      SELECT contract_id, json_extract(data_json, '$.arbiter'), 'arbiter'
+      FROM events
+      WHERE json_extract(data_json, '$.arbiter') IS NOT NULL
+        AND json_extract(data_json, '$.arbiter') != '';
+    `,
+  },
+  {
+    version: 19,
+    description: "undecodable_events table for per-event decode failures (#658)",
+    up: `
+      CREATE TABLE IF NOT EXISTS undecodable_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        event_id TEXT,
+        ledger_sequence INTEGER,
+        contract_id TEXT,
+        topic_xdr TEXT,
+        value_xdr TEXT,
+        error_message TEXT NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_undecodable_events_ledger
+        ON undecodable_events (ledger_sequence);
+    `,
+  },
 ];
 
 /** Index names created by the SQLite schema manager lookup-index migration (#259). */
@@ -461,6 +807,24 @@ export function runMigrations(
 
   try {
   const database = getDb();
+  lastPreMigrationBackupPath = null;
+
+  // Snapshot the database before any pending migration touches it. This runs
+  // outside the migration transaction so the backup holds the committed,
+  // pre-migration state.
+  const hasMigrationsTable = database
+    .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations'")
+    .get();
+  const pendingBeforeRun = MIGRATIONS.filter(
+    (migration) =>
+      !hasMigrationsTable ||
+      !database
+        .prepare("SELECT 1 FROM schema_migrations WHERE version = ?")
+        .get(migration.version),
+  );
+  if (pendingBeforeRun.length > 0) {
+    createPreMigrationBackup(database, pendingBeforeRun[0].version);
+  }
 
   const runAll = database.transaction(() => {
   // Bootstrap: create the migrations tracking table if it doesn't exist yet
@@ -495,7 +859,11 @@ export function runMigrations(
 
     // Run migration inside a transaction – rolls back fully on any error
     const applyMigration = database.transaction(() => {
-      database.exec(migration.up);
+      if (typeof migration.up === "function") {
+        migration.up(database);
+      } else {
+        database.exec(migration.up);
+      }
       database
         .prepare(
           "INSERT INTO schema_migrations (version, description) VALUES (?, ?)"
@@ -628,6 +996,7 @@ const EXPECTED_TABLES: Record<string, string[]> = {
     "timestamp",
     "data_json",
     "created_at",
+    "event_id",
   ],
   indexer_state: ["key", "value"],
   monitored_contracts: [
@@ -860,6 +1229,65 @@ export function setLastIndexedLedger(seq: number) {
   updateTransaction();
 }
 
+export interface SkippedLedgerRange {
+  from: number;
+  to: number;
+  clampedTo: number;
+  recordedAt: string;
+}
+
+/**
+ * Record a ledger window skipped because the RPC no longer retains it (#609).
+ * Stored in indexer_state so an operator can backfill from an archive RPC.
+ */
+export function recordSkippedLedgerRange(from: number, to: number): SkippedLedgerRange {
+  const clampedTo = to + 1;
+  const entry: SkippedLedgerRange = {
+    from,
+    to,
+    clampedTo,
+    recordedAt: new Date().toISOString(),
+  };
+  const db = getDb();
+  db.prepare(
+    `INSERT INTO indexer_state (key, value) VALUES ('skipped_ledger_range', ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value`
+  ).run(JSON.stringify(entry));
+  return entry;
+}
+
+/** Last retention-gap window recorded by the poller, if any (#609). */
+export function getSkippedLedgerRange(): SkippedLedgerRange | null {
+  try {
+    const db = getDb();
+    const row = db
+      .prepare("SELECT value FROM indexer_state WHERE key = 'skipped_ledger_range'")
+      .get() as { value: string } | undefined;
+    if (!row) return null;
+    return JSON.parse(row.value) as SkippedLedgerRange;
+  } catch {
+    return null;
+  }
+}
+
+/** Read an arbitrary `indexer_state` value, or `undefined` if the key is unset. */
+export function getIndexerStateValue(key: string): string | undefined {
+  const row = getDb()
+    .prepare("SELECT value FROM indexer_state WHERE key = ?")
+    .get(key) as { value: string } | undefined;
+  return row?.value;
+}
+
+/** Insert or overwrite an arbitrary `indexer_state` value. */
+export function setIndexerStateValue(key: string, value: string): void {
+  getDb()
+    .prepare(
+      `INSERT INTO indexer_state (key, value) VALUES (?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`
+    )
+    .run(key, value);
+}
+
 // ---------------------------------------------------------------------------
 // Monitored contracts (#85)
 // ---------------------------------------------------------------------------
@@ -912,6 +1340,26 @@ export function deregisterContract(contractId: string): void {
     ).run(contractId);
   });
   tx();
+}
+
+export interface MonitoredContractRecord {
+  id: number;
+  contract_id: string;
+  label: string | null;
+  active: number;
+  registered_at: string;
+  last_ledger_sequence: number;
+  start_ledger: number;
+}
+
+/**
+ * Returns all monitored contracts with active status and registration time.
+ */
+export function getAllContracts(): MonitoredContractRecord[] {
+  const db = getDb();
+  return db
+    .prepare("SELECT * FROM monitored_contracts ORDER BY id ASC")
+    .all() as MonitoredContractRecord[];
 }
 
 /**
@@ -992,15 +1440,9 @@ export function updateContractPointer(
 
 /**
  * Checks whether an event with the given (contract_id, ledger_sequence,
- * event_type) already exists - the exact composite key the
- * UNIQUE(contract_id, ledger_sequence, event_type) constraint on `events`
- * enforces (see MIGRATIONS v1). insertEvent()/insertEventBatch() rely on
- * INSERT OR IGNORE for the actual write path (unchanged), so this constraint
- * check normally happens implicitly inside SQLite and isn't independently
- * observable. This lookup is exposed as its own query so the duplicate-check
- * path can be measured and EXPLAIN QUERY PLAN'd directly - it reuses the
- * existing sqlite_autoindex_events_1 index that comes from the UNIQUE
- * constraint; no new index is introduced.
+ * event_type) already exists. Since migration v12 the write path dedupes on
+ * UNIQUE(event_id), so this triple lookup is only a compatibility helper;
+ * prefer isDuplicateEventId() for the actual dedupe check.
  */
 export function isDuplicateEvent(
   contractId: string,
@@ -1019,6 +1461,24 @@ export function isDuplicateEvent(
 }
 
 /**
+ * Stable dedupe key for an event row: the RPC event id when known,
+ * otherwise the legacy (contract, ledger, type) triple (#607).
+ */
+export function eventDedupeId(ev: Pick<EventRow, "contractId" | "ledgerSequence" | "eventType"> & { eventId?: string | null }): string {
+  if (ev.eventId) return ev.eventId;
+  return `${ev.contractId}:${ev.ledgerSequence}:${ev.eventType}`;
+}
+
+/** True when an event with this RPC event id is already stored (#607). */
+export function isDuplicateEventId(eventId: string): boolean {
+  const db = getDb();
+  const row = db
+    .prepare(`SELECT 1 FROM events WHERE event_id = ? LIMIT 1`)
+    .get(eventId);
+  return row !== undefined;
+}
+
+/**
  * Insert a single event row.  For atomic batch inserts use insertEventBatch().
  * Wrapped in a transaction so concurrent writes never leave partial state.
  */
@@ -1027,22 +1487,29 @@ export function insertEvent(
   eventType: string,
   ledgerSequence: number,
   timestamp: number | null,
-  dataJson: string
+  dataJson: string,
+  eventId?: string | null,
+  txHash: string | null = null
 ): boolean {
   const db = getDb();
   const tx = db.transaction(() => {
     const stmt = db.prepare(`
-      INSERT OR IGNORE INTO events 
-      (contract_id, event_type, ledger_sequence, timestamp, data_json)
-      VALUES (?, ?, ?, ?, ?)
+      INSERT OR IGNORE INTO events
+      (contract_id, event_type, ledger_sequence, timestamp, data_json, event_id, tx_hash)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
     `);
     const result = stmt.run(
       contractId,
       eventType,
       ledgerSequence,
       timestamp,
-      dataJson
+      dataJson,
+      eventId ?? `${contractId}:${ledgerSequence}:${eventType}`,
+      txHash
     );
+    if (result.changes > 0) {
+      recordJobParticipants(db, contractId, eventType, dataJson);
+    }
     return result.changes > 0;
   });
   return tx();
@@ -1055,6 +1522,48 @@ export interface EventRow {
   /** Ledger close time (epoch secs), or null when the RPC gave none. */
   timestamp: number | null;
   dataJson: string;
+  /** Stable RPC event id (event.id); dedupe key via UNIQUE(event_id) (#607). */
+  eventId?: string;
+  /**
+   * Hash of the transaction that emitted the event (#700). `null` for rows
+   * indexed before the column existed.
+   */
+  txHash?: string | null;
+}
+
+/**
+ * Extracts wallet participants from an event if it is an init/initialized event,
+ * and inserts them into the job_participants table.
+ */
+function recordJobParticipants(
+  db: import("better-sqlite3").Database,
+  contractId: string,
+  eventType: string,
+  dataJson: string,
+): void {
+  // escrow-factory's `created` event names the parties too, but the job is the
+  // new escrow, whose own init event records them under the escrow's id; the
+  // factory itself is not anyone's job.
+  if (eventType.toLowerCase() === "created") return;
+  try {
+    const data = JSON.parse(dataJson) as Record<string, unknown>;
+    const insertStmt = db.prepare(
+      `INSERT OR IGNORE INTO job_participants (contract_id, address, role)
+       VALUES (?, ?, ?)`
+    );
+
+    if (typeof data.client === "string" && data.client.trim().length > 0) {
+      insertStmt.run(contractId, data.client.trim(), "client");
+    }
+    if (typeof data.freelancer === "string" && data.freelancer.trim().length > 0) {
+      insertStmt.run(contractId, data.freelancer.trim(), "freelancer");
+    }
+    if (typeof data.arbiter === "string" && data.arbiter.trim().length > 0) {
+      insertStmt.run(contractId, data.arbiter.trim(), "arbiter");
+    }
+  } catch {
+    // Unparseable dataJson - ignore participant extraction
+  }
 }
 
 /**
@@ -1084,8 +1593,8 @@ export function insertEventBatch(events: EventRow[], newLedger: number): void {
 
   const insertStmt = db.prepare(`
     INSERT OR IGNORE INTO events
-    (contract_id, event_type, ledger_sequence, timestamp, data_json)
-    VALUES (?, ?, ?, ?, ?)
+    (contract_id, event_type, ledger_sequence, timestamp, data_json, event_id, tx_hash)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
   `);
 
   const updateLedger = db.prepare(
@@ -1094,18 +1603,28 @@ export function insertEventBatch(events: EventRow[], newLedger: number): void {
 
   const batchTransaction = db.transaction(() => {
     for (const ev of events) {
-      insertStmt.run(
+      const res = insertStmt.run(
         ev.contractId,
         ev.eventType,
         ev.ledgerSequence,
         ev.timestamp,
-        ev.dataJson
+        ev.dataJson,
+        eventDedupeId(ev),
+        ev.txHash ?? null
       );
+      if (res.changes > 0) {
+        recordJobParticipants(db, ev.contractId, ev.eventType, ev.dataJson);
+      }
     }
     updateLedger.run(newLedger.toString());
   });
 
   batchTransaction();
+
+  const affectedAddresses = extractAddressesFromEvents(events);
+  if (affectedAddresses.length > 0) {
+    invalidateJobsByWalletCache(affectedAddresses);
+  }
 
   const payloadSizeBytes = events.reduce(
     (sum, ev) => sum + Buffer.byteLength(ev.dataJson, "utf8"),
@@ -1246,7 +1765,9 @@ export async function insertEventBatchLocked(
   const keys = [
     ...new Set(
       events.map((ev) =>
-        eventInsertLockKey(ev.contractId, ev.ledgerSequence, ev.eventType)
+        ev.eventId
+          ? `id:${ev.eventId}`
+          : eventInsertLockKey(ev.contractId, ev.ledgerSequence, ev.eventType)
       )
     ),
   ].sort();
@@ -1278,16 +1799,6 @@ export async function insertEventBatchLocked(
 // Event queries
 // ---------------------------------------------------------------------------
 
-export function getEventsByAddress(address: string) {
-  const db = getDb();
-  const stmt = db.prepare(`
-    SELECT * FROM events 
-    WHERE data_json LIKE ?
-    ORDER BY ledger_sequence DESC
-  `);
-  return stmt.all(`%${address}%`);
-}
-
 export interface JobSummary {
   contract_id: string;
   role: "client" | "freelancer" | "arbiter" | "unknown";
@@ -1304,6 +1815,92 @@ export interface PaginatedJobs {
   limit: number;
 }
 
+export interface ByWalletFilters {
+  role?: "client" | "freelancer" | "arbiter";
+  state?: "open" | "closed";
+}
+
+/**
+ * Latest-event discriminators that end a job (#958). A job is "closed" when
+ * its most recent indexed event is one of these; otherwise it is "open".
+ * Kept in sync with the documented definition in docs/openapi.yaml.
+ */
+export const TERMINAL_JOB_EVENT_TYPES = [
+  "adminexc",
+  "adtxrfd",
+  "adtxrls",
+  "arbsplit",
+  "cancel",
+  "cxlappr",
+  "cxlspref",
+  "msadmref",
+  "msadmrel",
+  "resolve",
+  "sprefnet",
+  "splitref",
+  "sweep",
+  "twspltref",
+  "unaccref",
+  "withdraw",
+] as const;
+
+const TERMINAL_EVENT_SQL = TERMINAL_JOB_EVENT_TYPES.map(
+  (eventType) => `'${eventType}'`,
+).join(", ");
+
+/**
+ * Shared CTEs and bind parameters for the wallet job count/page queries.
+ * Exported so the EXPLAIN QUERY PLAN assertion in the tests checks the real
+ * query rather than a hand-written approximation (#958).
+ */
+export function buildWalletJobsQuery(
+  address: string,
+  filters: ByWalletFilters = {},
+): { ctes: string; params: Array<string | null> } {
+  const { role = null, state = null } = filters;
+  const ctes = `WITH wallet_contracts AS (
+       SELECT
+         contract_id,
+         CASE
+           WHEN MAX(role = 'client') = 1 THEN 'client'
+           WHEN MAX(role = 'freelancer') = 1 THEN 'freelancer'
+           WHEN MAX(role = 'arbiter') = 1 THEN 'arbiter'
+           ELSE 'unknown'
+         END AS role
+       FROM job_participants
+       WHERE address = ?
+       GROUP BY contract_id
+     ),
+     ranked_events AS (
+       SELECT
+         e.contract_id,
+         e.event_type,
+         e.ledger_sequence,
+         e.timestamp,
+         e.data_json,
+         ROW_NUMBER() OVER (
+           PARTITION BY e.contract_id
+           ORDER BY e.ledger_sequence DESC, e.id DESC
+         ) AS rn_desc,
+         ROW_NUMBER() OVER (
+           PARTITION BY e.contract_id
+           ORDER BY e.ledger_sequence ASC, e.id ASC
+         ) AS rn_asc
+       FROM events e
+       JOIN wallet_contracts wc ON wc.contract_id = e.contract_id
+     ),
+     filtered_contracts AS (
+       SELECT wc.contract_id, wc.role
+       FROM wallet_contracts wc
+       JOIN ranked_events l ON l.contract_id = wc.contract_id AND l.rn_desc = 1
+       WHERE (? IS NULL OR wc.role = ?)
+         AND (? IS NULL
+              OR (? = 'closed' AND l.event_type IN (${TERMINAL_EVENT_SQL}))
+              OR (? = 'open' AND l.event_type NOT IN (${TERMINAL_EVENT_SQL})))
+     )`;
+  return { ctes, params: [address, role, role, state, state, state] };
+}
+
 /**
  * Optimized wallet query (#87).
  *
@@ -1313,22 +1910,34 @@ export interface PaginatedJobs {
  * returned from the database engine.
  *
  * The query:
- *   1. Filters rows where json_extract finds the address in client / freelancer
- *      / arbiter fields (exact match – no false-positive LIKE hits).
+ *   1. Finds the contracts a wallet belongs to by matching $.client /
+ *      $.freelancer / $.arbiter on each contract's INIT event (the earliest
+ *      row per contract) – later events such as fund/deliver never carry
+ *      those fields, so matching the latest event drops jobs after any
+ *      activity (#610).
  *   2. Keeps exactly one row per contract_id: the most-recent event by
- *      (ledger_sequence DESC, id DESC) via ROW_NUMBER, so contracts with
- *      several events in their latest ledger never duplicate a job.
- *   3. Determines role with a CASE expression in SQL.
- *   4. Applies LIMIT / OFFSET inside the engine, so memory footprint is O(page).
+ *      (ledger_sequence DESC, id DESC) for latest_event_type/latest_ledger/
+ *      latest_timestamp, so contracts with several events in their latest
+ *      ledger never duplicate a job.
+ *   3. Determines role from the init event with a CASE expression in SQL.
+ *      Precedence when a wallet holds several roles on one job:
+ *      client > freelancer > arbiter.
+ *   4. Reads milestone_count from the init event's $.milestone_count
+ *      (falling back to a $.milestones array length for older fixtures).
+ *   5. Applies LIMIT / OFFSET inside the engine, so memory footprint is O(page).
+ *   6. Optional role/state filters (#958) are applied before counting and
+ *      pagination, and are part of the cache key.
  */
 export async function getJobsByWallet(
   address: string,
   page: number = 1,
   limit: number = 10,
+  filters: ByWalletFilters = {},
 ): Promise<PaginatedJobs> {
   const safePage = Math.max(1, page);
   const safeLimit = Math.max(1, limit);
-  const cacheKey = `${address.trim().toLowerCase()}::${safePage}::${safeLimit}`;
+  const { role = null, state = null } = filters;
+  const cacheKey = `${address.trim().toLowerCase()}::${safePage}::${safeLimit}::${role ?? ""}::${state ?? ""}`;
 
   const cachedResult = jobsByWalletCache.get<PaginatedJobs>(cacheKey);
   if (cachedResult !== undefined) {
@@ -1343,72 +1952,58 @@ export async function getJobsByWallet(
   const pendingResult = (async () => {
     const db = getDb();
     const offset = (safePage - 1) * safeLimit;
+    const { ctes: walletCtes, params: filterParams } = buildWalletJobsQuery(
+      address,
+      filters,
+    );
 
     const countRow = db
-      .prepare(
-        `SELECT COUNT(*) AS cnt
-         FROM (
-           SELECT contract_id
-           FROM events
-           WHERE json_extract(data_json, '$.client')     = ?
-              OR json_extract(data_json, '$.freelancer') = ?
-              OR json_extract(data_json, '$.arbiter')    = ?
-           GROUP BY contract_id
-         )`
-      )
-      .get(address, address, address) as { cnt: number };
+      .prepare(`${walletCtes} SELECT COUNT(*) AS cnt FROM filtered_contracts`)
+      .get(...filterParams) as { cnt: number };
 
     const total = countRow?.cnt ?? 0;
 
     const rows = db
       .prepare(
-        `SELECT
-           e.contract_id,
-           e.event_type                                     AS latest_event_type,
-           e.ledger_sequence                                AS latest_ledger,
-           e.timestamp                                      AS latest_timestamp,
-           CASE
-             WHEN json_extract(e.data_json, '$.client')     = ? THEN 'client'
-             WHEN json_extract(e.data_json, '$.freelancer') = ? THEN 'freelancer'
-             WHEN json_extract(e.data_json, '$.arbiter')    = ? THEN 'arbiter'
-             ELSE 'unknown'
-           END                                              AS role,
-           e.data_json
-         FROM (
-           SELECT e.*,
-             ROW_NUMBER() OVER (
-               PARTITION BY e.contract_id
-               ORDER BY e.ledger_sequence DESC, e.id DESC
-             ) AS rn
-           FROM events e
-           WHERE json_extract(e.data_json, '$.client')     = ?
-              OR json_extract(e.data_json, '$.freelancer') = ?
-              OR json_extract(e.data_json, '$.arbiter')    = ?
-         ) e
-         WHERE e.rn = 1
-         ORDER BY e.ledger_sequence DESC, e.contract_id ASC
+        `${walletCtes}
+         SELECT
+           fc.contract_id,
+           fc.role,
+           l.event_type      AS latest_event_type,
+           l.ledger_sequence AS latest_ledger,
+           l.timestamp       AS latest_timestamp,
+           -- milestone_count comes from the job's first (init) event, as
+           -- before; job_participants only replaces the address lookup (#640).
+           i.data_json       AS init_data
+         FROM filtered_contracts fc
+         JOIN ranked_events l ON l.contract_id = fc.contract_id AND l.rn_desc = 1
+         JOIN ranked_events i ON i.contract_id = fc.contract_id AND i.rn_asc = 1
+         ORDER BY l.ledger_sequence DESC, fc.contract_id ASC
          LIMIT ? OFFSET ?`
       )
-      .all(
-        address, address, address,
-        address, address, address,
-        safeLimit, offset
-      ) as Array<{
+      .all(...filterParams, safeLimit, offset) as Array<{
         contract_id: string;
         latest_event_type: string;
         latest_ledger: number;
         latest_timestamp: number;
         role: "client" | "freelancer" | "arbiter" | "unknown";
-        data_json: string;
+        init_data: string;
       }>;
 
     const jobs: JobSummary[] = rows.map((row) => {
       let milestoneCount = 0;
       try {
-        const parsed = JSON.parse(row.data_json) as Record<string, unknown>;
-        milestoneCount = Array.isArray(parsed["milestones"])
-          ? (parsed["milestones"] as unknown[]).length
-          : 0;
+        const parsed = JSON.parse(row.init_data) as Record<string, unknown>;
+        const direct = parsed["milestone_count"];
+        if (typeof direct === "number" && Number.isFinite(direct)) {
+          milestoneCount = Math.max(0, Math.floor(direct));
+        } else if (typeof direct === "string" && /^\d+$/.test(direct.trim())) {
+          milestoneCount = parseInt(direct.trim(), 10);
+        } else {
+          milestoneCount = Array.isArray(parsed["milestones"])
+            ? (parsed["milestones"] as unknown[]).length
+            : 0;
+        }
       } catch {
         // unparseable – leave milestone_count as 0
       }
@@ -1444,7 +2039,16 @@ export interface EventDbRow {
   ledger_sequence: number;
   timestamp: number | null;
   data_json: string;
+  /** Transaction hash of the event (#700); null for older rows. */
+  tx_hash?: string | null;
+  /** Stable RPC event id (#607); legacy rows carry a synthetic id. */
+  event_id?: string | null;
   created_at: string;
+  /**
+   * Camel-case alias of `tx_hash`, so API consumers can read `txHash`
+   * directly (#700).
+   */
+  txHash?: string | null;
 }
 
 export interface PaginatedEvents {
@@ -1477,11 +2081,262 @@ export function getEventsByContract(
     )
     .all(contractId, safeLimit, offset) as EventDbRow[];
 
+  // Expose the transaction hash under its camel-case name as well, so the
+  // history endpoint can hand it straight to a block explorer (#700).
+  const events = rows.map((row) => ({
+    ...row,
+    txHash: row.tx_hash ?? null,
+  }));
+
   return {
-    events: rows,
+    events,
     total: totalRow.count,
     page: safePage,
     limit: safeLimit,
+  };
+}
+
+/**
+ * Streams every indexed event for a contract in chronological order (#959).
+ * Uses `iterate()` so callers can emit rows without buffering the full set.
+ */
+export function iterateEventsByContract(
+  contractId: string,
+): IterableIterator<EventDbRow> {
+  const db = getDb();
+  return db
+    .prepare(
+      `SELECT * FROM events
+       WHERE contract_id = ?
+       ORDER BY ledger_sequence ASC, id ASC`
+    )
+    .iterate(contractId) as IterableIterator<EventDbRow>;
+}
+
+export interface PlatformStats {
+  escrows: number;
+  funded: Record<string, string>;
+  released: Record<string, string>;
+  openDisputes: number;
+  updatedAt: string;
+}
+
+let platformStatsCache: { value: PlatformStats; expiresAt: number } | null = null;
+
+function resolveEventToken(contractId: string, data: Record<string, unknown>): string {
+  const token = data.token;
+  if (typeof token === "string" && token.length > 0) return token;
+  const row = getDb()
+    .prepare(
+      `SELECT data_json FROM events
+       WHERE contract_id = ? AND event_type IN ('init', 'fund', 'msfund')
+         AND json_extract(data_json, '$.token') IS NOT NULL
+       ORDER BY ledger_sequence ASC, id ASC
+       LIMIT 1`
+    )
+    .get(contractId) as { data_json: string } | undefined;
+  if (!row) return "unknown";
+  try {
+    const t = (JSON.parse(row.data_json) as { token?: unknown }).token;
+    return typeof t === "string" && t.length > 0 ? t : "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+function extractEventAmount(data: Record<string, unknown>): bigint {
+  for (const key of ["amount", "total_amount", "amount_released", "value"]) {
+    const v = data[key];
+    if (typeof v === "string" && /^-?\d+$/.test(v.trim())) return BigInt(v.trim());
+    if (typeof v === "number" && Number.isInteger(v)) return BigInt(v);
+    if (typeof v === "bigint") return v;
+  }
+  return 0n;
+}
+
+export function getPlatformStats(nowMs = Date.now()): PlatformStats {
+  if (platformStatsCache && platformStatsCache.expiresAt > nowMs) {
+    return platformStatsCache.value;
+  }
+  const db = getDb();
+
+  const escrowsRow = db
+    .prepare("SELECT COUNT(*) AS cnt FROM events WHERE event_type = 'created'")
+    .get() as { cnt: number };
+
+  const funded: Record<string, bigint> = {};
+  for (const row of db
+    .prepare(
+      "SELECT contract_id, data_json FROM events WHERE event_type IN ('fund', 'msfund')"
+    )
+    .iterate() as IterableIterator<{ contract_id: string; data_json: string }>) {
+    try {
+      const data = JSON.parse(row.data_json) as Record<string, unknown>;
+      const token = resolveEventToken(row.contract_id, data);
+      funded[token] = (funded[token] ?? 0n) + extractEventAmount(data);
+    } catch {
+      // skip malformed
+    }
+  }
+
+  const released: Record<string, bigint> = {};
+  for (const row of db
+    .prepare(
+      "SELECT contract_id, data_json FROM events WHERE event_type IN ('approve', 'claim')"
+    )
+    .iterate() as IterableIterator<{ contract_id: string; data_json: string }>) {
+    try {
+      const data = JSON.parse(row.data_json) as Record<string, unknown>;
+      const token = resolveEventToken(row.contract_id, data);
+      released[token] = (released[token] ?? 0n) + extractEventAmount(data);
+    } catch {
+      // skip malformed
+    }
+  }
+
+  const openDisputesRow = db
+    .prepare(
+      `WITH dispute_marks AS (
+         SELECT
+           contract_id,
+           COALESCE(CAST(json_extract(data_json, '$.milestone_index') AS TEXT), '') AS milestone_key,
+           MAX(CASE WHEN event_type = 'dispute' THEN id ELSE 0 END) AS last_dispute_id,
+           MAX(CASE WHEN event_type IN ('resolve', 'arbsplit', 'dispescal') THEN id ELSE 0 END) AS last_resolve_id
+         FROM events
+         WHERE event_type IN ('dispute', 'resolve', 'arbsplit', 'dispescal')
+         GROUP BY contract_id, milestone_key
+       )
+       SELECT COUNT(*) AS cnt FROM dispute_marks
+       WHERE last_dispute_id > last_resolve_id`
+    )
+    .get() as { cnt: number };
+
+  const value: PlatformStats = {
+    escrows: escrowsRow?.cnt ?? 0,
+    funded: Object.fromEntries(Object.entries(funded).map(([k, v]) => [k, v.toString()])),
+    released: Object.fromEntries(Object.entries(released).map(([k, v]) => [k, v.toString()])),
+    openDisputes: openDisputesRow?.cnt ?? 0,
+    updatedAt: new Date(nowMs).toISOString(),
+  };
+  platformStatsCache = { value, expiresAt: nowMs + 60_000 };
+  return value;
+}
+
+export function resetPlatformStatsCache(): void {
+  platformStatsCache = null;
+}
+
+export interface AdminJobSummary {
+  contractId: string;
+  client: string | null;
+  freelancer: string | null;
+  arbiter: string | null;
+  latestEventType: string;
+  latestLedger: number;
+  hasOpenDispute: boolean;
+}
+
+export interface PaginatedAdminJobs {
+  jobs: AdminJobSummary[];
+  nextCursor: string | null;
+}
+
+export function getAdminJobs(
+  options: { status?: "disputed" | "active" | "completed"; cursor?: string; limit?: number } = {},
+): PaginatedAdminJobs {
+  const db = getDb();
+  const limit = Math.max(1, Math.min(100, options.limit ?? 20));
+  const cursorRaw = options.cursor ? Number(options.cursor) : NaN;
+  const cursorId = Number.isFinite(cursorRaw) && cursorRaw >= 0 ? cursorRaw : null;
+  const factoryId = process.env.FACTORY_CONTRACT_ID || null;
+  const status = options.status ?? null;
+  const terminalList = TERMINAL_JOB_EVENT_TYPES.map((t) => `'${t}'`).join(",");
+
+  const rows = db
+    .prepare(
+      `WITH latest AS (
+         SELECT contract_id, MAX(id) AS latest_id
+         FROM events
+         GROUP BY contract_id
+       ),
+       latest_events AS (
+         SELECT e.contract_id, e.id AS latest_id, e.event_type, e.ledger_sequence
+         FROM events e
+         JOIN latest l ON l.contract_id = e.contract_id AND l.latest_id = e.id
+       ),
+       disputes AS (
+         SELECT contract_id,
+           MAX(CASE
+             WHEN event_type = 'dispute' THEN 1
+             ELSE 0 END) AS has_open_dispute
+         FROM (
+           SELECT contract_id,
+             COALESCE(CAST(json_extract(data_json, '$.milestone_index') AS TEXT), '') AS milestone_key,
+             event_type,
+             ROW_NUMBER() OVER (
+               PARTITION BY contract_id, COALESCE(CAST(json_extract(data_json, '$.milestone_index') AS TEXT), '')
+               ORDER BY id DESC
+             ) AS rn
+           FROM events
+           WHERE event_type IN ('dispute','resolve','arbsplit','dispescal')
+         )
+         WHERE rn = 1
+         GROUP BY contract_id
+       ),
+       participants AS (
+         SELECT contract_id,
+           MAX(CASE WHEN role = 'client' THEN address END) AS client,
+           MAX(CASE WHEN role = 'freelancer' THEN address END) AS freelancer,
+           MAX(CASE WHEN role = 'arbiter' THEN address END) AS arbiter
+         FROM job_participants
+         GROUP BY contract_id
+       ),
+       base AS (
+         SELECT le.contract_id, le.latest_id, le.event_type, le.ledger_sequence,
+                p.client, p.freelancer, p.arbiter,
+                COALESCE(d.has_open_dispute, 0) AS has_open_dispute,
+                CASE WHEN le.event_type IN (${terminalList}) THEN 1 ELSE 0 END AS is_completed
+         FROM latest_events le
+         JOIN monitored_contracts mc ON mc.contract_id = le.contract_id AND mc.active = 1
+         LEFT JOIN participants p ON p.contract_id = le.contract_id
+         LEFT JOIN disputes d ON d.contract_id = le.contract_id
+         WHERE (@factoryId IS NULL OR le.contract_id != @factoryId)
+       )
+       SELECT contract_id, latest_id, event_type, ledger_sequence, client, freelancer, arbiter, has_open_dispute
+       FROM base
+       WHERE (@cursorId IS NULL OR latest_id < @cursorId)
+         AND (@status IS NULL
+              OR (@status = 'disputed' AND has_open_dispute = 1)
+              OR (@status = 'completed' AND is_completed = 1)
+              OR (@status = 'active' AND has_open_dispute = 0 AND is_completed = 0))
+       ORDER BY latest_id DESC
+       LIMIT @limit`
+    )
+    .all({ factoryId, cursorId, status, limit: limit + 1 }) as Array<{
+      contract_id: string;
+      latest_id: number;
+      event_type: string;
+      ledger_sequence: number;
+      client: string | null;
+      freelancer: string | null;
+      arbiter: string | null;
+      has_open_dispute: number;
+    }>;
+
+  const hasMore = rows.length > limit;
+  const pageRows = hasMore ? rows.slice(0, limit) : rows;
+  const nextCursor = hasMore ? String(pageRows[pageRows.length - 1].latest_id) : null;
+  return {
+    jobs: pageRows.map((r) => ({
+      contractId: r.contract_id,
+      client: r.client,
+      freelancer: r.freelancer,
+      arbiter: r.arbiter,
+      latestEventType: r.event_type,
+      latestLedger: r.ledger_sequence,
+      hasOpenDispute: r.has_open_dispute === 1,
+    })),
+    nextCursor,
   };
 }
 
@@ -1490,6 +2345,9 @@ export interface IndexerStatusData {
   totalEvents: number;
   lastEventAt: string | null;
   eventsByType: Record<string, number>;
+  skippedLedgerRange?: SkippedLedgerRange | null;
+  /** Events skipped because they could not be decoded (#658). */
+  undecodableEvents: number;
 }
 
 export interface WebhookSubscription {
@@ -1498,12 +2356,24 @@ export interface WebhookSubscription {
   webhook_url: string;
   event_types: string;
   created_at: string;
+  /**
+   * Number of consecutive failed deliveries (#701). Reset to 0 after a
+   * successful delivery and when the subscription is (re-)created.
+   */
+  consecutive_failures: number;
+  /** Timestamp of the auto-disable, or null while the subscription is live. */
+  disabled_at: string | null;
+  /** Message of the last failed delivery attempt. */
+  last_error: string | null;
 }
 
 /**
  * Add a per-contract webhook subscription. Runs INSERT + SELECT inside a
  * single transaction so the returned row always reflects what was just
  * committed, even under concurrent writes.
+ *
+ * Re-subscribing to a pair that was auto-disabled re-enables it: the failure
+ * counter is reset and the disable marker is cleared (#701).
  */
 export function addSubscription(
   contractId: string,
@@ -1519,6 +2389,17 @@ export function addSubscription(
       VALUES (?, ?, ?)
     `);
     stmt.run(contractId, webhookUrl, JSON.stringify(eventTypes));
+
+    // A fresh subscribe re-enables the subscription and clears the failure
+    // history (#701).
+    db.prepare(
+      `UPDATE webhook_subscriptions
+       SET consecutive_failures = 0,
+           disabled_at = NULL,
+           last_error = NULL
+       WHERE contract_id = ? AND webhook_url = ?`
+    ).run(contractId, webhookUrl);
+
     return db
       .prepare("SELECT * FROM webhook_subscriptions WHERE contract_id = ? AND webhook_url = ?")
       .get(contractId, webhookUrl) as WebhookSubscription;
@@ -1562,9 +2443,108 @@ export function removeSubscription(contractId: string, webhookUrl: string): bool
   }
 }
 
+export function getSubscriptionById(id: number): WebhookSubscription | undefined {
+  return getDb()
+    .prepare("SELECT * FROM webhook_subscriptions WHERE id = ?")
+    .get(id) as WebhookSubscription | undefined;
+}
+
 export function getSubscriptions(): WebhookSubscription[] {
   const db = getDb();
   return db.prepare("SELECT * FROM webhook_subscriptions").all() as WebhookSubscription[];
+}
+
+/**
+ * Subscriptions that are still enabled. Auto-disabled subscriptions (#701)
+ * are skipped by the delivery loop, but they stay visible to admins through
+ * `getSubscriptions()` / `getDisabledSubscriptions()`.
+ */
+export function getActiveSubscriptions(): WebhookSubscription[] {
+  const db = getDb();
+  return db
+    .prepare(
+      "SELECT * FROM webhook_subscriptions WHERE disabled_at IS NULL ORDER BY id ASC"
+    )
+    .all() as WebhookSubscription[];
+}
+
+/** Subscriptions that were auto-disabled after repeated delivery failures. */
+export function getDisabledSubscriptions(): WebhookSubscription[] {
+  const db = getDb();
+  return db
+    .prepare(
+      "SELECT * FROM webhook_subscriptions WHERE disabled_at IS NOT NULL ORDER BY id ASC"
+    )
+    .all() as WebhookSubscription[];
+}
+
+/** Outcome of recording a failed delivery attempt for a subscription. */
+export interface SubscriptionFailureState {
+  subscriptionId: number;
+  /** Consecutive failed deliveries after this attempt. */
+  consecutiveFailures: number;
+  /** Whether the subscription is now disabled and must be skipped. */
+  disabled: boolean;
+}
+
+/**
+ * Record a failed delivery attempt for a subscription: the consecutive
+ * failure counter is incremented and the last error is stored. When the
+ * counter reaches `disableAfter`, the subscription is disabled (#701).
+ */
+export function recordSubscriptionFailure(
+  subscriptionId: number,
+  error: string | null,
+  disableAfter: number
+): SubscriptionFailureState {
+  const db = getDb();
+
+  const recordTx = db.transaction(() => {
+    const row = db
+      .prepare(
+        "SELECT consecutive_failures FROM webhook_subscriptions WHERE id = ?"
+      )
+      .get(subscriptionId) as { consecutive_failures: number } | undefined;
+    if (!row) {
+      return {
+        subscriptionId,
+        consecutiveFailures: 0,
+        disabled: false,
+      };
+    }
+
+    const consecutiveFailures = (row.consecutive_failures ?? 0) + 1;
+    const disabled = consecutiveFailures >= disableAfter;
+
+    db.prepare(
+      `UPDATE webhook_subscriptions
+       SET consecutive_failures = ?,
+           last_error = ?,
+           disabled_at = CASE
+             WHEN ? = 1 THEN COALESCE(disabled_at, CURRENT_TIMESTAMP)
+             ELSE disabled_at
+           END
+       WHERE id = ?`
+    ).run(consecutiveFailures, error, disabled ? 1 : 0, subscriptionId);
+
+    return { subscriptionId, consecutiveFailures, disabled };
+  });
+
+  return recordTx();
+}
+
+/**
+ * Record a successful delivery for a subscription: the consecutive failure
+ * counter is reset and the last error is cleared (#701).
+ */
+export function recordSubscriptionSuccess(subscriptionId: number): void {
+  const db = getDb();
+  db.prepare(
+    `UPDATE webhook_subscriptions
+     SET consecutive_failures = 0,
+         last_error = NULL
+     WHERE id = ?`
+  ).run(subscriptionId);
 }
 
 export function getSubscriptionsForContract(contractId: string): WebhookSubscription[] {
@@ -1602,7 +2582,45 @@ export function getIndexerStatusData(): IndexerStatusData {
     totalEvents: totalRow.count,
     lastEventAt: lastEventRow.last_at,
     eventsByType,
+    skippedLedgerRange: getSkippedLedgerRange(),
+    undecodableEvents: countUndecodableEvents(),
   };
+}
+
+export interface UndecodableEventRecord {
+  eventId: string | null;
+  ledgerSequence: number | null;
+  contractId: string | null;
+  topicXdr: string | null;
+  valueXdr: string | null;
+  errorMessage: string;
+}
+
+/** Store the raw form of an event that could not be decoded (#658). */
+export function recordUndecodableEvent(record: UndecodableEventRecord): void {
+  getDb()
+    .prepare(
+      `INSERT INTO undecodable_events
+         (event_id, ledger_sequence, contract_id, topic_xdr, value_xdr, error_message)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      record.eventId,
+      record.ledgerSequence,
+      record.contractId,
+      record.topicXdr,
+      record.valueXdr,
+      record.errorMessage,
+    );
+}
+
+/** Number of events skipped because they could not be decoded. */
+export function countUndecodableEvents(): number {
+  const row = getDb()
+    .prepare("SELECT COUNT(*) as count FROM undecodable_events")
+    .get() as { count: number };
+
+  return row.count;
 }
 
 // ---------------------------------------------------------------------------
@@ -1698,8 +2716,8 @@ export function insertHistoricalEventBatch(
   const db = getDb();
   const insertStmt = db.prepare(`
     INSERT OR IGNORE INTO events
-    (contract_id, event_type, ledger_sequence, timestamp, data_json)
-    VALUES (?, ?, ?, ?, ?)
+    (contract_id, event_type, ledger_sequence, timestamp, data_json, event_id, tx_hash)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
   `);
 
   const importTransaction = db.transaction(() => {
@@ -1711,8 +2729,13 @@ export function insertHistoricalEventBatch(
         ev.ledgerSequence,
         ev.timestamp,
         ev.dataJson,
+        eventDedupeId(ev),
+        ev.txHash ?? null,
       );
-      if (result.changes > 0) inserted += 1;
+      if (result.changes > 0) {
+        inserted += 1;
+        recordJobParticipants(db, ev.contractId, ev.eventType, ev.dataJson);
+      }
     }
 
     if (options.advanceLivePointer) {
@@ -1728,6 +2751,12 @@ export function insertHistoricalEventBatch(
   });
 
   const inserted = importTransaction();
+
+  const affectedAddresses = extractAddressesFromEvents(events);
+  if (affectedAddresses.length > 0) {
+    invalidateJobsByWalletCache(affectedAddresses);
+  }
+
   logger.info("sqlite_schema_manager historical range imported", {
     startLedger: validRange.startLedger,
     endLedger: validRange.endLedger,
@@ -1779,4 +2808,284 @@ export function getHistoricalEventCounts(
   }
 
   return { totalEvents: totalRow.count, eventsByType };
+}
+
+export interface JobDraftRecord {
+  id: string;
+  creatorAddress: string;
+  payload: any;
+  createdAt: string;
+  expiresAt: string | null;
+}
+
+/**
+ * Persist an off-chain job draft payload into job_drafts.
+ */
+export function saveJobDraft(
+  id: string,
+  creatorAddress: string,
+  payload: unknown,
+  expiresInDays: number = 30
+): void {
+  const db = getDb();
+  const payloadJson = JSON.stringify(payload);
+  const expiresAt = new Date(Date.now() + expiresInDays * 24 * 60 * 60 * 1000).toISOString();
+
+  db.prepare(`
+    INSERT INTO job_drafts (id, creator_address, payload_json, expires_at)
+    VALUES (?, ?, ?, ?)
+  `).run(id, creatorAddress, payloadJson, expiresAt);
+}
+
+/**
+ * Fetch a job draft by its ID. Returns null if not found or expired.
+ */
+export function getJobDraftById(id: string): JobDraftRecord | null {
+  const db = getDb();
+  const row = db.prepare(`
+    SELECT id, creator_address, payload_json, created_at, expires_at
+    FROM job_drafts
+    WHERE id = ?
+  `).get(id) as {
+    id: string;
+    creator_address: string;
+    payload_json: string;
+    created_at: string;
+    expires_at: string | null;
+  } | undefined;
+
+  if (!row) return null;
+
+  if (row.expires_at && new Date(row.expires_at).getTime() < Date.now()) {
+    return null;
+  }
+
+  try {
+    const payload = JSON.parse(row.payload_json);
+    return {
+      id: row.id,
+      creatorAddress: row.creator_address,
+      payload,
+      createdAt: row.created_at,
+      expiresAt: row.expires_at,
+    };
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Sync-ranges helpers (ported from duplicate-prevention.ts, Issue 4)
+// ---------------------------------------------------------------------------
+// These lightweight query helpers were previously isolated in the now-removed
+// duplicate-prevention module. The live write path has always gone through
+// insertEventBatch / INSERT OR IGNORE in this file; these helpers are read-
+// only query utilities and index metadata that several tests depend on.
+
+/** Index names used by sync_ranges lookups – validated via EXPLAIN QUERY PLAN. */
+export const SYNC_RANGES_INDEXES = {
+  ledgers: "idx_sync_ranges_ledgers",
+} as const;
+
+/** Create the sync_ranges tracking table if it doesn't exist. */
+export function initializeSyncRangesTable(): void {
+  const db = getDb();
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS sync_ranges (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      start_ledger INTEGER NOT NULL,
+      end_ledger INTEGER NOT NULL,
+      event_count INTEGER NOT NULL DEFAULT 0,
+      duplicate_count INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'completed',
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(start_ledger, end_ledger)
+    );
+
+    CREATE INDEX IF NOT EXISTS ${SYNC_RANGES_INDEXES.ledgers}
+      ON sync_ranges (start_ledger, end_ledger);
+  `);
+}
+
+/**
+ * Check if a ledger sequence falls within any already-synced range.
+ */
+export function isLedgerSynced(ledgerSequence: number): boolean {
+  const db = getDb();
+  const row = db
+    .prepare(
+      `SELECT 1 FROM sync_ranges
+       WHERE start_ledger <= ? AND end_ledger >= ?
+       LIMIT 1`,
+    )
+    .get(ledgerSequence, ledgerSequence);
+  return row !== undefined;
+}
+
+export interface SyncedRange {
+  id: number;
+  startLedger: number;
+  endLedger: number;
+  eventCount: number;
+  duplicateCount: number;
+  createdAt: string;
+}
+
+/**
+ * Get all completed sync ranges, ordered by start ledger.
+ */
+export function getSyncedRanges(): SyncedRange[] {
+  const db = getDb();
+  const rows = db
+    .prepare(
+      `SELECT id, start_ledger, end_ledger, event_count, duplicate_count, created_at
+       FROM sync_ranges
+       WHERE status = 'completed'
+       ORDER BY start_ledger ASC`,
+    )
+    .all() as Array<{
+    id: number;
+    start_ledger: number;
+    end_ledger: number;
+    event_count: number;
+    duplicate_count: number;
+    created_at: string;
+  }>;
+
+  return rows.map((r) => ({
+    id: r.id,
+    startLedger: r.start_ledger,
+    endLedger: r.end_ledger,
+    eventCount: r.event_count,
+    duplicateCount: r.duplicate_count,
+    createdAt: r.created_at,
+  }));
+}
+
+/**
+ * Count events within a given ledger range.
+ */
+export function countEventsInRange(
+  startLedger: number,
+  endLedger: number,
+): number {
+  const db = getDb();
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) as cnt FROM events
+       WHERE ledger_sequence >= ? AND ledger_sequence <= ?`,
+    )
+    .get(startLedger, endLedger) as { cnt: number };
+  return row.cnt;
+}
+
+export interface DuplicateCheckResult {
+  duplicatesFound: number;
+  newEventsInserted: number;
+  totalProcessed: number;
+}
+
+export interface DuplicatePreventionEventInput {
+  contractId: string;
+  eventType: string;
+  ledgerSequence: number;
+  timestamp: number;
+  dataJson: string;
+}
+
+export interface SyncRange {
+  startLedger: number;
+  endLedger: number;
+}
+
+/**
+ * Insert events with deduplication into the events table, recording a
+ * sync_ranges metadata row atomically. Uses INSERT OR IGNORE against the
+ * UNIQUE(contract_id, ledger_sequence, event_type) constraint.
+ *
+ * The live write path for the poller is insertEventBatch; this variant is
+ * used by historical backfills and tests that need sync_range tracking.
+ */
+export function insertEventsWithDedup(
+  events: DuplicatePreventionEventInput[],
+  syncRange: SyncRange,
+): DuplicateCheckResult {
+  const db = getDb();
+  let duplicatesFound = 0;
+  let newEventsInserted = 0;
+
+  const insertStmt = db.prepare(`
+    INSERT OR IGNORE INTO events
+    (contract_id, event_type, ledger_sequence, timestamp, data_json)
+    VALUES (?, ?, ?, ?, ?)
+  `);
+
+  const write = db.transaction(() => {
+    for (const ev of events) {
+      const result = insertStmt.run(
+        ev.contractId,
+        ev.eventType,
+        ev.ledgerSequence,
+        ev.timestamp,
+        ev.dataJson,
+      );
+      if (result.changes > 0) {
+        newEventsInserted++;
+      } else {
+        duplicatesFound++;
+      }
+    }
+
+    initializeSyncRangesTable();
+
+    db.prepare(
+      `INSERT OR IGNORE INTO sync_ranges (start_ledger, end_ledger, event_count, duplicate_count)
+       VALUES (?, ?, ?, ?)`,
+    ).run(
+      syncRange.startLedger,
+      syncRange.endLedger,
+      newEventsInserted,
+      duplicatesFound,
+    );
+  });
+
+  write();
+
+  return {
+    duplicatesFound,
+    newEventsInserted,
+    totalProcessed: events.length,
+  };
+}
+
+/**
+ * Delete event data for a specific ledger range (useful for re-sync).
+ * Wrapped in a transaction so both events and sync_ranges deletes are atomic.
+ */
+export function deleteEventsInRange(
+  startLedger: number,
+  endLedger: number,
+): number {
+  const db = getDb();
+  const tx = db.transaction(() => {
+    const result = db
+      .prepare(
+        `DELETE FROM events
+         WHERE ledger_sequence >= ? AND ledger_sequence <= ?`,
+      )
+      .run(startLedger, endLedger);
+
+    const hasSyncRanges = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='sync_ranges'")
+      .get();
+    if (hasSyncRanges) {
+      db.prepare(
+        `DELETE FROM sync_ranges
+         WHERE start_ledger >= ? AND end_ledger <= ?`,
+      ).run(startLedger, endLedger);
+    }
+
+    return result.changes;
+  });
+  return tx();
 }

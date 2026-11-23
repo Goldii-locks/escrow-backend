@@ -9,7 +9,7 @@ import { Keypair, nativeToScVal, xdr } from "@stellar/stellar-sdk";
  * frontend calls (read-only query, whitelisted-tokens alias, auto-release).
  */
 
-const VALID_CONTRACT = "CDD5WKK3WT3QVKXMXTJNDIXE4T73FK6GGXDSD6UTJAH6YYZU52SQ4MUH";
+const VALID_CONTRACT = "CARZQMYKDGA4TTIE2XBDJ42EX27VYLLJGGG4WGUIXXWIVHPDTX3UCLJA";
 
 const mockGetAccount = jest.fn<() => Promise<unknown>>();
 const mockSimulateTransaction = jest.fn<() => Promise<unknown>>();
@@ -257,7 +257,7 @@ describe("GET /jobs/whitelisted-tokens alias (#696)", () => {
 
 describe("GET /jobs/:contractId/milestones/:index/auto-release alias (#696)", () => {
   it("answers exactly like time-remaining", async () => {
-    mockSimulateTransaction.mockResolvedValue({ result: { retval: 120 } });
+    mockSimulateTransaction.mockResolvedValue({ result: { retval: nativeToScVal(120n, { type: "u64" }) } });
     const app = buildApp();
     const alias = await request(app)
       .get(`/api/v1/jobs/${VALID_CONTRACT}/milestones/0/auto-release`)

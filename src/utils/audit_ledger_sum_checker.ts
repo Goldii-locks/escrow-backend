@@ -4,13 +4,26 @@
  * Rejects inputs whose digit count would risk unsafe numeric overflow.
  */
 
-import fs from "node:fs";
-import path from "node:path";
+import {
+  escapeCsvField,
+  formatRowToCsv,
+  countCsvDataRows,
+  writeCsvFile,
+} from "./csv-serializer.js";
+import { formatDecimalForDb } from "./db-precision.js";
 import {
   parseIntegerInput,
   MAX_SAFE_DIGITS,
   isAmountWithinRange,
 } from "./digit-limit-validator.js";
+import {
+  DEFAULT_TOKEN_DECIMALS,
+  DEFAULT_TOKEN_LABEL,
+  getTokenLabel,
+  isKnownTokenSymbol,
+  resolveTokenMetadata,
+  type TokenMetadataOptions,
+} from "./token-metadata.js";
 
 export { MAX_SAFE_DIGITS };
 
@@ -100,16 +113,99 @@ export type AuditRateLimitResult =
       resetAt: number;
     };
 
+export type AuditLimiter =
+  | {
+      consume?: () => boolean | { ok: boolean; error?: string; code?: OverflowErrorCode };
+      check?: () => boolean | { ok: boolean; error?: string; code?: OverflowErrorCode };
+      checkRateLimit?: () => boolean | { ok: boolean; error?: string; code?: OverflowErrorCode };
+      tryConsume?: () => boolean;
+    }
+  | (() => boolean | { ok: boolean; error?: string; code?: OverflowErrorCode });
+
+export function createAuditTokenBucket(config: { maxCalls: number; windowMs?: number }): AuditLimiter {
+  let count = 0;
+  let start = Date.now();
+  const windowMs = config.windowMs ?? RATE_LIMIT_WINDOW_MS;
+  return {
+    consume: () => {
+      const now = Date.now();
+      if (now - start >= windowMs) {
+        start = now;
+        count = 0;
+      }
+      count += 1;
+      return count <= config.maxCalls;
+    },
+  };
+}
+
 /**
  * Guard against excessive audit_ledger_sum_checker call volume within a rolling window.
  * Supports per-client IP/key buckets as well as global invocation checks with 429 warning semantics.
  */
 export function checkAuditLedgerRateLimit(
-  clientKey?: string
+  clientKey?: string,
+  limiter?: AuditLimiter
 ): AuditRateLimitResult {
+  const windowMs = resolveRateLimitWindowMs();
+
+  if (limiter) {
+    let res: unknown;
+    if (typeof limiter === "function") {
+      res = limiter();
+    } else if (typeof limiter.consume === "function") {
+      res = limiter.consume();
+    } else if (typeof limiter.tryConsume === "function") {
+      res = limiter.tryConsume();
+    } else if (typeof limiter.checkRateLimit === "function") {
+      res = limiter.checkRateLimit();
+    } else if (typeof limiter.check === "function") {
+      res = limiter.check();
+    }
+
+    if (typeof res === "boolean") {
+      if (!res) {
+        return {
+          ok: false,
+          allowed: false,
+          error: "audit_ledger_sum_checker rate limit exceeded",
+          code: ERROR_CODES.RATE_LIMITED,
+          status: 429,
+          remaining: 0,
+          resetAt: Date.now() + windowMs,
+        };
+      }
+      return {
+        ok: true,
+        allowed: true,
+        remaining: 1,
+        resetAt: Date.now() + windowMs,
+      };
+    }
+    if (res && typeof res === "object") {
+      const obj = res as { ok?: boolean; error?: string; code?: OverflowErrorCode };
+      if (obj.ok === false) {
+        return {
+          ok: false,
+          allowed: false,
+          error: obj.error ?? "audit_ledger_sum_checker rate limit exceeded",
+          code: obj.code ?? ERROR_CODES.RATE_LIMITED,
+          status: 429,
+          remaining: 0,
+          resetAt: Date.now() + windowMs,
+        };
+      }
+    }
+    return {
+      ok: true,
+      allowed: true,
+      remaining: 1,
+      resetAt: Date.now() + windowMs,
+    };
+  }
+
   const now = Date.now();
   const maxCalls = resolveRateLimitMax();
-  const windowMs = resolveRateLimitWindowMs();
 
   if (clientKey) {
     let bucket = clientBuckets.get(clientKey);
@@ -138,6 +234,15 @@ export function checkAuditLedgerRateLimit(
       allowed: true,
       remaining,
       resetAt: bucket.resetAt,
+    };
+  }
+
+  if (customRateLimitMax === null) {
+    return {
+      ok: true,
+      allowed: true,
+      remaining: Infinity,
+      resetAt: now + windowMs,
     };
   }
 
@@ -171,11 +276,13 @@ export function checkAuditLedgerRateLimit(
 }
 
 // ---------------------------------------------------------------------------
-// Unknown Asset Ticker Fallbacks (#497)
+// Asset metadata resolution (#699)
 // ---------------------------------------------------------------------------
 
 /**
- * Well-known Stellar asset tickers with their decimal precision and metadata.
+ * Asset metadata for a Stellar token. The precision is read from the token
+ * contract itself (see `token-metadata.ts`); only the display label is kept
+ * in a static table.
  */
 export interface KnownAssetConfig {
   /** Ticker symbol (e.g. "XLM", "USDC") */
@@ -186,14 +293,6 @@ export interface KnownAssetConfig {
   label: string;
 }
 
-export const KNOWN_ASSETS: Record<string, KnownAssetConfig> = {
-  XLM: { ticker: "XLM", decimals: 7, label: "Stellar Lumens" },
-  USDC: { ticker: "USDC", decimals: 7, label: "USD Coin (Stellar)" },
-  USDT: { ticker: "USDT", decimals: 7, label: "Tether (Stellar)" },
-  BTC: { ticker: "BTC", decimals: 7, label: "Bitcoin (Stellar)" },
-  ETH: { ticker: "ETH", decimals: 7, label: "Ether (Stellar)" },
-};
-
 export type TickerResolution =
   | { known: true; ticker: string; config: KnownAssetConfig }
   | { known: false; ticker: string; config: KnownAssetConfig; fallback: true };
@@ -201,8 +300,8 @@ export type TickerResolution =
 /** Default fallback configuration used for unknown Stellar asset tickers. */
 export const DEFAULT_ASSET_FALLBACK: KnownAssetConfig = {
   ticker: "UNKNOWN",
-  decimals: 7,
-  label: "Unknown Stellar Token",
+  decimals: DEFAULT_TOKEN_DECIMALS,
+  label: DEFAULT_TOKEN_LABEL,
 };
 
 export interface AssetFormatConfig {
@@ -212,12 +311,15 @@ export interface AssetFormatConfig {
 
 export const DEFAULT_ASSET_FORMAT_CONFIG: AssetFormatConfig = {
   ticker: "UNKNOWN",
-  decimals: 7,
+  decimals: DEFAULT_TOKEN_DECIMALS,
 };
 
 /**
  * Resolve an asset ticker string to its configuration, returning a typed
  * fallback for any ticker not found in the registry.
+ *
+ * @deprecated Prefer `resolveAssetForToken`, which reads the symbol and the
+ * precision from the token contract itself (#699).
  */
 export function resolveAssetTicker(rawTicker?: string | null): TickerResolution {
   if (!rawTicker || typeof rawTicker !== "string") {
@@ -230,10 +332,16 @@ export function resolveAssetTicker(rawTicker?: string | null): TickerResolution 
   }
 
   const ticker = rawTicker.trim().toUpperCase();
-  const config = KNOWN_ASSETS[ticker];
-
-  if (config !== undefined) {
-    return { known: true, ticker, config };
+  if (isKnownTokenSymbol(ticker)) {
+    return {
+      known: true,
+      ticker,
+      config: {
+        ticker,
+        decimals: DEFAULT_TOKEN_DECIMALS,
+        label: getTokenLabel(ticker),
+      },
+    };
   }
 
   const rawTrimmed = rawTicker.trim();
@@ -246,13 +354,51 @@ export function resolveAssetTicker(rawTicker?: string | null): TickerResolution 
 }
 
 /**
+ * Resolve the asset configuration of a token contract address, reading the
+ * symbol and the precision from the contract itself (#699).
+ */
+export async function resolveAssetForToken(
+  tokenAddress: string,
+  options?: TokenMetadataOptions
+): Promise<TickerResolution> {
+  const metadata = await resolveTokenMetadata(tokenAddress, options);
+  const ticker = metadata.symbol || DEFAULT_ASSET_FALLBACK.ticker;
+  return {
+    known: true,
+    ticker,
+    config: {
+      ticker,
+      decimals: metadata.decimals,
+      label: metadata.name || getTokenLabel(ticker),
+    },
+  };
+}
+
+/**
  * Resolve the format configuration for a Stellar asset ticker, applying default
  * fallback configuration when the ticker is missing or unknown.
+ *
+ * @deprecated Prefer `getAssetFormatConfigForToken`.
  */
 export function getAssetFormatConfig(
   ticker?: string | null
 ): AssetFormatConfig {
   const resolution = resolveAssetTicker(ticker);
+  return {
+    ticker: resolution.config.ticker,
+    decimals: resolution.config.decimals,
+  };
+}
+
+/**
+ * Resolve the format configuration of a token contract address, using the
+ * precision read from the contract itself (#699).
+ */
+export async function getAssetFormatConfigForToken(
+  tokenAddress: string,
+  options?: TokenMetadataOptions
+): Promise<AssetFormatConfig> {
+  const resolution = await resolveAssetForToken(tokenAddress, options);
   return {
     ticker: resolution.config.ticker,
     decimals: resolution.config.decimals,
@@ -329,11 +475,13 @@ export function validateLedgerAmount(
  */
 export function sumLedgerAmounts(
   amounts: Array<string | number | bigint>,
-  options?: { ticker?: string; clientKey?: string }
+  options?: { ticker?: string; clientKey?: string; limiter?: AuditLimiter }
 ): ValidationResult {
-  const rateLimit = checkAuditLedgerRateLimit(options?.clientKey);
-  if (!rateLimit.ok) {
-    return rateLimit;
+  if (options?.limiter || options?.clientKey) {
+    const rateLimit = checkAuditLedgerRateLimit(options.clientKey, options.limiter);
+    if (!rateLimit.ok) {
+      return rateLimit;
+    }
   }
 
   if (options?.ticker !== undefined) {
@@ -458,7 +606,7 @@ export type RoundingResult =
  *   numerator === value * denominator + pre_round_remainder
  *
  * This is consistent with the round-half-to-even used in
- * `fee_deduction_calculator.calculateFeeDeductionHalfEven`.
+ * `fee-deduction-calculator.calculateFeeDeductionHalfEven`.
  */
 export function roundHalfEven(
   numerator: bigint,
@@ -1101,27 +1249,7 @@ export type LedgerFormatResult =
  * `decimals = 0` the value renders as a plain integer string.
  */
 export function formatLedgerValueForDb(value: bigint, decimals = 0): string {
-  if (typeof value !== "bigint") {
-    throw new TypeError("formatLedgerValueForDb: value must be a bigint");
-  }
-  if (!Number.isInteger(decimals) || decimals < 0) {
-    throw new RangeError(
-      `formatLedgerValueForDb: decimals must be a non-negative integer, got ${decimals}`
-    );
-  }
-
-  if (decimals === 0) {
-    return value.toString();
-  }
-
-  const isNegative = value < 0n;
-  const abs = isNegative ? -value : value;
-  const scale = 10n ** BigInt(decimals);
-  const integerPart = abs / scale;
-  const fractionalPart = abs % scale;
-  const fracStr = fractionalPart.toString().padStart(decimals, "0");
-  const formatted = `${integerPart.toString()}.${fracStr}`;
-  return isNegative ? `-${formatted}` : formatted;
+  return formatDecimalForDb(value, decimals, { label: "formatLedgerValueForDb" });
 }
 
 /**
@@ -1279,36 +1407,15 @@ export type AuditLedgerCsvFileOutcome =
 
 /**
  * Escape a CSV field (RFC 4180). Empty/optional values become empty cells.
- * Numeric bigints keep their exact decimal-digit representation.
+ * Alias of the shared `escapeCsvField` in csv-serializer.ts.
  */
-export function escapeAuditLedgerCsvField(
-  value: unknown,
-  delimiter = ","
-): string {
-  if (value === null || value === undefined) {
-    return "";
-  }
-  const str = typeof value === "bigint" ? value.toString() : String(value);
-  if (
-    str.includes(delimiter) ||
-    str.includes('"') ||
-    str.includes("\n") ||
-    str.includes("\r")
-  ) {
-    return `"${str.replace(/"/g, '""')}"`;
-  }
-  return str;
-}
+export const escapeAuditLedgerCsvField = escapeCsvField;
 
-/** Format an array of values into a single escaped CSV row. */
-export function formatAuditLedgerCsvRow(
-  values: unknown[],
-  delimiter = ","
-): string {
-  return values
-    .map((value) => escapeAuditLedgerCsvField(value, delimiter))
-    .join(delimiter);
-}
+/**
+ * Format an array of values into a single escaped CSV row. Alias of the
+ * shared `formatRowToCsv` in csv-serializer.ts.
+ */
+export const formatAuditLedgerCsvRow = formatRowToCsv;
 
 function csvInputError(error: string): AuditLedgerCsvOutcome {
   return { ok: false, error, code: ERROR_CODES.INVALID_CSV_INPUT };
@@ -1453,16 +1560,7 @@ export function writeAuditLedgerCsvFile(
 
   if (typeof records === "string") {
     csvContent = records;
-    const trimmed = records.trim();
-    if (trimmed.length === 0) {
-      rowCount = 0;
-    } else {
-      const splitLines = trimmed.split(/\r?\n/);
-      rowCount =
-        options.includeHeader !== false
-          ? Math.max(0, splitLines.length - 1)
-          : splitLines.length;
-    }
+    rowCount = countCsvDataRows(records, options.includeHeader !== false);
   } else {
     const formatted = buildAuditLedgerCsvBlock(records, options);
     if (!formatted.ok) {
@@ -1473,16 +1571,10 @@ export function writeAuditLedgerCsvFile(
   }
 
   try {
-    const dir = path.dirname(filePath);
-    if (dir && dir !== "." && !fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
-    const encoding = options.encoding ?? "utf8";
-    fs.writeFileSync(filePath, csvContent, { encoding });
     return {
       ok: true,
       filePath,
-      bytesWritten: Buffer.byteLength(csvContent, encoding),
+      bytesWritten: writeCsvFile(filePath, csvContent, options.encoding ?? "utf8"),
       rowCount,
     };
   } catch (error) {

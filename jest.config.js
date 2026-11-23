@@ -12,5 +12,12 @@ export default {
   setupFilesAfterEnv: ["<rootDir>/jest.setup.ts"],
   moduleNameMapper: {
     "^(\\.{1,2}/.*)\\.js$": "$1"
-  }
+  },
+  collectCoverageFrom: ["src/**/*.ts"],
+  coverageThreshold: {
+    global: {
+      branches: 75,
+      lines: 85,
+    },
+  },
 };

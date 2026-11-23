@@ -1,0 +1,85 @@
+name: E2E (nightly)
+
+# Opt-in Soroban integration suite (#684): builds the escrow contract, runs it
+# on a local stellar/quickstart network, and drives the backend end to end.
+on:
+  workflow_dispatch:
+    inputs:
+      contract_ref:
+        description: "escrow-contract git ref to build"
+        required: false
+        default: "main"
+  schedule:
+    # Nightly at 04:00 UTC, an hour after escrow-contract's own E2E run.
+    - cron: "0 4 * * *"
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check out escrow-contract
+        uses: actions/checkout@v4
+        with:
+          repository: Goldii-locks/escrow-contract
+          ref: ${{ inputs.contract_ref || 'main' }}
+          path: escrow-contract
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          targets: wasm32v1-none
+
+      # soroban-sdk refuses plain `cargo build` for contracts; it has to be
+      # `stellar contract build`. Same version as escrow-contract's E2E.
+      - name: Install stellar-cli
+        uses: stellar/stellar-cli@v30.0.1
+
+      - name: Cache cargo
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            escrow-contract/target
+          key: ${{ runner.os }}-e2e-cargo-${{ hashFiles('escrow-contract/**/Cargo.lock') }}
+
+      - name: Build escrow and escrow-factory Wasm
+        working-directory: escrow-contract
+        run: |
+          stellar contract build --manifest-path contracts/milestone-escrow/Cargo.toml
+          stellar contract build --manifest-path contracts/escrow-factory/Cargo.toml
+
+      - name: Start Stellar quickstart
+        run: |
+          docker run -d --rm --name escrow-backend-e2e-quickstart -p 8000:8000 \
+            "$E2E_QUICKSTART_IMAGE" --local --enable-soroban-rpc --limits unlimited
+        env:
+          # Pinned like escrow-contract's scripts/e2e.sh, and the escrow Wasm
+          # exceeds the default contract size limit, hence --limits.
+          E2E_QUICKSTART_IMAGE: stellar/quickstart:v678-b1525.1-latest
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run E2E suite
+        run: npm run test:e2e
+        env:
+          ESCROW_WASM_PATH: escrow-contract/target/wasm32v1-none/release/milestone_escrow.wasm
+          FACTORY_WASM_PATH: escrow-contract/target/wasm32v1-none/release/escrow_factory.wasm
+
+      - name: Quickstart logs on failure
+        if: failure()
+        run: docker logs escrow-backend-e2e-quickstart 2>&1 | tail -n 300
+
+      - name: Stop Stellar quickstart
+        if: always()
+        run: docker stop escrow-backend-e2e-quickstart || true

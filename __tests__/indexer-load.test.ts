@@ -9,8 +9,7 @@
  *    lands in the DB without data loss.
  * 2. Re-process the exact same batch a second time and confirm zero
  *    duplicates are created (INSERT OR IGNORE deduplication guarantee).
- * 3. Measure wall-clock query latency for getEventsByAddress() and
- *    getJobsByWallet() at scale and document the findings.
+ * 3. Measure wall-clock query latency for getJobsByWallet() at scale.
  *
  * ─────────────────────────────────────────────────────────────────────────
  * Performance findings (recorded June 2026, SQLite in-memory, WAL mode)
@@ -19,16 +18,12 @@
  *
  * Insertion (500 rows, first pass)   : < 50 ms   (bulk prepared statements)
  * Re-insertion (500 rows, dupe pass) : < 30 ms   (INSERT OR IGNORE is cheap)
- * getEventsByAddress() at 500 rows   : < 15 ms   (LIKE scan, no index on data_json)
- * getJobsByWallet() at 500 rows      : < 20 ms   (same LIKE + JS grouping)
+ * getJobsByWallet() at 500 rows      : < 20 ms   (JSON1 filtered + LIMIT)
  *
- * Potential concern: both query functions use a full-table LIKE scan on
- * `data_json` (WHERE data_json LIKE '%address%'). At 500 rows this is
- * imperceptible, but at 10 000+ rows the lack of an index on data_json will
- * cause linear growth in query time. A future optimisation would be to
- * extract role columns (client, freelancer, arbiter) into dedicated indexed
- * TEXT columns, or to maintain a separate address→contract_id lookup table.
- * No immediate fix is required; the current volume is well within budget.
+ * the unbounded `LIKE '%address%'` full scan over
+ * data_json (removed in #641) is superseded by getJobsByWallet(), which
+ * filters on the indexed client/freelancer/arbiter fields with exact match
+ * and paginates in SQL.
  * ─────────────────────────────────────────────────────────────────────────
  */
 
@@ -37,7 +32,6 @@ import {
   initSchema,
   setDb,
   insertEvent,
-  getEventsByAddress,
   getJobsByWallet,
   getLastIndexedLedger,
   setLastIndexedLedger,
@@ -261,22 +255,6 @@ describe("Indexer load test — query performance at scale", () => {
     insertBatch(buildEventBatch());
   });
 
-  it("getEventsByAddress() completes within 200 ms for a known wallet", () => {
-    const wallet = makeAddress(0);
-
-    const start   = performance.now();
-    const results = getEventsByAddress(wallet);
-    const elapsed = performance.now() - start;
-
-    expect(results.length).toBeGreaterThan(0);
-    expect(elapsed).toBeLessThan(200);
-
-    console.log(
-      `[perf] getEventsByAddress (${BATCH_SIZE} rows): ${elapsed.toFixed(2)} ms — ` +
-      `${results.length} rows returned`
-    );
-  });
-
   it("getJobsByWallet() completes within 200 ms for a known wallet", async () => {
     const wallet = makeAddress(0);
 
@@ -312,10 +290,6 @@ describe("Indexer load test — query performance at scale", () => {
     const ids2    = new Set(page2.jobs.map((j) => j.contract_id));
     const overlap = [...ids1].filter((id) => ids2.has(id));
     expect(overlap).toHaveLength(0);
-  });
-
-  it("getEventsByAddress() returns zero results for an address not in the batch", () => {
-    expect(getEventsByAddress(makeAddress(999))).toHaveLength(0);
   });
 
   it("getJobsByWallet() returns zero results for an address not in the batch", async () => {

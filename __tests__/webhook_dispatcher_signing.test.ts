@@ -5,6 +5,7 @@ import {
   setDb,
   insertEvent,
   addSubscription,
+  registerContract,
 } from "../src/indexer/db.js";
 
 const mockLogger = {
@@ -26,7 +27,7 @@ const {
 } = await import("../src/utils/webhook_dispatcher.js");
 
 const CONTRACT_A =
-  "CA3D5K7UXYZ123456789012345678901234567890123456789012345678901";
+  "CARZQMYKDGA4TTIE2XBDJ42EX27VYLLJGGG4WGUIXXWIVHPDTX3UCLJA";
 const WEBHOOK_URL = "https://example.com/webhook";
 
 let testDb: Database.Database;
@@ -45,6 +46,8 @@ beforeEach(() => {
   testDb.exec("DELETE FROM webhook_subscriptions");
   testDb.exec("DELETE FROM events");
   jest.clearAllMocks();
+  // Subscribe requires the contract to be indexed (monitored + active).
+  registerContract(CONTRACT_A, "test contract");
 });
 
 describe("webhook_dispatcher telemetry (#520)", () => {
@@ -52,7 +55,7 @@ describe("webhook_dispatcher telemetry (#520)", () => {
     const result = dispatchSubscribe({
       contract_id: CONTRACT_A,
       webhook_url: WEBHOOK_URL,
-      event_types: ["funded"],
+      event_types: ["fund"],
     });
 
     expect(result.ok).toBe(true);
@@ -108,7 +111,7 @@ describe("webhook_dispatcher telemetry (#520)", () => {
   });
 
   it("logs unsubscribe pipeline telemetry with matching traceId", () => {
-    addSubscription(CONTRACT_A, WEBHOOK_URL, ["funded"]);
+    addSubscription(CONTRACT_A, WEBHOOK_URL, ["fund"]);
 
     const result = dispatchUnsubscribe({
       contract_id: CONTRACT_A,
@@ -144,10 +147,10 @@ describe("webhook_dispatcher telemetry (#520)", () => {
     mockFetch.mockResolvedValue({ ok: true });
     (global as any).fetch = mockFetch;
 
-    addSubscription(CONTRACT_A, WEBHOOK_URL, ["funded"]);
+    addSubscription(CONTRACT_A, WEBHOOK_URL, ["fund"]);
     insertEvent(
       CONTRACT_A,
-      "funded",
+      "fund",
       100,
       1000,
       JSON.stringify({ client: "GCLIENT" })

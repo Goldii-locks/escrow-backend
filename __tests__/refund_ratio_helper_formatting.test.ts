@@ -5,19 +5,27 @@ import {
   MAX_SAFE_DIGITS,
   ERROR_CODES,
   DEFAULT_REFUND_ASSET_CONFIG,
-  KNOWN_REFUND_ASSETS,
   REFUND_CSV_HEADERS,
   REFUND_DB_COLUMN_SCHEMAS,
   resolveRefundAssetTicker,
   getRefundAssetFormatConfig,
+  resolveRefundAssetForToken,
   formatRefundValueForDb,
   parseRefundDbValue,
   formatRefundRowForDb,
+  formatRefundRowForDbForToken,
   buildRefundCsvBlock,
   writeRefundCsvFile,
   type FormattedRefundRow,
 } from "../src/utils/refund_ratio_helper.js";
+import {
+  TOKEN_LABEL_OVERRIDES,
+  clearTokenMetadataCache,
+  setTokenMetadataSimulatorForTests,
+} from "../src/utils/token-metadata.js";
 import { parseCSVContent } from "../src/utils/csv-serializer.js";
+
+const TOKEN_ADDRESS = "CTOKENCONTRACTADDRESS0000000000000000000000000000";
 
 function rowFor(amount: unknown, ratio: unknown, ticker?: unknown): FormattedRefundRow {
   const result = formatRefundRowForDb({ amount, ratio, ticker });
@@ -28,13 +36,18 @@ function rowFor(amount: unknown, ratio: unknown, ticker?: unknown): FormattedRef
 }
 
 describe("refund_ratio_helper unknown asset ticker fallbacks (#469)", () => {
-  it.each(Object.keys(KNOWN_REFUND_ASSETS))("resolves registered ticker %s", (ticker) => {
+  afterEach(() => {
+    setTokenMetadataSimulatorForTests(null);
+    clearTokenMetadataCache();
+  });
+
+  it.each(Object.keys(TOKEN_LABEL_OVERRIDES))("resolves registered ticker %s", (ticker) => {
     const resolution = resolveRefundAssetTicker(ticker);
     expect(resolution).toEqual({
       known: true,
       fallback: false,
       ticker,
-      config: KNOWN_REFUND_ASSETS[ticker],
+      config: { ticker, decimals: 7, label: TOKEN_LABEL_OVERRIDES[ticker] },
     });
   });
 
@@ -85,6 +98,59 @@ describe("refund_ratio_helper unknown asset ticker fallbacks (#469)", () => {
     expect(row.asset_ticker).toBe("SHINY");
     expect(row.decimals).toBe(DEFAULT_REFUND_ASSET_CONFIG.decimals);
     expect(row.amount).toBe("1.2345678");
+  });
+});
+
+describe("refund_ratio_helper token contract resolution (#699)", () => {
+  beforeEach(() => {
+    clearTokenMetadataCache();
+    setTokenMetadataSimulatorForTests(async (_address, method) => {
+      if (method === "decimals") return 6;
+      if (method === "symbol") return "USDC";
+      return "USD Coin";
+    });
+  });
+
+  afterEach(() => {
+    setTokenMetadataSimulatorForTests(null);
+    clearTokenMetadataCache();
+  });
+
+  it("reads the asset precision from the token contract", async () => {
+    const resolution = await resolveRefundAssetForToken(TOKEN_ADDRESS);
+    expect(resolution.known).toBe(true);
+    expect(resolution.ticker).toBe("USDC");
+    expect(resolution.config.decimals).toBe(6);
+    expect(resolution.config.label).toBe("USD Coin");
+  });
+
+  it("formats refund rows at the on-chain precision", async () => {
+    const result = await formatRefundRowForDbForToken({
+      amount: 1_500_000,
+      ratio: 2_500,
+      tokenAddress: TOKEN_ADDRESS,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.row.asset_ticker).toBe("USDC");
+    expect(result.row.decimals).toBe(6);
+    expect(result.row.amount).toBe("1.500000");
+    expect(result.row.refund_amount).toBe("0.375000");
+  });
+
+  it("reports an error when the token cannot be resolved", async () => {
+    setTokenMetadataSimulatorForTests(async () => {
+      throw new Error("RPC unavailable");
+    });
+    const result = await formatRefundRowForDbForToken({
+      amount: 1,
+      ratio: 100,
+      tokenAddress: TOKEN_ADDRESS,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toMatch(/RPC unavailable/);
+    }
   });
 });
 

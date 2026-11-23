@@ -13,6 +13,7 @@
  */
 
 import { validateLedgerAmount } from "./audit_ledger_sum_checker.js";
+import { formatAmountForDatabase, parseAmountFromDatabase } from "./db-precision.js";
 
 /**
  * Database precision schema types
@@ -99,26 +100,8 @@ export const STANDARD_PAYMENT_SCHEMAS: Record<string, DbPrecisionSchema> = {
   },
 };
 
-/**
- * Format a BigInt amount as a database-safe string
- * Preserves full precision without scientific notation
- */
-export function formatAmountForDatabase(amount: bigint): string {
-  // Convert BigInt to string directly (no precision loss)
-  return amount.toString();
-}
-
-/**
- * Parse a database formatted amount back to BigInt
- * Ensures no precision loss during round-trip
- */
-export function parseAmountFromDatabase(formatted: string): bigint {
-  try {
-    return BigInt(formatted);
-  } catch (error) {
-    throw new Error(`Invalid database amount format: ${formatted}`);
-  }
-}
+// Integer-string DB helpers live in db-precision.ts (#635).
+export { formatAmountForDatabase, parseAmountFromDatabase };
 
 /**
  * Validate that formatting preserves precision

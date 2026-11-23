@@ -3,9 +3,7 @@ import { runMigrations, setDb, insertEvent, setLastIndexedLedger, registerContra
 import {
   collectIndexerMetrics,
   metricsPayloadSizeBytes,
-  logIndexerMetricsDiagnostics,
   resetIndexerMetricsCollectorState,
-  getIndexerMetricsMonitor,
   IndexerMetricsFailureMonitor,
   DEFAULT_METRICS_FAILURE_THRESHOLD,
   DEFAULT_METRICS_STALL_THRESHOLD_MS,
@@ -32,9 +30,9 @@ interface SimulatedRpcEvent {
 function simulateRpcEvent(db: Database.Database, event: SimulatedRpcEvent): void {
   db.prepare(
     `INSERT OR IGNORE INTO events
-       (contract_id, event_type, ledger_sequence, timestamp, data_json)
-     VALUES (?, ?, ?, ?, ?)`
-  ).run(event.contractId, event.eventType, event.ledgerSequence, event.timestamp, event.dataJson);
+       (contract_id, event_type, ledger_sequence, timestamp, data_json, event_id)
+     VALUES (?, ?, ?, ?, ?, ?)`
+  ).run(event.contractId, event.eventType, event.ledgerSequence, event.timestamp, event.dataJson, `${event.contractId}:${event.ledgerSequence}:${event.eventType}`);
 }
 
 // ---------------------------------------------------------------------------

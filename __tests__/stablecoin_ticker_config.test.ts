@@ -1,83 +1,138 @@
 import {
   ERROR_CODES,
   DEFAULT_STABLECOIN_CONFIG,
-  STABLECOIN_CONFIGS,
   getStablecoinConfig,
-  stablecoin_cents_multiplier,
   toCents,
 } from "../src/utils/stablecoin_cents_multiplier.js";
+import {
+  clearTokenMetadataCache,
+  setTokenMetadataSimulatorForTests,
+  type TokenMetadataViewMethod,
+} from "../src/utils/token-metadata.js";
+
+// A token contract address used as the lookup key. The simulation is mocked,
+// so the value never has to exist on chain.
+const TOKEN_ADDRESS = "CTOKENCONTRACTADDRESS0000000000000000000000000000";
 
 // The largest amount the contract accepts.
 const I128_MAX = (2n ** 127n - 1n).toString();
 
-describe("stablecoin_cents_multiplier ticker configuration (#479)", () => {
-  describe("getStablecoinConfig", () => {
-    it("returns the configuration for a known ticker", () => {
-      expect(getStablecoinConfig("USDC")).toEqual(STABLECOIN_CONFIGS.USDC);
-    });
+function mockToken(
+  decimals: number,
+  symbol = "USDC",
+  name = "USD Coin"
+): (address: string, method: TokenMetadataViewMethod) => Promise<unknown> {
+  return async (_address: string, method: TokenMetadataViewMethod) => {
+    if (method === "decimals") return decimals;
+    if (method === "symbol") return symbol;
+    return name;
+  };
+}
 
-    it("is case-insensitive and ignores surrounding whitespace", () => {
-      expect(getStablecoinConfig("  usdt ")).toEqual(STABLECOIN_CONFIGS.USDT);
-    });
-
-    it.each([["UNKNOWN"], [""], [null], [undefined], ["toString"]])(
-      "falls back to the default config for %p",
-      (ticker) => {
-        expect(getStablecoinConfig(ticker as string | null | undefined)).toEqual(
-          DEFAULT_STABLECOIN_CONFIG
-        );
-      }
-    );
+describe("stablecoin_cents_multiplier token precision (#699)", () => {
+  beforeEach(() => {
+    clearTokenMetadataCache();
+    setTokenMetadataSimulatorForTests(mockToken(7));
   });
 
-  describe("stablecoin_cents_multiplier", () => {
-    it("returns the multiplier for known and unknown tickers", () => {
-      expect(stablecoin_cents_multiplier("USDC")).toBe(100);
-      expect(stablecoin_cents_multiplier("NOT_A_TOKEN")).toBe(
-        DEFAULT_STABLECOIN_CONFIG.centsMultiplier
-      );
+  afterEach(() => {
+    setTokenMetadataSimulatorForTests(null);
+    clearTokenMetadataCache();
+  });
+
+  describe("getStablecoinConfig", () => {
+    it("reads the precision from the token contract", async () => {
+      const config = await getStablecoinConfig(TOKEN_ADDRESS);
+      expect(config).toEqual({ decimals: 7, centsMultiplier: 10_000_000 });
+    });
+
+    it("uses the on-chain decimals instead of assuming 7", async () => {
+      setTokenMetadataSimulatorForTests(mockToken(6));
+      const config = await getStablecoinConfig(TOKEN_ADDRESS);
+      expect(config.decimals).toBe(6);
+      expect(config.centsMultiplier).toBe(1_000_000);
+    });
+
+    it("supports tokens without fractional digits", async () => {
+      setTokenMetadataSimulatorForTests(mockToken(0));
+      const config = await getStablecoinConfig(TOKEN_ADDRESS);
+      expect(config).toEqual({ decimals: 0, centsMultiplier: 1 });
+    });
+
+    it("falls back to the Stellar-native default precision", () => {
+      expect(DEFAULT_STABLECOIN_CONFIG).toEqual({
+        decimals: 7,
+        centsMultiplier: 10_000_000,
+      });
     });
   });
 
   describe("toCents", () => {
-    it("converts whole and fractional amounts exactly", () => {
-      expect(toCents("25", "USDC")).toEqual({ ok: true, value: 2500n });
-      expect(toCents("12.34", "USDC")).toEqual({ ok: true, value: 1234n });
-      expect(toCents(0.1, "USDC")).toEqual({ ok: true, value: 10n });
-      expect(toCents("0", "USDC")).toEqual({ ok: true, value: 0n });
+    it("converts whole and fractional amounts at the token precision", async () => {
+      await expect(toCents("25", TOKEN_ADDRESS)).resolves.toEqual({
+        ok: true,
+        value: 250_000_000n,
+      });
+      await expect(toCents("12.34", TOKEN_ADDRESS)).resolves.toEqual({
+        ok: true,
+        value: 123_400_000n,
+      });
+      await expect(toCents(0.1, TOKEN_ADDRESS)).resolves.toEqual({
+        ok: true,
+        value: 1_000_000n,
+      });
+      await expect(toCents("0", TOKEN_ADDRESS)).resolves.toEqual({
+        ok: true,
+        value: 0n,
+      });
     });
 
-    it("uses the default precision for unknown tickers", () => {
-      expect(toCents("1.5", "MYSTERY")).toEqual({ ok: true, value: 150n });
+    it("scales with the on-chain decimals", async () => {
+      setTokenMetadataSimulatorForTests(mockToken(2));
+      await expect(toCents("1.5", TOKEN_ADDRESS)).resolves.toEqual({
+        ok: true,
+        value: 150n,
+      });
     });
 
-    it("rejects negative amounts (#478)", () => {
-      const result = toCents("-1.50", "USDC");
+    it("rejects negative amounts (#478)", async () => {
+      const result = await toCents("-1.50", TOKEN_ADDRESS);
       expect(result.ok).toBe(false);
       if (!result.ok) {
         expect(result.code).toBe(ERROR_CODES.INVALID_AMOUNT);
       }
     });
 
-    it("rejects precision finer than the asset allows", () => {
-      const result = toCents("1.005", "USDC");
+    it("rejects precision finer than the asset allows", async () => {
+      // 8 fractional digits for a 7-decimal token.
+      const result = await toCents("1.00000001", TOKEN_ADDRESS);
       expect(result.ok).toBe(false);
       if (!result.ok) {
         expect(result.code).toBe(ERROR_CODES.INVALID_AMOUNT);
       }
     });
 
-    it("rejects non-numeric and non-finite input", () => {
-      expect(toCents("abc", "USDC").ok).toBe(false);
-      expect(toCents(Number.NaN, "USDC").ok).toBe(false);
+    it("rejects non-numeric and non-finite input", async () => {
+      expect((await toCents("abc", TOKEN_ADDRESS)).ok).toBe(false);
+      expect((await toCents(Number.NaN, TOKEN_ADDRESS)).ok).toBe(false);
     });
 
-    it("rejects results that leave the i128 range", () => {
-      // Whole units at i128 max overflow once scaled to cents.
-      const result = toCents(I128_MAX, "USDC");
+    it("rejects results that leave the i128 range", async () => {
+      const result = await toCents(I128_MAX, TOKEN_ADDRESS);
       expect(result.ok).toBe(false);
       if (!result.ok) {
         expect(result.code).toBe(ERROR_CODES.CONVERSION_OVERFLOW);
+      }
+    });
+
+    it("reports an error when the token metadata cannot be resolved", async () => {
+      setTokenMetadataSimulatorForTests(async () => {
+        throw new Error("RPC unavailable");
+      });
+      const result = await toCents("1", TOKEN_ADDRESS);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error).toMatch(/RPC unavailable/);
       }
     });
   });

@@ -24,7 +24,7 @@ app.use(express.json());
 app.use("/api/jobs", router);
 
 const VALID_BODY = {
-  contractId: "CDD5WKK3WT3QVKXMXTJNDIXE4T73FK6GGXDSD6UTJAH6YYZU52SQ4MUH",
+  contractId: "CARZQMYKDGA4TTIE2XBDJ42EX27VYLLJGGG4WGUIXXWIVHPDTX3UCLJA",
   method: "fund",
   args: [],
   sourceAddress: "GAODBHVR63Z56MVQRBEJSYM2H5423LJ4WAPUUBOFG4JYY72S6ROKVZRX",
@@ -47,7 +47,7 @@ describe("POST /api/jobs/build-tx – rate limiting", () => {
       sequenceNumber: () => "1",
       incrementSequenceNumber: () => {},
     });
-    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==" });
+    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==", hash: () => Buffer.from("aa".repeat(32), "hex"), fee: "100" });
   });
 
   afterEach(() => {

@@ -98,6 +98,27 @@ describe("pollEvents() contract resolution", () => {
     expect(mockGetEvents).not.toHaveBeenCalled();
     expect(getActiveContractIds()).toEqual([]);
   });
+
+  it("records a failure instead of rejecting when contract DB reads throw (#689)", async () => {
+    const { getConsecutiveFailures } = await import("../src/indexer/poller.js");
+    const db = await import("../src/indexer/db.js");
+
+    // Point the DB at a closed handle so getActiveContractIds throws
+    // (SQLITE_MISUSE) inside pollEvents' try block.
+    const brokenDb = new Database(":memory:");
+    brokenDb.close();
+    db.setDb(brokenDb as any);
+
+    await expect(pollEvents()).resolves.toBe(false);
+    expect(getConsecutiveFailures()).toBeGreaterThanOrEqual(1);
+
+    // Restore a working DB so the next cycle runs.
+    db.setDb(testDb);
+    mockGetLatestLedger.mockResolvedValue({ sequence: 100 });
+    mockGetEvents.mockResolvedValue({ events: [] });
+    process.env.CONTRACT_ID = ENV_CONTRACT;
+    await expect(pollEvents()).resolves.toBeDefined();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -183,7 +204,9 @@ describe("startPoller() / stopPoller() scheduling", () => {
     const pending = jest.getTimerCount();
 
     stopPoller();
-    expect(jest.getTimerCount()).toBe(pending - 1);
+    // stopPoller() clears both the poll-loop timer and the maintenance
+    // scheduler timer that startPoller() sets up, so the count drops by 2.
+    expect(jest.getTimerCount()).toBe(pending - 2);
     jest.advanceTimersByTime(10 * 60_000);
     await flushPromises();
     expect(mockGetLatestLedger).toHaveBeenCalledTimes(1);

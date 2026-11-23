@@ -635,4 +635,3 @@ fs.writeFileSync('payments.csv', csv, 'utf-8');
 
 - `src/utils/partial-payment-allocator.ts` - Core allocation logic
 - `src/utils/fee-deduction-calculator.ts` - Fee calculations
-- `src/middleware/partial-payment-allocator-rate-limit.ts` - Rate limiting

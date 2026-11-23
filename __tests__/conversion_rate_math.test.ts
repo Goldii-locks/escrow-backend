@@ -98,11 +98,12 @@ describe("conversion_rate_math overflow validation", () => {
       }
     });
 
-    it("rejects negative notional with NEGATIVE_RATE", () => {
+    it("rejects negative notional with NEGATIVE_AMOUNT", () => {
       const result = applyConversionRate("-100", "2");
       expect(result.ok).toBe(false);
       if (!result.ok) {
-        expect(result.code).toBe(ERROR_CODES.NEGATIVE_RATE);
+        // Notional errors carry amount codes, not rate codes (#704).
+        expect(result.code).toBe(ERROR_CODES.NEGATIVE_AMOUNT);
         expect(result.error).toMatch(/negative/i);
       }
     });

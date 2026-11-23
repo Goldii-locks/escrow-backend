@@ -9,6 +9,7 @@ export default tseslint.config(
       "coverage/**",
       "eslint.config.mjs",
       "jest.config.js",
+      "jest.e2e.config.js",
       "scripts/**",
     ],
   },
@@ -55,7 +56,7 @@ export default tseslint.config(
     },
   },
   {
-    files: ["**/*.test.ts", "__tests__/**/*.ts", "jest.setup.ts"],
+    files: ["**/*.test.ts", "__tests__/**/*.ts", "test/**/*.ts", "jest.setup.ts"],
     rules: {
       // Tests deliberately poke at loosely-typed mocks.
       "@typescript-eslint/no-explicit-any": "off",

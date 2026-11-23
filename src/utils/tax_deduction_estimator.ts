@@ -9,6 +9,8 @@ import { isAmountWithinRange } from "./digit-limit-validator.js";
  */
 
 import { divRound } from "./rounding.js";
+import { escapeCsvField, formatRowToCsv } from "./csv-serializer.js";
+import { formatDecimalForDb } from "./db-precision.js";
 
 /** Max decimal digits allowed for a single amount/variable (below Number.MAX_SAFE_INTEGER). */
 export const MAX_SAFE_DIGITS = 15;
@@ -39,21 +41,82 @@ export function setTaxEstimatorRateLimitMax(max: number | null): void {
   customRateLimitMax = max;
 }
 
-function resolveRateLimitMax(): number {
-  if (customRateLimitMax !== null && customRateLimitMax > 0) {
-    return customRateLimitMax;
-  }
-  const configured = Number(process.env.TAX_ESTIMATOR_RATE_MAX ?? RATE_LIMIT_MAX_CALLS);
-  return Number.isFinite(configured) && configured > 0 ? configured : RATE_LIMIT_MAX_CALLS;
+export type TaxLimiter =
+  | {
+      consume?: () => boolean | { ok: boolean; error?: string; code?: TaxEstimatorErrorCode };
+      check?: () => boolean | { ok: boolean; error?: string; code?: TaxEstimatorErrorCode };
+      checkRateLimit?: () => boolean | { ok: boolean; error?: string; code?: TaxEstimatorErrorCode };
+      tryConsume?: () => boolean;
+    }
+  | (() => boolean | { ok: boolean; error?: string; code?: TaxEstimatorErrorCode });
+
+export function createTaxTokenBucket(config: { maxCalls: number; windowMs?: number }): TaxLimiter {
+  let count = 0;
+  let start = Date.now();
+  const windowMs = config.windowMs ?? RATE_LIMIT_WINDOW_MS;
+  return {
+    consume: () => {
+      const now = Date.now();
+      if (now - start >= windowMs) {
+        start = now;
+        count = 0;
+      }
+      count += 1;
+      return count <= config.maxCalls;
+    },
+  };
 }
 
 /**
  * Guard against excessive tax deduction estimator call volume within a rolling window.
  * Callers get 429-style rejection semantics when thresholds are exceeded.
  */
-export function checkTaxEstimatorRateLimit():
+export function checkTaxEstimatorRateLimit(limiter?: TaxLimiter):
   | { ok: true }
   | { ok: false; error: string; code: TaxEstimatorErrorCode; status: 429 } {
+  if (limiter) {
+    let res: unknown;
+    if (typeof limiter === "function") {
+      res = limiter();
+    } else if (typeof limiter.consume === "function") {
+      res = limiter.consume();
+    } else if (typeof limiter.tryConsume === "function") {
+      res = limiter.tryConsume();
+    } else if (typeof limiter.checkRateLimit === "function") {
+      res = limiter.checkRateLimit();
+    } else if (typeof limiter.check === "function") {
+      res = limiter.check();
+    }
+
+    if (typeof res === "boolean") {
+      if (!res) {
+        return {
+          ok: false,
+          error: "tax_deduction_estimator rate limit exceeded",
+          code: ERROR_CODES.RATE_LIMITED,
+          status: 429,
+        };
+      }
+      return { ok: true };
+    }
+    if (res && typeof res === "object") {
+      const obj = res as { ok?: boolean; error?: string; code?: TaxEstimatorErrorCode };
+      if (obj.ok === false) {
+        return {
+          ok: false,
+          error: obj.error ?? "tax_deduction_estimator rate limit exceeded",
+          code: obj.code ?? ERROR_CODES.RATE_LIMITED,
+          status: 429,
+        };
+      }
+    }
+    return { ok: true };
+  }
+
+  if (customRateLimitMax === null) {
+    return { ok: true };
+  }
+
   const now = Date.now();
   if (now - rateLimitWindowStart >= RATE_LIMIT_WINDOW_MS) {
     rateLimitWindowStart = now;
@@ -61,7 +124,7 @@ export function checkTaxEstimatorRateLimit():
   }
 
   rateLimitCallCount += 1;
-  const maxCalls = resolveRateLimitMax();
+  const maxCalls = customRateLimitMax;
 
   if (rateLimitCallCount > maxCalls) {
     return {
@@ -123,6 +186,7 @@ export const VALID_ROUNDING_POLICIES: RoundingPolicy[] = [
 export interface CalculateTaxOptions {
   roundingMode?: RoundingPolicy;
   roundingPolicy?: RoundingPolicy;
+  limiter?: TaxLimiter;
 }
 
 /**
@@ -204,6 +268,10 @@ export const validateTaxDeductionRemainder = verifyTaxDeductionRemainder;
 
 const CONTRACT_TAX_BPS_SCALE = 10_000n;
 
+export interface PreviewTaxWithholdingOptions {
+  limiter?: TaxLimiter;
+}
+
 /**
  * Preview on-chain tax withholding using the same flat-bps arithmetic as the
  * contract: withholding = floor(remainingBalance * taxRateBps / 10_000).
@@ -213,9 +281,10 @@ const CONTRACT_TAX_BPS_SCALE = 10_000n;
  */
 export function previewTaxWithholding(
   remainingBalance: string | number | bigint,
-  taxRateBps: string | number | bigint
+  taxRateBps: string | number | bigint,
+  options?: PreviewTaxWithholdingOptions
 ): TaxWithholdingPreviewOutcome {
-  const rateLimitCheck = checkTaxEstimatorRateLimit();
+  const rateLimitCheck = checkTaxEstimatorRateLimit(options?.limiter);
   if (!rateLimitCheck.ok) {
     return rateLimitCheck;
   }
@@ -460,7 +529,7 @@ export function validateTaxRate(
 /**
  * Validate database precision schema parameters.
  */
-export function validateDbPrecisionSchema(
+export function validateTaxDbPrecisionSchema(
   schema: DbPrecisionSchema
 ): { ok: true } | { ok: false; error: string; code: TaxEstimatorErrorCode } {
   if (schema.scale !== undefined) {
@@ -532,7 +601,9 @@ export function calculateTaxDeduction(
     };
   }
 
-  const rateLimitCheck = checkTaxEstimatorRateLimit();
+  const limiter =
+    typeof roundingModeOrOptions === "object" ? roundingModeOrOptions?.limiter : undefined;
+  const rateLimitCheck = checkTaxEstimatorRateLimit(limiter);
   if (!rateLimitCheck.ok) {
     return rateLimitCheck;
   }
@@ -597,34 +668,24 @@ export function calculateTaxDeduction(
 export const estimateTaxDeduction = calculateTaxDeduction;
 
 /**
- * Format string numeric amount into fixed scale representation preserving full precision.
+ * Format a non-negative integer string at a fixed scale (shared
+ * `formatDecimalForDb`), optionally trimming trailing fractional zeroes.
  */
 function formatFixedScaleString(rawStr: string, scale: number, fixedScale: boolean): string {
-  if (scale === 0) {
-    return rawStr;
-  }
-  const padded = rawStr.padStart(scale + 1, "0");
-  const intPart = padded.slice(0, padded.length - scale);
-  let fracPart = padded.slice(padded.length - scale);
-
-  if (!fixedScale) {
-    fracPart = fracPart.replace(/0+$/, "");
-    return fracPart.length > 0 ? `${intPart}.${fracPart}` : intPart;
-  }
-  return `${intPart}.${fracPart}`;
+  return formatDecimalForDb(BigInt(rawStr), scale, { fixedScale });
 }
 
 /**
  * Format calculated tax deduction values to match database precision schemas.
  * Asserts written row attributes preserve full precision without floating-point loss.
  */
-export function formatForDbStorage(
+export function formatTaxForDbStorage(
   amount: string | number | bigint | TaxDeductionOutcome,
   taxRate: string | number | bigint = 0,
   scale = 7,
   schema?: DbPrecisionSchema
 ): DbFormatResult {
-  const schemaCheck = schema ? validateDbPrecisionSchema(schema) : { ok: true as const };
+  const schemaCheck = schema ? validateTaxDbPrecisionSchema(schema) : { ok: true as const };
   if (!schemaCheck.ok) {
     return schemaCheck;
   }
@@ -700,29 +761,31 @@ export function formatForDbStorage(
   };
 }
 
-/** Alias for formatForDbStorage. */
-export const formatColumnsForDbStorage = formatForDbStorage;
-export const formatDbColumns = formatForDbStorage;
+/** Aliases for formatTaxForDbStorage. */
+export const formatColumnsForDbStorage = formatTaxForDbStorage;
+export const formatDbColumns = formatTaxForDbStorage;
 
-export function formatRawForDbStorage(
+/** Format a raw tax amount for DB storage (tax-row variant of db-precision's). */
+export function formatTaxRawForDbStorage(
   rawAmount: string | number | bigint,
   taxRate: string | number | bigint,
   scale = 7,
   schema?: DbPrecisionSchema
 ): DbFormatResult {
-  return formatForDbStorage(rawAmount, taxRate, scale, { ...schema, inputType: "raw" });
+  return formatTaxForDbStorage(rawAmount, taxRate, scale, { ...schema, inputType: "raw" });
 }
 
-export function formatHumanForDbStorage(
+/** Format a human tax amount for DB storage (tax-row variant of db-precision's). */
+export function formatTaxHumanForDbStorage(
   humanAmount: string | number,
   taxRate: string | number | bigint,
   scale = 7,
   schema?: DbPrecisionSchema
 ): DbFormatResult {
-  return formatForDbStorage(humanAmount, taxRate, scale, { ...schema, inputType: "human" });
+  return formatTaxForDbStorage(humanAmount, taxRate, scale, { ...schema, inputType: "human" });
 }
 
-export function configureFormatColumns(defaultSchema?: DbPrecisionSchema) {
+export function configureTaxFormatColumns(defaultSchema?: DbPrecisionSchema) {
   return {
     schema: defaultSchema,
     format: (
@@ -731,15 +794,25 @@ export function configureFormatColumns(defaultSchema?: DbPrecisionSchema) {
       scale?: number,
       overrideSchema?: DbPrecisionSchema
     ) =>
-      formatForDbStorage(
+      formatTaxForDbStorage(
         amount,
         taxRate ?? 0,
         scale ?? defaultSchema?.scale ?? 7,
         { ...defaultSchema, ...overrideSchema }
       ),
-    validateSchema: (schema: DbPrecisionSchema) => validateDbPrecisionSchema(schema),
+    validateSchema: (schema: DbPrecisionSchema) => validateTaxDbPrecisionSchema(schema),
   };
 }
+
+// Public names kept for existing callers; these are the tax-row variants.
+// The generic amount + decimals formatters live in db-precision.ts.
+export {
+  validateTaxDbPrecisionSchema as validateDbPrecisionSchema,
+  formatTaxForDbStorage as formatForDbStorage,
+  formatTaxRawForDbStorage as formatRawForDbStorage,
+  formatTaxHumanForDbStorage as formatHumanForDbStorage,
+  configureTaxFormatColumns as configureFormatColumns,
+};
 
 /**
  * A single estimator input to be rendered as one CSV table row.
@@ -791,31 +864,16 @@ export type TaxCsvOutcome =
   | { ok: false; error: string; code: TaxEstimatorErrorCode; status?: number };
 
 /**
- * Escape a single CSV field following RFC 4180: fields containing the
- * delimiter, quotes, or line breaks are quoted, with inner quotes doubled.
+ * Escape a single CSV field following RFC 4180. Alias of the shared
+ * `escapeCsvField` in csv-serializer.ts.
  */
-export function escapeTaxCsvField(value: unknown, delimiter = ","): string {
-  if (value === null || value === undefined) {
-    return "";
-  }
-  const str = typeof value === "string" ? value : String(value);
-  if (
-    str.includes(delimiter) ||
-    str.includes('"') ||
-    str.includes("\n") ||
-    str.includes("\r")
-  ) {
-    return `"${str.replace(/"/g, '""')}"`;
-  }
-  return str;
-}
+export const escapeTaxCsvField = escapeCsvField;
 
 /**
- * Format an array of values into a single escaped CSV row.
+ * Format an array of values into a single escaped CSV row. Alias of the
+ * shared `formatRowToCsv` in csv-serializer.ts.
  */
-export function formatTaxCsvRow(values: unknown[], delimiter = ","): string {
-  return values.map((v) => escapeTaxCsvField(v, delimiter)).join(delimiter);
-}
+export const formatTaxCsvRow = formatRowToCsv;
 
 function csvError(error: string): TaxCsvOutcome {
   return { ok: false, error, code: ERROR_CODES.INVALID_CSV_INPUT };
@@ -847,7 +905,7 @@ export function buildTaxDeductionCsvBlock(
   }
 
   const scale = options.scale ?? 0;
-  const schemaCheck = validateDbPrecisionSchema({ scale });
+  const schemaCheck = validateTaxDbPrecisionSchema({ scale });
   if (!schemaCheck.ok) {
     return schemaCheck;
   }
@@ -1061,10 +1119,15 @@ function validateBracket(
  * Each bracket's tax is rounded with its own `roundingMode` if set, else the
  * call's rounding policy (default: "truncate").
  */
+export interface EstimateBracketTaxOptions {
+  roundingMode?: RoundingPolicy;
+  limiter?: TaxLimiter;
+}
+
 export function estimateBracketTax(
   grossAmount: string | number | bigint,
   brackets: TaxBracket[],
-  roundingModeOrOptions?: RoundingPolicy | { roundingMode?: RoundingPolicy }
+  roundingModeOrOptions?: RoundingPolicy | EstimateBracketTaxOptions
 ): BracketTaxOutcome {
   let roundingMode: RoundingPolicy = "truncate";
 
@@ -1084,7 +1147,9 @@ export function estimateBracketTax(
     };
   }
 
-  const rateLimitCheck = checkTaxEstimatorRateLimit();
+  const limiter =
+    typeof roundingModeOrOptions === "object" ? roundingModeOrOptions?.limiter : undefined;
+  const rateLimitCheck = checkTaxEstimatorRateLimit(limiter);
   if (!rateLimitCheck.ok) {
     return rateLimitCheck;
   }

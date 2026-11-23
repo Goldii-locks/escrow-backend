@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "@jest/globals";
+import { describe, it, expect } from "@jest/globals";
 import {
   escapeCSVField,
   formatCSVTimestamp,
@@ -89,7 +89,8 @@ describe("CSV Serializer", () => {
         ["-2+3 (string) is prefixed", "-2+3", "'-2+3"],
         ["- (single dash string) is prefixed", "-", "'-"],
         ["\\thello (tab-prefixed string) is prefixed", "\thello", "'\thello"],
-        ["\\rhello (CR-prefixed string) is prefixed", "\rhello", "'\rhello"],
+        // A CR also makes the field CSV-quoted.
+        ["\\rhello (CR-prefixed string) is prefixed", "\rhello", '"\'\rhello"'],
         // A formula string containing commas must be prefixed then CSV-quoted
         [
           "=formula,with,commas is prefixed and CSV-quoted",

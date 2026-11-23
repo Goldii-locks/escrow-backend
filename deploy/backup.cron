@@ -1,0 +1,10 @@
+# Daily indexer database backup at 03:15 UTC.
+# Install: sudo install -m 755 deploy/backup.sh /opt/escrow/backup.sh
+#          sudo cp deploy/backup.cron /etc/cron.d/escrow-backup
+# Set BACKUP_S3_BUCKET below before installing.
+SHELL=/bin/bash
+PATH=/usr/local/bin:/usr/bin:/bin
+BACKUP_S3_BUCKET=YOUR_BUCKET
+DB_PATH=/opt/escrow/data/escrow.db
+
+15 3 * * * root /opt/escrow/backup.sh >> /var/log/escrow-backup.log 2>&1

@@ -11,6 +11,7 @@ import {
   initSchema,
   setDb,
   addSubscription,
+  registerContract,
   closeDb,
 } from "../src/indexer/db.js";
 
@@ -28,7 +29,10 @@ jest.unstable_mockModule("../src/utils/logger.js", () => ({
 const { default: router } = await import("../src/routes/webhooks.js");
 
 const CONTRACT_A =
-  "CA3D5K7UXYZ123456789012345678901234567890123456789012345678901";
+  "CARZQMYKDGA4TTIE2XBDJ42EX27VYLLJGGG4WGUIXXWIVHPDTX3UCLJA";
+
+const ADMIN_KEY = "webhook-supertest-admin-key";
+const originalAdminKey = process.env.ADMIN_API_KEY;
 
 let testDb: Database.Database;
 let app: express.Express;
@@ -36,6 +40,13 @@ let app: express.Express;
 function buildApp(): express.Express {
   const instance = express();
   instance.use(express.json());
+  // #604: both mutation routes require the admin credential. This suite's
+  // subject is dispatcher validation, so attach the key centrally; the 401
+  // paths are covered in webhook-subscribe-auth.test.ts.
+  instance.use((req, _res, next) => {
+    req.headers["x-api-key"] = ADMIN_KEY;
+    next();
+  });
   instance.use("/api/webhooks", router);
   return instance;
 }
@@ -53,15 +64,23 @@ afterAll(() => {
 });
 
 beforeEach(() => {
+  process.env.ADMIN_API_KEY = ADMIN_KEY;
   testDb.exec("DELETE FROM webhook_subscriptions");
   jest.clearAllMocks();
+  // Subscribe requires the contract to be indexed (monitored + active).
+  registerContract(CONTRACT_A, "test contract");
+});
+
+afterEach(() => {
+  if (originalAdminKey === undefined) delete process.env.ADMIN_API_KEY;
+  else process.env.ADMIN_API_KEY = originalAdminKey;
 });
 
 describe("webhook_dispatcher supertest validations (#521)", () => {
   const VALID_BODY = {
     contract_id: CONTRACT_A,
     webhook_url: "https://example.com/hook",
-    event_types: ["funded", "approved"],
+    event_types: ["approve", "fund"],
   };
 
   it("POST /api/webhooks/subscribe returns 200 with subscription + traceId", async () => {
@@ -101,7 +120,7 @@ describe("webhook_dispatcher supertest validations (#521)", () => {
   it("POST /api/webhooks/subscribe returns 400 for non-array event_types", async () => {
     const res = await request(app)
       .post("/api/webhooks/subscribe")
-      .send({ ...VALID_BODY, event_types: "funded" })
+      .send({ ...VALID_BODY, event_types: "fund" })
       .expect(400);
 
     expect(res.body.success).toBe(false);
@@ -118,8 +137,24 @@ describe("webhook_dispatcher supertest validations (#521)", () => {
     expect(typeof res.body.data.traceId).toBe("string");
   });
 
+  it.each([
+    [[1], /only strings/i],
+    [[], /non-empty/i],
+    [["approved"], /unknown event_types: approved/i],
+    [["toolongname"], /between 1 and 9 characters/i],
+    [["fund", "fund"], /duplicates/i],
+  ])("rejects invalid event_types %j with an explanation", async (eventTypes, error) => {
+    const res = await request(app)
+      .post("/api/webhooks/subscribe")
+      .send({ ...VALID_BODY, event_types: eventTypes })
+      .expect(400);
+
+    expect(res.body.success).toBe(false);
+    expect(res.body.error).toMatch(error);
+  });
+
   it("POST /api/webhooks/unsubscribe returns 200 for an existing subscription", async () => {
-    addSubscription(CONTRACT_A, "https://example.com/hook", ["funded"]);
+    addSubscription(CONTRACT_A, "https://example.com/hook", ["fund"]);
 
     const res = await request(app)
       .post("/api/webhooks/unsubscribe")

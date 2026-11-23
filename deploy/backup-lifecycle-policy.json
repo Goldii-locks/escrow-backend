@@ -1,0 +1,11 @@
+{
+  "Rules": [
+    {
+      "ID": "expire-indexer-backups",
+      "Filter": { "Prefix": "escrow-backend/indexer/" },
+      "Status": "Enabled",
+      "Expiration": { "Days": 30 },
+      "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 7 }
+    }
+  ]
+}

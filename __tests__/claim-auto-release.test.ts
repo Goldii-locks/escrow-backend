@@ -2,7 +2,7 @@ import { jest } from "@jest/globals";
 import request from "supertest";
 import express from "express";
 
-const VALID_CONTRACT = "CDD5WKK3WT3QVKXMXTJNDIXE4T73FK6GGXDSD6UTJAH6YYZU52SQ4MUH";
+const VALID_CONTRACT = "CARZQMYKDGA4TTIE2XBDJ42EX27VYLLJGGG4WGUIXXWIVHPDTX3UCLJA";
 const VALID_ADDRESS = "GAODBHVR63Z56MVQRBEJSYM2H5423LJ4WAPUUBOFG4JYY72S6ROKVZRX";
 const VALID_ADDRESS_2 = "GB2AAQ5ECB3LG5XN7VJQ5T7VBR2DXBVXA5HH24376WIFPE7PQN6HBT5X"; // second G... address
 
@@ -20,7 +20,9 @@ jest.unstable_mockModule("../src/utils/logger.js", () => ({
   default: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
 }));
 
-const { default: router, resetClaimAutoReleaseCache } = await import("../src/routes/jobs.js");
+const { default: router, resetClaimAutoReleaseCache, UNSIGNED_TX_TIMEOUT_S } = await import(
+  "../src/routes/jobs.js"
+);
 const { default: mockLogger } = await import("../src/utils/logger.js");
 const { resetClaimAutoReleaseRateLimitBuckets } = await import(
   "../src/middleware/job-contract-rate-limit.js"
@@ -202,25 +204,26 @@ describe("POST /api/jobs/:contractId/milestones/:index/claim-auto-release – su
   });
 
   it("returns 200 with xdr on valid input", async () => {
-    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==" });
+    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==", hash: () => Buffer.from("aa".repeat(32), "hex"), fee: "100" });
 
     const res = await request(buildApp()).post(ENDPOINT).send(VALID_BODY).expect(200);
 
-    expect(res.body).toEqual({ success: true, xdr: "AAAAAQ==" });
+    expect(res.body.success).toBe(true); expect(res.body.data.xdr).toBe("AAAAAQ=="); expect(typeof res.body.data.hash).toBe('string');
   });
 
-  it("response shape is exactly { success, xdr }", async () => {
-    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==" });
+  it("response shape is exactly { success, data: { xdr } }", async () => {
+    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==", hash: () => Buffer.from("aa".repeat(32), "hex"), fee: "100" });
 
     const res = await request(buildApp()).post(ENDPOINT).send(VALID_BODY).expect(200);
 
-    expect(Object.keys(res.body)).toEqual(["success", "xdr"]);
+    expect(Object.keys(res.body)).toEqual(["success", "data"]);
+    expect(res.body.data.xdr).toBe("AAAAAQ=="); expect(res.body.data.hash).toBeDefined();
     expect(res.body.success).toBe(true);
-    expect(typeof res.body.xdr).toBe("string");
+    expect(typeof res.body.data.xdr).toBe("string");
   });
 
   it("calls getAccount with sourceAddress", async () => {
-    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==" });
+    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==", hash: () => Buffer.from("aa".repeat(32), "hex"), fee: "100" });
 
     await request(buildApp()).post(ENDPOINT).send(VALID_BODY).expect(200);
 
@@ -242,21 +245,21 @@ describe("POST /api/jobs/:contractId/milestones/:index/claim-auto-release – ca
   });
 
   it("serves the second request from cache without calling RPC again", async () => {
-    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==" });
+    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==", hash: () => Buffer.from("aa".repeat(32), "hex"), fee: "100" });
 
     const app = buildApp();
     const first = await request(app).post(ENDPOINT).send(VALID_BODY).expect(200);
     const second = await request(app).post(ENDPOINT).send(VALID_BODY).expect(200);
 
-    expect(first.body).toEqual({ success: true, xdr: "AAAAAQ==" });
-    expect(second.body).toEqual({ success: true, xdr: "AAAAAQ==" });
+    expect(first.body.success).toBe(true); expect(first.body.data.xdr).toBe("AAAAAQ==");
+    expect(second.body.success).toBe(true); expect(second.body.data.xdr).toBe("AAAAAQ==");
     expect(mockGetAccount).toHaveBeenCalledTimes(1);
     expect(mockPrepareTransaction).toHaveBeenCalledTimes(1);
   });
 
   it("deduplicates concurrent requests — only one RPC call", async () => {
     mockPrepareTransaction.mockImplementation(
-      () => new Promise((resolve) => setTimeout(() => resolve({ toXDR: () => "AAAAAQ==" }), 20)),
+      () => new Promise((resolve) => setTimeout(() => resolve({ toXDR: () => "AAAAAQ==", hash: () => Buffer.from("aa".repeat(32), "hex"), fee: "100" }), 20)),
     );
 
     const app = buildApp();
@@ -268,7 +271,7 @@ describe("POST /api/jobs/:contractId/milestones/:index/claim-auto-release – ca
 
     for (const res of results) {
       expect(res.status).toBe(200);
-      expect(res.body).toEqual({ success: true, xdr: "AAAAAQ==" });
+      expect(res.body.success).toBe(true); expect(res.body.data.xdr).toBe("AAAAAQ=="); expect(typeof res.body.data.hash).toBe('string');
     }
     expect(mockGetAccount).toHaveBeenCalledTimes(1);
     expect(mockPrepareTransaction).toHaveBeenCalledTimes(1);
@@ -276,8 +279,8 @@ describe("POST /api/jobs/:contractId/milestones/:index/claim-auto-release – ca
 
   it("different sourceAddress values each trigger their own RPC call", async () => {
     mockPrepareTransaction
-      .mockResolvedValueOnce({ toXDR: () => "XDR_A" })
-      .mockResolvedValueOnce({ toXDR: () => "XDR_B" });
+      .mockResolvedValueOnce({ toXDR: () => "XDR_A", hash: () => Buffer.alloc(32, 0xaa), fee: "100" })
+      .mockResolvedValueOnce({ toXDR: () => "XDR_B", hash: () => Buffer.alloc(32, 0xaa), fee: "100" });
 
     const app = buildApp();
 
@@ -287,15 +290,15 @@ describe("POST /api/jobs/:contractId/milestones/:index/claim-auto-release – ca
       .send({ sourceAddress: VALID_ADDRESS_2 })
       .expect(200);
 
-    expect(resA.body.xdr).toBe("XDR_A");
-    expect(resB.body.xdr).toBe("XDR_B");
+    expect(resA.body.data.xdr).toBe("XDR_A");
+    expect(resB.body.data.xdr).toBe("XDR_B");
     expect(mockPrepareTransaction).toHaveBeenCalledTimes(2);
   });
 
   it("different milestone indexes get separate cache entries", async () => {
     mockPrepareTransaction
-      .mockResolvedValueOnce({ toXDR: () => "XDR_0" })
-      .mockResolvedValueOnce({ toXDR: () => "XDR_1" });
+      .mockResolvedValueOnce({ toXDR: () => "XDR_0", hash: () => Buffer.alloc(32, 0xaa), fee: "100" })
+      .mockResolvedValueOnce({ toXDR: () => "XDR_1", hash: () => Buffer.alloc(32, 0xaa), fee: "100" });
 
     const app = buildApp();
 
@@ -308,22 +311,22 @@ describe("POST /api/jobs/:contractId/milestones/:index/claim-auto-release – ca
       .send(VALID_BODY)
       .expect(200);
 
-    expect(res0.body.xdr).toBe("XDR_0");
-    expect(res1.body.xdr).toBe("XDR_1");
+    expect(res0.body.data.xdr).toBe("XDR_0");
+    expect(res1.body.data.xdr).toBe("XDR_1");
     expect(mockPrepareTransaction).toHaveBeenCalledTimes(2);
   });
 
   it("does not cache a failed request — next request retries RPC", async () => {
     mockPrepareTransaction
       .mockRejectedValueOnce(new Error("RPC error"))
-      .mockResolvedValueOnce({ toXDR: () => "AAAAAQ==" });
+      .mockResolvedValueOnce({ toXDR: () => "AAAAAQ==", hash: () => Buffer.from("aa".repeat(32), "hex"), fee: "100" });
 
     const app = buildApp();
 
     await request(app).post(ENDPOINT).send(VALID_BODY).expect(500);
     const retry = await request(app).post(ENDPOINT).send(VALID_BODY).expect(200);
 
-    expect(retry.body).toEqual({ success: true, xdr: "AAAAAQ==" });
+    expect(retry.body.success).toBe(true); expect(retry.body.data.xdr).toBe("AAAAAQ==");
     expect(mockPrepareTransaction).toHaveBeenCalledTimes(2);
   });
 });
@@ -436,10 +439,10 @@ describe("POST /api/jobs/:contractId/milestones/:index/claim-auto-release – er
     mockPrepareTransaction.mockRejectedValueOnce(new Error("temporary RPC failure"));
     await request(buildApp()).post(ENDPOINT).send(VALID_BODY).expect(500);
 
-    mockPrepareTransaction.mockResolvedValueOnce({ toXDR: () => "AAAAAQ==" });
+    mockPrepareTransaction.mockResolvedValueOnce({ toXDR: () => "AAAAAQ==", hash: () => Buffer.from("aa".repeat(32), "hex"), fee: "100" });
     const res = await request(buildApp()).post(ENDPOINT).send(VALID_BODY).expect(200);
 
-    expect(res.body).toEqual({ success: true, xdr: "AAAAAQ==" });
+    expect(res.body.success).toBe(true); expect(res.body.data.xdr).toBe("AAAAAQ=="); expect(typeof res.body.data.hash).toBe('string');
     expect(mockPrepareTransaction).toHaveBeenCalledTimes(2);
   });
 });
@@ -475,7 +478,7 @@ describe("POST /api/jobs/:contractId/milestones/:index/claim-auto-release – tr
   });
 
   it("logs request received with path vars (contractId, index, sourceAddress) and traceId", async () => {
-    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==" });
+    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==", hash: () => Buffer.from("aa".repeat(32), "hex"), fee: "100" });
 
     await request(buildApp()).post(ENDPOINT).send(VALID_BODY).expect(200);
 
@@ -490,7 +493,7 @@ describe("POST /api/jobs/:contractId/milestones/:index/claim-auto-release – tr
   });
 
   it("logs response sent with status=200 on success (RPC-built XDR) and includes all path vars + success", async () => {
-    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==" });
+    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==", hash: () => Buffer.from("aa".repeat(32), "hex"), fee: "100" });
 
     await request(buildApp()).post(ENDPOINT).send(VALID_BODY).expect(200);
 
@@ -511,7 +514,7 @@ describe("POST /api/jobs/:contractId/milestones/:index/claim-auto-release – tr
   });
 
   it("logs XDR built successfully on RPC build path with xdrLength + path vars", async () => {
-    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==" });
+    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==", hash: () => Buffer.from("aa".repeat(32), "hex"), fee: "100" });
 
     await request(buildApp()).post(ENDPOINT).send(VALID_BODY).expect(200);
 
@@ -527,7 +530,7 @@ describe("POST /api/jobs/:contractId/milestones/:index/claim-auto-release – tr
   });
 
   it("logs Fetching XDR from Stellar RPC before each RPC call", async () => {
-    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==" });
+    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==", hash: () => Buffer.from("aa".repeat(32), "hex"), fee: "100" });
 
     await request(buildApp()).post(ENDPOINT).send(VALID_BODY).expect(200);
 
@@ -542,7 +545,7 @@ describe("POST /api/jobs/:contractId/milestones/:index/claim-auto-release – tr
   });
 
   it("logs cache-hit served with source=cache, xdrLength, and traceId", async () => {
-    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==" });
+    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==", hash: () => Buffer.from("aa".repeat(32), "hex"), fee: "100" });
     const app = buildApp();
 
     await request(app).post(ENDPOINT).send(VALID_BODY).expect(200);
@@ -563,7 +566,7 @@ describe("POST /api/jobs/:contractId/milestones/:index/claim-auto-release – tr
   });
 
   it("logs response sent with cached=true on cache hit and includes all path vars + success", async () => {
-    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==" });
+    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==", hash: () => Buffer.from("aa".repeat(32), "hex"), fee: "100" });
     const app = buildApp();
 
     await request(app).post(ENDPOINT).send(VALID_BODY).expect(200);
@@ -587,7 +590,7 @@ describe("POST /api/jobs/:contractId/milestones/:index/claim-auto-release – tr
 
   it("logs in-flight hit with source=in-flight on concurrent dedup", async () => {
     mockPrepareTransaction.mockImplementation(
-      () => new Promise((resolve) => setTimeout(() => resolve({ toXDR: () => "AAAAAQ==" }), 20)),
+      () => new Promise((resolve) => setTimeout(() => resolve({ toXDR: () => "AAAAAQ==", hash: () => Buffer.from("aa".repeat(32), "hex"), fee: "100" }), 20)),
     );
     const app = buildApp();
 
@@ -642,7 +645,7 @@ describe("POST /api/jobs/:contractId/milestones/:index/claim-auto-release – tr
   });
 
   it("traceId on request received matches traceId on built-successfully log", async () => {
-    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==" });
+    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==", hash: () => Buffer.from("aa".repeat(32), "hex"), fee: "100" });
 
     await request(buildApp()).post(ENDPOINT).send(VALID_BODY).expect(200);
 
@@ -668,7 +671,7 @@ describe("POST /api/jobs/:contractId/milestones/:index/claim-auto-release – tr
   });
 
   it("traceId on request received matches traceId on response-sent log", async () => {
-    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==" });
+    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==", hash: () => Buffer.from("aa".repeat(32), "hex"), fee: "100" });
 
     await request(buildApp()).post(ENDPOINT).send(VALID_BODY).expect(200);
 
@@ -688,7 +691,7 @@ describe("POST /api/jobs/:contractId/milestones/:index/claim-auto-release – tr
   });
 
   it("does not log Failed to build on success path", async () => {
-    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==" });
+    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==", hash: () => Buffer.from("aa".repeat(32), "hex"), fee: "100" });
 
     await request(buildApp()).post(ENDPOINT).send(VALID_BODY).expect(200);
 
@@ -699,7 +702,7 @@ describe("POST /api/jobs/:contractId/milestones/:index/claim-auto-release – tr
   });
 
   it("uses non-negative xdrLength for every success-path info call meta", async () => {
-    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==" });
+    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==", hash: () => Buffer.from("aa".repeat(32), "hex"), fee: "100" });
     const app = buildApp();
 
     await request(app).post(ENDPOINT).send(VALID_BODY).expect(200);
@@ -737,7 +740,7 @@ describe("POST /api/jobs/:contractId/milestones/:index/claim-auto-release – tr
     expect((meta.params as Record<string, unknown>).contractId).toBe("not-a-valid-contract");
   });
 
-  it("warn validation log contains invalid body on bad sourceAddress", async () => {
+  it("warn validation log describes the invalid body without its values (#680)", async () => {
     const badBody = { sourceAddress: "bad" };
     await request(buildApp()).post(ENDPOINT).send(badBody).expect(400);
 
@@ -746,11 +749,13 @@ describe("POST /api/jobs/:contractId/milestones/:index/claim-auto-release – tr
     );
     expect(warnCalls).toHaveLength(1);
     const [, meta] = warnCalls[0] as [string, Record<string, unknown>];
-    expect(meta.body).toEqual(badBody);
+    expect(meta.body).toBeUndefined();
+    expect(meta.bodyKeys).toEqual(["sourceAddress"]);
+    expect(meta.issuePaths).toEqual(["sourceAddress"]);
   });
 
   it("trace: logs handler entered with path vars and params", async () => {
-    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==" });
+    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==", hash: () => Buffer.from("aa".repeat(32), "hex"), fee: "100" });
 
     await request(buildApp()).post(ENDPOINT).send(VALID_BODY).expect(200);
 
@@ -768,7 +773,7 @@ describe("POST /api/jobs/:contractId/milestones/:index/claim-auto-release – tr
   });
 
   it("trace: logs cache check with cacheKey on every request", async () => {
-    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==" });
+    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==", hash: () => Buffer.from("aa".repeat(32), "hex"), fee: "100" });
 
     await request(buildApp()).post(ENDPOINT).send(VALID_BODY).expect(200);
 
@@ -785,7 +790,7 @@ describe("POST /api/jobs/:contractId/milestones/:index/claim-auto-release – tr
   });
 
   it("trace: logs response body prepared with success and xdrLength on RPC success", async () => {
-    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==" });
+    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==", hash: () => Buffer.from("aa".repeat(32), "hex"), fee: "100" });
 
     await request(buildApp()).post(ENDPOINT).send(VALID_BODY).expect(200);
 
@@ -803,7 +808,7 @@ describe("POST /api/jobs/:contractId/milestones/:index/claim-auto-release – tr
   });
 
   it("trace: logs response body prepared with success + xdrLength on cache hit", async () => {
-    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==" });
+    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==", hash: () => Buffer.from("aa".repeat(32), "hex"), fee: "100" });
     const app = buildApp();
 
     await request(app).post(ENDPOINT).send(VALID_BODY).expect(200);
@@ -823,7 +828,7 @@ describe("POST /api/jobs/:contractId/milestones/:index/claim-auto-release – tr
   });
 
   it("trace: logs in-flight check and register/unregister around RPC call", async () => {
-    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==" });
+    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==", hash: () => Buffer.from("aa".repeat(32), "hex"), fee: "100" });
 
     await request(buildApp()).post(ENDPOINT).send(VALID_BODY).expect(200);
 
@@ -839,7 +844,7 @@ describe("POST /api/jobs/:contractId/milestones/:index/claim-auto-release – tr
   });
 
   it("trace: logs building transaction steps during RPC build", async () => {
-    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==" });
+    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==", hash: () => Buffer.from("aa".repeat(32), "hex"), fee: "100" });
 
     await request(buildApp()).post(ENDPOINT).send(VALID_BODY).expect(200);
 
@@ -850,7 +855,8 @@ describe("POST /api/jobs/:contractId/milestones/:index/claim-auto-release – tr
     expect(buildMeta.index).toBe(0);
     expect(buildMeta.sourceAddress).toBe(VALID_ADDRESS);
     expect(buildMeta.fee).toBeDefined();
-    expect(buildMeta.timeout).toBe(30);
+    // Unsigned XDRs get a 120–300s signing window (#677).
+    expect(buildMeta.timeout).toBe(UNSIGNED_TX_TIMEOUT_S);
 
     expect(debugCallsFor("Fetching Stellar account")).toHaveLength(1);
     expect(debugCallsFor("Stellar account fetched")).toHaveLength(1);
@@ -951,7 +957,7 @@ describe("POST /api/jobs/:contractId/milestones/:index/claim-auto-release – ra
     resetClaimAutoReleaseRateLimitBuckets();
     process.env.CLAIM_AUTO_RELEASE_RATE_MAX = "3";
     process.env.CLAIM_AUTO_RELEASE_RATE_WINDOW_MS = "60000";
-    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==" });
+    mockPrepareTransaction.mockResolvedValue({ toXDR: () => "AAAAAQ==", hash: () => Buffer.from("aa".repeat(32), "hex"), fee: "100" });
   });
 
   afterEach(() => {

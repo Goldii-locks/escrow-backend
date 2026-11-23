@@ -3,19 +3,27 @@
  *
  * Orchestrates subscription mutations and outbound delivery with Winston
  * debug telemetry so pipeline flows can be traced end-to-end via traceId.
+ *
+ * This is the single webhook dispatcher module. Delivery itself (including
+ * notification opt-out handling) lives in src/indexer/webhook-delivery.ts.
  */
 
 import { randomUUID } from "crypto";
 import {
   addSubscription,
   removeSubscription,
-  getSubscriptions,
+  getActiveSubscriptions,
+  getActiveContractIds,
   type WebhookSubscription,
 } from "../indexer/db.js";
 import { deliverWebhooks } from "../indexer/webhook-delivery.js";
+import { isValidStellarContractId } from "./stellar.js";
+import { EVENT_TYPES } from "../indexer/event_type_filter.js";
 import logger from "./logger.js";
+import { validateWebhookUrl } from "./webhook-url-guard.js";
 
 export const WEBHOOK_DISPATCHER_ROUTE_PREFIX = "/api/webhooks";
+const EVENT_TYPE_SET = new Set<string>(EVENT_TYPES);
 
 export type SubscribeInput = {
   contract_id: string;
@@ -44,22 +52,74 @@ export type UnsubscribeResult =
   | DispatchFailure;
 
 function normalizeEventTypes(
-  event_types: SubscribeInput["event_types"]
+  eventTypes: unknown,
 ): { ok: true; types: string[] } | { ok: false; error: string } {
-  if (!event_types || event_types === "*") {
+  if (eventTypes === undefined || eventTypes === "*") {
     return { ok: true, types: ["*"] };
   }
-  if (Array.isArray(event_types)) {
-    return { ok: true, types: event_types };
+  if (!Array.isArray(eventTypes)) {
+    return {
+      ok: false,
+      error: "event_types must be a non-empty array of event names or '*'",
+    };
   }
-  return { ok: false, error: "event_types must be an array of strings or '*'" };
+  if (eventTypes.length === 0) {
+    return { ok: false, error: "event_types must be a non-empty array" };
+  }
+
+  const nonStrings = eventTypes.filter(
+    (type: unknown) => typeof type !== "string",
+  );
+  if (nonStrings.length > 0) {
+    return {
+      ok: false,
+      error: `event_types must contain only strings; invalid values: ${JSON.stringify(nonStrings)}`,
+    };
+  }
+
+  const types = eventTypes.filter(
+    (type: unknown): type is string => typeof type === "string",
+  );
+  const invalidLength = types.filter((type) => type.length < 1 || type.length > 9);
+  if (invalidLength.length > 0) {
+    return {
+      ok: false,
+      error: `event_types must be between 1 and 9 characters; invalid values: ${invalidLength.join(", ")}`,
+    };
+  }
+
+  const duplicates = types.filter(
+    (type, index) => types.indexOf(type) !== index,
+  );
+  if (duplicates.length > 0) {
+    return {
+      ok: false,
+      error: `event_types must not contain duplicates: ${[...new Set(duplicates)].join(", ")}`,
+    };
+  }
+
+  // "*" inside the array is accepted as the wildcard, as delivery matching
+  // treats it (#774).
+  const unknownTypes = types.filter(
+    (type) => type !== "*" && !EVENT_TYPE_SET.has(type),
+  );
+  if (unknownTypes.length > 0) {
+    return {
+      ok: false,
+      error: `Unknown event_types: ${unknownTypes.join(", ")}`,
+    };
+  }
+
+  return { ok: true, types };
 }
 
 /**
  * Subscribe a webhook URL to contract events. Emits pipeline telemetry.
  */
-export function dispatchSubscribe(input: SubscribeInput): SubscribeResult {
-  const traceId = randomUUID();
+export function dispatchSubscribe(
+  input: SubscribeInput,
+  traceId: string = randomUUID(),
+): SubscribeResult {
   const route = `${WEBHOOK_DISPATCHER_ROUTE_PREFIX}/subscribe`;
 
   logger.debug("webhook_dispatcher subscribe handler entered", {
@@ -96,6 +156,34 @@ export function dispatchSubscribe(input: SubscribeInput): SubscribeResult {
     return { ok: false, status: 400, error, traceId };
   }
 
+  if (!isValidStellarContractId(input.contract_id)) {
+    const error = "Invalid contract_id";
+    logger.debug("webhook_dispatcher subscribe response sent", {
+      traceId,
+      route,
+      status: 400,
+      success: false,
+      error,
+      contractId: input.contract_id,
+    });
+    return { ok: false, status: 400, error, traceId };
+  }
+
+  // Reject non-https schemes, private/loopback/link-local/metadata IP
+  // literals and localhost before the URL is ever stored (#605). Delivery
+  // re-checks the resolved address, because DNS can be re-pointed later.
+  const urlCheck = validateWebhookUrl(input.webhook_url);
+  if (!urlCheck.ok) {
+    logger.debug("webhook_dispatcher subscribe response sent", {
+      traceId,
+      route,
+      status: 400,
+      success: false,
+      error: urlCheck.error,
+    });
+    return { ok: false, status: 400, error: urlCheck.error, traceId };
+  }
+
   const normalized = normalizeEventTypes(input.event_types);
   if (!normalized.ok) {
     logger.debug("webhook_dispatcher subscribe response sent", {
@@ -109,6 +197,22 @@ export function dispatchSubscribe(input: SubscribeInput): SubscribeResult {
   }
 
   try {
+    // A contract that isn't monitored can never receive deliveries, so
+    // subscribing to it is rejected with 404 rather than silently storing a
+    // dead subscription.
+    if (!getActiveContractIds().includes(input.contract_id)) {
+      const error = "Contract is not indexed";
+      logger.debug("webhook_dispatcher subscribe response sent", {
+        traceId,
+        route,
+        status: 404,
+        success: false,
+        error,
+        contractId: input.contract_id,
+      });
+      return { ok: false, status: 404, error, traceId };
+    }
+
     const subscription = addSubscription(
       input.contract_id,
       input.webhook_url,
@@ -154,8 +258,10 @@ export function dispatchSubscribe(input: SubscribeInput): SubscribeResult {
 /**
  * Unsubscribe a webhook URL. Emits pipeline telemetry.
  */
-export function dispatchUnsubscribe(input: UnsubscribeInput): UnsubscribeResult {
-  const traceId = randomUUID();
+export function dispatchUnsubscribe(
+  input: UnsubscribeInput,
+  traceId: string = randomUUID(),
+): UnsubscribeResult {
   const route = `${WEBHOOK_DISPATCHER_ROUTE_PREFIX}/unsubscribe`;
 
   logger.debug("webhook_dispatcher unsubscribe handler entered", {
@@ -238,7 +344,9 @@ export async function dispatchLedgerRange(
   subscriptionCount: number;
 }> {
   const traceId = randomUUID();
-  const subscriptions = getSubscriptions();
+  // Auto-disabled subscriptions are skipped by the delivery loop (#701), so
+  // only the active ones are counted here.
+  const subscriptions = getActiveSubscriptions();
 
   logger.debug("webhook_dispatcher delivery pipeline started", {
     traceId,

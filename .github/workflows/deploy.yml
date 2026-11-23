@@ -3,12 +3,28 @@
 # Requires one repo secret: AWS_DEPLOY_ROLE_ARN
 # No access keys. Auth is OIDC — GitHub mints a short-lived token, AWS
 # trades it for temporary credentials. Nothing long-lived is stored.
+#
+# Trigger strategy (Issue 2)
+# ─────────────────────────
+# The workflow fires ONLY after the CI workflow completes on main AND its
+# conclusion is "success".  This guarantees a push with failing tests can
+# never produce an ECR image or execute an SSM deployment command.
+#
+# workflow_dispatch is preserved so engineers can re-deploy the current
+# main HEAD without re-running CI (e.g. after an infra-only change on the
+# server).  The CI-gate condition is skipped for manual triggers because
+# the deployer is assumed to have verified correctness themselves.
 
 name: Deploy to AWS
 
 on:
-  push:
+  # Issue 2: gate on CI success instead of firing in parallel with it.
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
     branches: [main]
+
+  # Manual re-deploy without re-running CI.
   workflow_dispatch:
 
 permissions:
@@ -27,14 +43,28 @@ concurrency:
 jobs:
   build:
     name: Build and push image
+    # Issue 2: for workflow_run events only proceed when CI passed.
+    # workflow_dispatch events have no workflow_run context, so the guard
+    # evaluates to true and manual deploys are always allowed.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     outputs:
       image_tag: ${{ steps.meta.outputs.tag }}
     steps:
+      # Issue 2: checkout the exact commit that CI tested, not whatever
+      # HEAD happens to be when this job starts.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
       - id: meta
-        run: echo "tag=${GITHUB_SHA::12}-${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+        # Tag with the commit CI tested; on workflow_run GITHUB_SHA is the
+        # tip of main, which may be newer.
+        env:
+          BUILD_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+        run: echo "tag=${BUILD_SHA::12}-${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
 
       - uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -50,8 +80,6 @@ jobs:
         with:
           context: .
           push: true
-          # Must match your EC2 instance architecture.
-          # t3.* = linux/amd64. t4g.* (Graviton) = linux/arm64.
           platforms: linux/arm64
           tags: |
             ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.meta.outputs.tag }}
@@ -94,10 +122,10 @@ jobs:
             case "$STATUS" in
               Success)   break ;;
               Failed|Cancelled|TimedOut)
-                echo "::error::deploy finished with status ${STATUS}" ;;
+                echo "::error::deploy finished with status ${STATUS}"
+                break ;;
               *) sleep 5; continue ;;
             esac
-            break
           done
 
           aws ssm list-command-invocations \
@@ -107,17 +135,59 @@ jobs:
 
           [ "$STATUS" = "Success" ] || exit 1
 
-      - name: Smoke test
+      # ── Smoke tests (Issues 3 & 4) ─────────────────────────────────────────
+      #
+      # Two separate steps so the failure message clearly identifies which
+      # layer is broken: nginx (frontend/healthz) or the backend process.
+      #
+      # All curl commands:
+      #   • Use HTTPS to avoid 301 HTTP→HTTPS redirects being treated as success
+      #   • Use -L to follow any remaining redirects within HTTPS
+      #   • Use --fail-with-body so any HTTP 4xx/5xx exits non-zero and the
+      #     response body is printed for diagnosis
+      #   • Assert the exact response body where the contract is well-defined
+
+      - name: Smoke test — nginx / frontend
         run: |
           set -euo pipefail
-          BASE="http://${{ secrets.DEPLOY_HOST }}"
+          # The certificate is issued for milestonepay.app; an IP-based
+          # DEPLOY_HOST would fail TLS verification.
+          BASE="https://milestonepay.app"
+
           for i in $(seq 1 12); do
-            if curl -fsS --max-time 5 "${BASE}/healthz" >/dev/null; then
-              echo "frontend healthy"
+            if curl --fail-with-body -sS -L --max-time 5 "${BASE}/healthz" >/dev/null 2>&1; then
+              echo "nginx healthy"
               break
             fi
-            echo "waiting for frontend... (${i}/12)"; sleep 5
+            echo "waiting for nginx... (${i}/12)"; sleep 5
           done
-          curl -fsS --max-time 5 "${BASE}/healthz"
-          curl -fsS --max-time 10 "${BASE}/health" || \
-            echo "::warning::backend /health not responding — expected while the contract migration is outstanding"
+
+          # Final assertion — exits non-zero on any HTTP error.
+          curl --fail-with-body -sS -L --max-time 5 "${BASE}/healthz"
+
+      # Issue 3 & 4: backend /health is proxied through nginx to the Express
+      # process.  nginx alone returning 200 on /healthz is not sufficient
+      # evidence the backend booted successfully.  This step waits for the
+      # backend to become available and asserts the exact JSON contract.
+      - name: Smoke test — backend /health
+        run: |
+          set -euo pipefail
+          # The certificate is issued for milestonepay.app; an IP-based
+          # DEPLOY_HOST would fail TLS verification.
+          BASE="https://milestonepay.app"
+
+          # Poll for up to 90 s (18 × 5 s).  A backend container that crashed
+          # on boot will never answer this endpoint so the step fails hard.
+          for i in $(seq 1 18); do
+            RESPONSE=$(curl --fail-with-body -sS -L --max-time 10 \
+              "${BASE}/health" 2>/dev/null || true)
+            if echo "${RESPONSE}" | grep -q '"status":"ok"'; then
+              echo "backend healthy: ${RESPONSE}"
+              exit 0
+            fi
+            echo "waiting for backend... (${i}/18)  response=${RESPONSE}"
+            sleep 5
+          done
+
+          echo "::error::backend /health never returned {\"status\":\"ok\"} within 90 s"
+          exit 1

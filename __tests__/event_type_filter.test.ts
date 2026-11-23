@@ -10,12 +10,15 @@ import {
   removeSubscription,
   getSubscriptions,
   getSubscriptionsForContract,
+  registerContract,
   type WebhookSubscription,
 } from "../src/indexer/db.js";
 import logger from "../src/utils/logger.js";
 
-const CONTRACT_A = "CA3D5K7UXYZ123456789012345678901234567890123456789012345678901";
-const CONTRACT_B = "CB3D5K7UXYZ123456789012345678901234567890123456789012345678902";
+const CONTRACT_A =
+  "CARZQMYKDGA4TTIE2XBDJ42EX27VYLLJGGG4WGUIXXWIVHPDTX3UCLJA";
+const CONTRACT_B =
+  "CBQWCYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQWCV5G";
 const WEBHOOK_URL_A = "https://example.com/webhook-a";
 const WEBHOOK_URL_B = "https://example.com/webhook-b";
 
@@ -37,6 +40,8 @@ beforeEach(() => {
   testDb.exec("DELETE FROM indexer_state WHERE key != 'last_ledger_sequence'");
   jest.restoreAllMocks();
   jest.clearAllMocks();
+  // The subscribe route requires the contract to be indexed (monitored + active).
+  registerContract(CONTRACT_A, "test contract");
 });
 
 afterEach(() => {
@@ -171,8 +176,10 @@ describe("event_type_filter – Transaction Isolation", () => {
       let callCount = 0;
       const mockPrepare = jest.fn((sql: string) => {
         callCount += 1;
+        // The SELECT that reads the row back runs after the INSERT (and,
+        // since #701, after the re-enable UPDATE).
         if (
-          callCount === 2 &&
+          callCount > 1 &&
           sql.includes("SELECT * FROM webhook_subscriptions")
         ) {
           throw new Error("Simulated SELECT failure after INSERT");
@@ -396,12 +403,29 @@ describe("event_type_filter – Transaction Isolation", () => {
 
   describe("HTTP route handlers – transaction error propagation", () => {
     let app: express.Express;
+    const ADMIN_KEY = "event-type-filter-admin-key";
+    const originalAdminKey = process.env.ADMIN_API_KEY;
 
     beforeAll(async () => {
       const { default: router } = await import("../src/routes/webhooks.js");
       app = express();
       app.use(express.json());
+      // #604: mutation routes require the admin credential; this suite's
+      // subject is transaction error propagation, so attach the key here.
+      app.use((req, _res, next) => {
+        req.headers["x-api-key"] = ADMIN_KEY;
+        next();
+      });
       app.use("/api/webhooks", router);
+    });
+
+    beforeEach(() => {
+      process.env.ADMIN_API_KEY = ADMIN_KEY;
+    });
+
+    afterEach(() => {
+      if (originalAdminKey === undefined) delete process.env.ADMIN_API_KEY;
+      else process.env.ADMIN_API_KEY = originalAdminKey;
     });
 
     it("subscribe route returns 500 when addSubscription throws", async () => {
@@ -422,7 +446,7 @@ describe("event_type_filter – Transaction Isolation", () => {
         .send({
           contract_id: CONTRACT_A,
           webhook_url: WEBHOOK_URL_A,
-          event_types: ["funded"],
+          event_types: ["fund"],
         })
         .expect(500);
 
