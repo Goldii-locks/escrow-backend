@@ -630,6 +630,16 @@ const MIGRATIONS: Migration[] = [
         ON undecodable_events (ledger_sequence);
     `,
   },
+  {
+    version: 20,
+    description: "add topics_json column to events (#930)",
+    up: "ALTER TABLE events ADD COLUMN topics_json TEXT;",
+  },
+  {
+    version: 21,
+    description: "add checked_at index on reconciliation_results for retention cleanup (#925)",
+    up: "CREATE INDEX IF NOT EXISTS idx_reconciliation_checked_at ON reconciliation_results (checked_at);",
+  },
 ];
 
 /** Index names created by the SQLite schema manager lookup-index migration (#259). */
@@ -997,6 +1007,7 @@ const EXPECTED_TABLES: Record<string, string[]> = {
     "data_json",
     "created_at",
     "event_id",
+    "topics_json",
   ],
   indexer_state: ["key", "value"],
   monitored_contracts: [
@@ -1495,8 +1506,8 @@ export function insertEvent(
   const tx = db.transaction(() => {
     const stmt = db.prepare(`
       INSERT OR IGNORE INTO events
-      (contract_id, event_type, ledger_sequence, timestamp, data_json, event_id, tx_hash)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      (contract_id, event_type, ledger_sequence, timestamp, data_json, event_id, tx_hash, topics_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const result = stmt.run(
       contractId,
@@ -1505,7 +1516,8 @@ export function insertEvent(
       timestamp,
       dataJson,
       eventId ?? `${contractId}:${ledgerSequence}:${eventType}`,
-      txHash
+      txHash,
+      null
     );
     if (result.changes > 0) {
       recordJobParticipants(db, contractId, eventType, dataJson);
@@ -1529,6 +1541,12 @@ export interface EventRow {
    * indexed before the column existed.
    */
   txHash?: string | null;
+  /**
+   * JSON array of decoded extra topics (topic[1..]) (#930). `null` for rows
+   * indexed before migration 20 — historical topics were never stored and
+   * cannot be recovered from the database.
+   */
+  topicsJson?: string | null;
 }
 
 /**
@@ -1593,8 +1611,8 @@ export function insertEventBatch(events: EventRow[], newLedger: number): void {
 
   const insertStmt = db.prepare(`
     INSERT OR IGNORE INTO events
-    (contract_id, event_type, ledger_sequence, timestamp, data_json, event_id, tx_hash)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    (contract_id, event_type, ledger_sequence, timestamp, data_json, event_id, tx_hash, topics_json)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   const updateLedger = db.prepare(
@@ -1610,7 +1628,8 @@ export function insertEventBatch(events: EventRow[], newLedger: number): void {
         ev.timestamp,
         ev.dataJson,
         eventDedupeId(ev),
-        ev.txHash ?? null
+        ev.txHash ?? null,
+        ev.topicsJson ?? null
       );
       if (res.changes > 0) {
         recordJobParticipants(db, ev.contractId, ev.eventType, ev.dataJson);
@@ -2716,8 +2735,8 @@ export function insertHistoricalEventBatch(
   const db = getDb();
   const insertStmt = db.prepare(`
     INSERT OR IGNORE INTO events
-    (contract_id, event_type, ledger_sequence, timestamp, data_json, event_id, tx_hash)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    (contract_id, event_type, ledger_sequence, timestamp, data_json, event_id, tx_hash, topics_json)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   const importTransaction = db.transaction(() => {
@@ -2731,6 +2750,7 @@ export function insertHistoricalEventBatch(
         ev.dataJson,
         eventDedupeId(ev),
         ev.txHash ?? null,
+        ev.topicsJson ?? null,
       );
       if (result.changes > 0) {
         inserted += 1;
@@ -3016,8 +3036,8 @@ export function insertEventsWithDedup(
 
   const insertStmt = db.prepare(`
     INSERT OR IGNORE INTO events
-    (contract_id, event_type, ledger_sequence, timestamp, data_json)
-    VALUES (?, ?, ?, ?, ?)
+    (contract_id, event_type, ledger_sequence, timestamp, data_json, topics_json)
+    VALUES (?, ?, ?, ?, ?, ?)
   `);
 
   const write = db.transaction(() => {
@@ -3028,6 +3048,7 @@ export function insertEventsWithDedup(
         ev.ledgerSequence,
         ev.timestamp,
         ev.dataJson,
+        null,
       );
       if (result.changes > 0) {
         newEventsInserted++;

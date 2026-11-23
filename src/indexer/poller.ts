@@ -202,16 +202,31 @@ export function toEventTimestamp(ledgerClosedAt: unknown): number | null {
   return Math.floor(millis / 1000);
 }
 
+// NOTE: topics_json is NULL for rows indexed before migration 20. Historical
+// topics are unrecoverable from the database — their XDR was never stored.
+// To recover them, re-import events through POST /api/admin/backfill.
 /** Map an RPC event notification onto the row shape `events` stores. */
 function toEventRow(event: Api.EventResponse, fallbackContractId: string): EventRow {
+  const decodedType = scValToNative(event.topic[0]);
+  if (typeof decodedType !== "string") {
+    throw new Error(
+      `event topic[0] decoded to ${typeof decodedType} (expected string); event_id=${event.id ?? "unknown"}`,
+    );
+  }
+  const extraTopics = event.topic.slice(1);
+  const topicsJson =
+    extraTopics.length > 0
+      ? stringifyWithBigInt(extraTopics.map((t) => scValToNative(t)))
+      : null;
   return {
     contractId: event.contractId?.contractId() ?? fallbackContractId,
-    eventType: scValToNative(event.topic[0]) as string,
+    eventType: decodedType,
     ledgerSequence: event.ledger,
     timestamp: toEventTimestamp(event.ledgerClosedAt),
     // i128/u64 event fields decode to bigint; store them as decimal strings
     // like the API does (#719).
     dataJson: stringifyWithBigInt(scValToNative(event.value)),
+    topicsJson,
     eventId:
       typeof event.id === "string" && event.id
         ? event.id
