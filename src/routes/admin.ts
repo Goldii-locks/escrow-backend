@@ -4,6 +4,7 @@ import { requireAdmin } from "../middleware/adminAuth.js";
 import {
   getIndexerStatusData,
   getSubscriptions,
+  getSubscriptionById,
   getActiveSubscriptions,
   getDisabledSubscriptions,
   getAdminJobs,
@@ -11,7 +12,9 @@ import {
 import { getIndexerUptimeSeconds } from "../indexer/status.js";
 import { getLatestReconciliationResults } from "../indexer/reconciliation.js";
 import {
+  DELIVERY_STATUSES,
   getDeadDeliveries,
+  getSubscriptionDeliveries,
   getFailedDeliveryCount,
 } from "../indexer/webhook-delivery.js";
 import {
@@ -246,6 +249,60 @@ router.get("/webhook-subscriptions", (_req, res) => {
     active: getActiveSubscriptions(),
     disabled: getDisabledSubscriptions(),
   });
+});
+
+/** Hide credentials that integrators put in webhook URL query strings. */
+function maskUrlQuery(url: string): string {
+  const i = url.indexOf("?");
+  return i === -1 ? url : `${url.slice(0, i)}?***`;
+}
+
+// GET /api/admin/webhook-subscriptions/:id/deliveries - one subscription's
+// delivery attempts, newest first, keyset-paginated on the delivery id (#941).
+router.get("/webhook-subscriptions/:id/deliveries", (req, res) => {
+  const id = Number(req.params.id);
+  const subscription = Number.isInteger(id) && id > 0 ? getSubscriptionById(id) : undefined;
+  if (!subscription) {
+    return res.status(404).json({ success: false, error: "Webhook subscription not found" });
+  }
+
+  const status = typeof req.query.status === "string" ? req.query.status : undefined;
+  if (status && !(DELIVERY_STATUSES as readonly string[]).includes(status)) {
+    return res.status(400).json({
+      success: false,
+      error: `status must be one of ${DELIVERY_STATUSES.join(", ")}`,
+    });
+  }
+  const limit = req.query.limit === undefined ? 50 : Number(req.query.limit);
+  if (!Number.isInteger(limit) || limit < 1 || limit > 200) {
+    return res.status(400).json({ success: false, error: "limit must be an integer between 1 and 200" });
+  }
+  const before = req.query.before === undefined ? undefined : Number(req.query.before);
+  if (before !== undefined && (!Number.isInteger(before) || before < 1)) {
+    return res.status(400).json({ success: false, error: "before must be a positive integer" });
+  }
+
+  try {
+    // Fetch one extra row to know whether another page exists.
+    const rows = getSubscriptionDeliveries(id, { status, limit: limit + 1, before });
+    const deliveries = rows.slice(0, limit);
+    res.json({
+      success: true,
+      subscription: {
+        id: subscription.id,
+        contract_id: subscription.contract_id,
+        webhook_url: maskUrlQuery(subscription.webhook_url),
+        consecutive_failures: subscription.consecutive_failures,
+        disabled_at: subscription.disabled_at,
+        last_error: subscription.last_error,
+      },
+      deliveries,
+      nextBefore: rows.length > limit ? deliveries[deliveries.length - 1].id : null,
+    });
+  } catch (err) {
+    logger.error("Failed to list webhook deliveries", { error: formatError(err) });
+    res.status(500).json({ success: false, error: "Internal server error" });
+  }
 });
 
 router.get("/metrics", (_req, res) => {

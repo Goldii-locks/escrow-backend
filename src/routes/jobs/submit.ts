@@ -2,7 +2,6 @@ import { Router } from "express";
 import type { Request, Response } from "express";
 import {
   submitRateLimit,
-  submitCors,
   submitSecurityHeaders,
   sendError,
   sendSuccess,
@@ -29,11 +28,9 @@ const router = Router();
 // POST /api/jobs/submit – submit a signed transaction
 // Caches results by signedXdr to deduplicate concurrent identical submissions.
 // ---------------------------------------------------------------------------
-router.options("/submit", submitCors);
 
 router.post(
   "/submit",
-  submitCors,
   submitSecurityHeaders,
   submitRateLimit,
   // A signed XDR is a replayable transaction: log its length and a hash

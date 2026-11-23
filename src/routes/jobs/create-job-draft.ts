@@ -2,7 +2,6 @@ import { Router } from "express";
 import type { Request, Response } from "express";
 import {
   createJobDraftRateLimit,
-  createJobDraftCors,
   createJobDraftSecurityHeaders,
   sendError,
   sendSuccess,
@@ -24,7 +23,6 @@ const router = Router();
 // POST /api/jobs/create-job-draft
 // Validates and stores a job draft payload (off-chain) before on-chain create.
 // ---------------------------------------------------------------------------
-router.options("/create-job-draft", createJobDraftCors);
 
 /**
  * Two PRs implemented POST /create-job-draft independently and both were
@@ -39,7 +37,6 @@ router.options("/create-job-draft", createJobDraftCors);
 
 router.post(
   "/create-job-draft",
-  createJobDraftCors,
   createJobDraftSecurityHeaders,
   createJobDraftRateLimit,
   createJobDraftValidation,
@@ -146,11 +143,9 @@ router.post(
 // ---------------------------------------------------------------------------
 // GET /api/jobs/drafts/:id – fetch a persisted job draft by ID (#667)
 // ---------------------------------------------------------------------------
-router.options("/drafts/:id", createJobDraftCors);
 
 router.get(
   "/drafts/:id",
-  createJobDraftCors,
   createJobDraftSecurityHeaders,
   (req: Request, res: Response) => {
     const id = req.params.id as string;
