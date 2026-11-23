@@ -1,7 +1,5 @@
 import { divRound } from "../src/utils/rounding.js";
 import { divideHalfEven } from "../src/utils/financial_report_math.js";
-import { divideRoundHalfEven } from "../src/utils/conversion_rate_math.js";
-import { roundIntegerDivision } from "../src/utils/tax_deduction_estimator.js";
 
 describe("unified rounding (issue #670)", () => {
   const cases: Array<{
@@ -41,9 +39,5 @@ describe("unified rounding (issue #670)", () => {
 
   it("wrappers agree with the canonical implementation", () => {
     expect(divideHalfEven(5n, 2n)).toBe(divRound(5n, 2n, "half-even"));
-    expect(divideRoundHalfEven(7n, 2n)).toBe(divRound(7n, 2n, "half-even"));
-    expect(roundIntegerDivision(-5n, 2n, "half-even")).toBe(
-      divRound(-5n, 2n, "half-even"),
-    );
   });
 });

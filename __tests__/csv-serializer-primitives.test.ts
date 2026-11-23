@@ -12,12 +12,10 @@ import {
   readCsvFile,
 } from "../src/utils/csv-serializer.js";
 import * as token from "../src/utils/token_decimals_converter.js";
-import { escapeTaxCsvField, formatTaxCsvRow } from "../src/utils/tax_deduction_estimator.js";
 import {
   escapeAuditLedgerCsvField,
   formatAuditLedgerCsvRow,
 } from "../src/utils/audit_ledger_sum_checker.js";
-import { exportConversionRatesToCsv, parseConversionRatesCsv } from "../src/utils/conversion_rate_math.js";
 
 describe("shared CSV primitives (#634)", () => {
   describe("escapeCsvField", () => {
@@ -90,17 +88,7 @@ describe("shared CSV primitives (#634)", () => {
     expect(token.escapeCsvField).toBe(escapeCsvField);
     expect(token.formatRowToCsv).toBe(formatRowToCsv);
     expect(token.parseCsvLine).toBe(parseCsvLine);
-    expect(escapeTaxCsvField).toBe(escapeCsvField);
-    expect(formatTaxCsvRow).toBe(formatRowToCsv);
     expect(escapeAuditLedgerCsvField).toBe(escapeCsvField);
     expect(formatAuditLedgerCsvRow).toBe(formatRowToCsv);
-  });
-
-  it("conversion rate CSV round-trips pairs containing the delimiter", () => {
-    const exported = exportConversionRatesToCsv([{ pair: "XLM,USDC", rate: "12345" }]);
-    expect(exported.ok).toBe(true);
-    if (!exported.ok) return;
-    const parsed = parseConversionRatesCsv(exported.csv);
-    expect(parsed.ok && parsed.rows[0].pair).toBe("XLM,USDC");
   });
 });

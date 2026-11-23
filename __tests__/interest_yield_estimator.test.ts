@@ -1,12 +1,10 @@
 import {
   ERROR_CODES,
-  ERROR_DEFINITIONS,
   validateInterestRate,
   validatePrincipal,
   validateYieldSplitSum,
   estimateInterestYield,
 } from "../src/utils/interest_yield_estimator.js";
-import { validateErrorStructure } from "../src/utils/conversion_rate_math.js";
 
 // Smallest amount outside the contract's i128 range (i128 max + 1).
 const OVER_I128 = (2n ** 127n).toString();
@@ -23,9 +21,6 @@ describe("interest_yield_estimator overflow validation", () => {
     if (!result.ok) {
       expect(result.code).toBe(code);
       expect(result.parameters).toEqual({ parameter, reason: result.error });
-      expect(validateErrorStructure(result, ERROR_DEFINITIONS)).toEqual(
-        expect.objectContaining({ ok: true, code })
-      );
     }
   }
 

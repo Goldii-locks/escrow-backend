@@ -4,9 +4,7 @@ import {
   MAX_SAFE_DIGITS,
 } from "../src/utils/digit-limit-validator.js";
 import { MAX_SAFE_DIGITS as AUDIT_MAX } from "../src/utils/audit_ledger_sum_checker.js";
-import { MAX_SAFE_DIGITS as MATH_MAX } from "../src/utils/conversion_rate_math.js";
 import { MAX_SAFE_DIGITS as ESTIMATOR_MAX } from "../src/utils/interest_yield_estimator.js";
-import { MAX_SAFE_DIGITS as REFUND_MAX } from "../src/utils/refund_ratio_helper.js";
 
 // Smallest amount outside the contract's i128 range (i128 max + 1).
 const OVER_I128 = (2n ** 127n).toString();
@@ -19,11 +17,9 @@ describe("digit-limit-validator shared module (#530)", () => {
       expect(MAX_SAFE_DIGITS).toBe(15);
     });
 
-    it("is re-exported unchanged by all four callers", () => {
+    it("is re-exported unchanged by its callers", () => {
       expect(AUDIT_MAX).toBe(MAX_SAFE_DIGITS);
-      expect(MATH_MAX).toBe(MAX_SAFE_DIGITS);
       expect(ESTIMATOR_MAX).toBe(MAX_SAFE_DIGITS);
-      expect(REFUND_MAX).toBe(MAX_SAFE_DIGITS);
     });
   });
 

@@ -2,17 +2,12 @@
  * Unified integer-division rounding (issue #670).
  *
  * Single source of truth for all backend preview math that divides integer
- * minor units. Canonical implementation extracted from
- * `tax_deduction_estimator.roundIntegerDivision`, which already supported
- * every mode with exhaustive sign handling.
+ * minor units. Supports every mode with exhaustive sign handling.
  *
  * | Call site | File | Mode used | Why |
  * |---|---|---|---|
  * | `divideHalfEven` | `utils/financial_report_math.ts` | `half-even` | report sums must not accumulate directional bias |
- * | `divideRoundHalfEven` | `utils/conversion_rate_math.ts` | `half-even` | fractional rates without float bias |
- * | `roundIntegerDivision` | `utils/tax_deduction_estimator.ts` | caller-chosen | tax preview; default `truncate` matches prior behavior |
  * | `calculateFeeDeductionHalfEven` | `utils/fee-deduction-calculator.ts` | `half-even` | fee/net must reconcile exactly |
- * | `applyStablecoinCentsMultiplier` | `utils/stablecoin_cents_multiplier.ts` | caller-chosen (default `half-even`) | cents scaling |
  *
  * NOTE on-chain policy: the Soroban contract truncates (Rust `/` on `i128`)
  * in fee/yield math. Backend *previews* of on-chain amounts must therefore
