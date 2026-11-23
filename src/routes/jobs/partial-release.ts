@@ -32,7 +32,10 @@ import {
   type BuildTxPayload,
 } from "./caches.js";
 import {
+  SimError,
   classifySimError,
+  isContractRejection,
+  toPrepareSimError,
 } from "./errors.js";
 import { formatError } from "../../utils/format-error.js";
 
@@ -79,24 +82,6 @@ router.post(
         sourceAddress,
       });
 
-      let account;
-      try {
-        account = await server.getAccount(sourceAddress as string);
-      } catch (err: unknown) {
-        const errMsg = formatError(err);
-        const { status, message } = classifySimError(errMsg);
-        logger.error("Failed to get account for partial release", {
-          traceId,
-          contractId,
-          index,
-          sourceAddress,
-          error: errMsg,
-          stack: err instanceof Error ? err.stack : undefined,
-        });
-        sendError(res, status, message);
-        return;
-      }
-
       const cacheKey = partialReleaseCacheKey(
         contractId as string,
         index as string,
@@ -123,6 +108,25 @@ router.post(
 
       if (!requestPromise) {
         requestPromise = (async (): Promise<BuildTxPayload> => {
+          // Fetched here, after the cache and in-flight checks, so requests
+          // served from either never pay for an RPC round trip (#878).
+          let account;
+          try {
+            account = await server.getAccount(sourceAddress as string);
+          } catch (err: unknown) {
+            const errMsg = formatError(err);
+            const { status, message } = classifySimError(errMsg);
+            logger.error("Failed to get account for partial release", {
+              traceId,
+              contractId,
+              index,
+              sourceAddress,
+              error: errMsg,
+              stack: err instanceof Error ? err.stack : undefined,
+            });
+            throw new SimError(status, message, errMsg);
+          }
+
           const contract = new Contract(contractId as string);
           const amountNum = BigInt(amount);
           const inclusionFee = await getInclusionFee(server);
@@ -144,15 +148,7 @@ router.post(
           try {
             prepared = await server.prepareTransaction(tx);
           } catch (err: unknown) {
-            const errMsg = formatError(err);
-            const { status, message } = classifySimError(errMsg);
-            logger.error("Failed to prepare transaction for partial release", {
-              traceId,
-              contractId,
-              index,
-              error: errMsg,
-            });
-            throw { status, message };
+            throw toPrepareSimError(err);
           }
 
           const xdr = prepared.toXDR();
@@ -180,14 +176,26 @@ router.post(
         payload = await requestPromise;
       } catch (err: unknown) {
         partialReleaseCache.del(cacheKey);
-        if (
-          typeof err === "object" &&
-          err !== null &&
-          "status" in err &&
-          "message" in err
-        ) {
-          const { status, message } = err as { status: number; message: string };
-          sendError(res, status, message);
+        if (err instanceof SimError) {
+          // Expected contract rejections are warn, server faults stay error (#877).
+          if (isContractRejection(err)) {
+            logger.warn("Partial-release rejected during simulation", {
+              traceId,
+              contractId,
+              index,
+              status: err.status,
+              error: err.rawError ?? err.message,
+            });
+          } else {
+            logger.error("Failed to prepare transaction for partial release", {
+              traceId,
+              contractId,
+              index,
+              status: err.status,
+              error: err.rawError ?? err.message,
+            });
+          }
+          sendError(res, err.status, err.message);
           return;
         }
         throw err;

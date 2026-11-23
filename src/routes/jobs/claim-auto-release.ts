@@ -31,6 +31,7 @@ import {
   type BuildTxPayload,
 } from "./caches.js";
 import { formatError } from "../../utils/format-error.js";
+import { SimError, isContractRejection, throwPrepareFailure } from "./errors.js";
 
 const router = Router();
 
@@ -159,7 +160,12 @@ router.post(
           .build();
 
         logger.debug("Calling prepareTransaction on Stellar RPC", { traceId, ...pathVars });
-        const prepared = await server.prepareTransaction(tx);
+        let prepared;
+        try {
+          prepared = await server.prepareTransaction(tx);
+        } catch (err: unknown) {
+          throwPrepareFailure(err);
+        }
         const xdr = prepared.toXDR();
         const totalFee = String(prepared.fee);
         const resourceFee = String(
@@ -225,6 +231,19 @@ router.post(
       });
       sendSuccess(res, payload);
     } catch (err: unknown) {
+      if (err instanceof SimError && isContractRejection(err)) {
+        // Expected contract rejections (not delivered yet, already released,
+        // paused, ...) are the caller's problem: return the mapped 4xx and log
+        // at warn. Anything else falls through to the 500 path below (#877).
+        logger.warn("Claim auto-release rejected during simulation", {
+          traceId,
+          ...pathVars,
+          status: err.status,
+          error: err.rawError ?? err.message,
+        });
+        sendError(res, err.status, err.message);
+        return;
+      }
       const message = formatError(err);
       const stack = err instanceof Error ? err.stack : undefined;
       logger.debug("Claim auto-release error caught", {

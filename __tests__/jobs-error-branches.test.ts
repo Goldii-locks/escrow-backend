@@ -40,6 +40,7 @@ const {
   partialReleaseCache,
   resetPartialReleaseCache,
 } = await import("../src/routes/jobs.js");
+const { cacheTimeRemaining, getCachedTimeRemaining } = await import("../src/routes/jobs/caches.js");
 const rateLimits = await import("../src/middleware/job-contract-rate-limit.js");
 const { setDb, initSchema } = await import("../src/indexer/db.js");
 
@@ -339,7 +340,7 @@ describe("GET /:contractId/milestones/:index/time-remaining", () => {
   const url = `/api/jobs/${VALID_CONTRACT}/milestones/0/time-remaining`;
 
   it("serves a cached value without calling the RPC", async () => {
-    timeRemainingCache.set(`${VALID_CONTRACT}:0`, 42);
+    cacheTimeRemaining(`${VALID_CONTRACT}:0`, 42);
     const res = await request(buildApp()).get(url).expect(200);
     expect(res.body).toEqual({ success: true, data: { secondsRemaining: 42 } });
     expect(mockSimulateTransaction).not.toHaveBeenCalled();
@@ -387,7 +388,7 @@ describe("GET /:contractId/milestones/:index/time-remaining", () => {
     });
     const res = await request(buildApp()).get(url).expect(200);
     expect(res.body).toEqual({ success: true, data: { secondsRemaining: Number(secs) } });
-    expect(timeRemainingCache.get(`${VALID_CONTRACT}:0`)).toBe(Number(secs));
+    expect(getCachedTimeRemaining(`${VALID_CONTRACT}:0`)).toBe(Number(secs));
   });
 
   it("returns 500 for a non-numeric retval and does not cache it", async () => {

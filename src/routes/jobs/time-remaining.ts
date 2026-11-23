@@ -19,7 +19,8 @@ import {
 import { getInclusionFee } from "../../utils/fee-helper.js";
 
 import {
-  timeRemainingCache,
+  cacheTimeRemaining,
+  getCachedTimeRemaining,
   inFlightTimeRemainingRequests,
 } from "./caches.js";
 import {
@@ -61,7 +62,7 @@ router.get(
         ip: req.ip ?? req.socket?.remoteAddress,
       });
 
-      const cached = timeRemainingCache.get<number>(cacheKey);
+      const cached = getCachedTimeRemaining(cacheKey);
       if (cached !== undefined) {
         logger.info("Time remaining served from cache", { contractId, index });
         sendSuccess(res, { secondsRemaining: cached });
@@ -102,7 +103,7 @@ router.get(
             if (!Number.isFinite(secondsRemaining)) {
               throw new SimError(500, "Internal server error");
             }
-            timeRemainingCache.set(cacheKey, secondsRemaining);
+            cacheTimeRemaining(cacheKey, secondsRemaining);
             return secondsRemaining;
           }
           throw new SimError(500, "Internal server error");

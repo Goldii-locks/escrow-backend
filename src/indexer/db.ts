@@ -164,6 +164,12 @@ function extractAddressesFromEvents(events: EventRow[]): string[] {
   const addresses = new Set<string>();
   for (const ev of events) {
     const type = (ev.eventType || "").toLowerCase();
+    // Both the outgoing and incoming party's dashboards change (#884).
+    const change = parseRoleChange(type, ev.dataJson);
+    if (change) {
+      if (change.previous) addresses.add(change.previous);
+      if (change.next) addresses.add(change.next);
+    }
     if (
       type === "init" ||
       type === "initialized" ||
@@ -629,6 +635,31 @@ const MIGRATIONS: Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_undecodable_events_ledger
         ON undecodable_events (ledger_sequence);
     `,
+  },
+  {
+    version: 20,
+    description: "replay freerot / arbchg events into job_participants (#884)",
+    // Role changes used to be ignored, so rotated-out freelancers and replaced
+    // arbiters are still listed and their successors are missing. Replay the
+    // stored role-change events in ledger order against the current table.
+    up: (database) => {
+      const hasTable = (name: string) =>
+        database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name) !== undefined;
+      // Nothing to replay on a database that never had events / participants.
+      if (!hasTable("events") || !hasTable("job_participants")) return;
+      const rows = database
+        .prepare(
+          `SELECT contract_id, event_type, data_json
+           FROM events
+           WHERE event_type IN ('freerot', 'arbchg')
+           ORDER BY ledger_sequence ASC, id ASC`,
+        )
+        .all() as { contract_id: string; event_type: string; data_json: string }[];
+      for (const row of rows) {
+        const change = parseRoleChange(row.event_type, row.data_json);
+        if (change) applyRoleChange(database, row.contract_id, change);
+      }
+    },
   },
 ];
 
@@ -1512,7 +1543,18 @@ export function insertEvent(
     }
     return result.changes > 0;
   });
-  return tx();
+  const inserted = tx();
+  if (inserted) {
+    // by-wallet answers are cached per address; a role change moves a job
+    // between two dashboards (#884).
+    const change = parseRoleChange(eventType, dataJson);
+    if (change) {
+      invalidateJobsByWalletCache(
+        [change.previous, change.next].filter((a): a is string => a !== null),
+      );
+    }
+  }
+  return inserted;
 }
 
 export interface EventRow {
@@ -1532,8 +1574,64 @@ export interface EventRow {
 }
 
 /**
- * Extracts wallet participants from an event if it is an init/initialized event,
- * and inserts them into the job_participants table.
+ * Contract events that replace one party with another (#884). `from` / `to`
+ * name the keys carrying the outgoing and incoming address in `data_json`.
+ *   rotate_freelancer -> `freerot`  { client, previous_freelancer, new_freelancer }
+ *   replace_arbiter   -> `arbchg`   { client, freelancer, old, new }
+ */
+const ROLE_CHANGE_EVENTS: Record<string, { role: "freelancer" | "arbiter"; from: string; to: string }> = {
+  freerot: { role: "freelancer", from: "previous_freelancer", to: "new_freelancer" },
+  arbchg: { role: "arbiter", from: "old", to: "new" },
+};
+
+function nonEmptyString(v: unknown): string | null {
+  return typeof v === "string" && v.trim().length > 0 ? v.trim() : null;
+}
+
+/**
+ * The (outgoing, incoming) addresses of a role-change event, or null when the
+ * event is not one or carries no usable addresses.
+ */
+export function parseRoleChange(
+  eventType: string,
+  dataJson: string,
+): { role: "freelancer" | "arbiter"; previous: string | null; next: string | null } | null {
+  const spec = ROLE_CHANGE_EVENTS[eventType.toLowerCase()];
+  if (!spec) return null;
+  try {
+    const data = JSON.parse(dataJson) as Record<string, unknown>;
+    return { role: spec.role, previous: nonEmptyString(data[spec.from]), next: nonEmptyString(data[spec.to]) };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Replace the holder of `role` on a contract: the previous party stops being a
+ * participant in that role and the new one starts. Rows for the same address
+ * in other roles are untouched.
+ */
+function applyRoleChange(
+  db: import("better-sqlite3").Database,
+  contractId: string,
+  change: { role: string; previous: string | null; next: string | null },
+): void {
+  if (change.previous && change.previous !== change.next) {
+    db.prepare(
+      `DELETE FROM job_participants WHERE contract_id = ? AND address = ? AND role = ?`,
+    ).run(contractId, change.previous, change.role);
+  }
+  if (change.next) {
+    db.prepare(
+      `INSERT OR IGNORE INTO job_participants (contract_id, address, role) VALUES (?, ?, ?)`,
+    ).run(contractId, change.next, change.role);
+  }
+}
+
+/**
+ * Extracts wallet participants from an event and keeps job_participants
+ * current: init-style events add the named parties, and role-change events
+ * (`freerot`, `arbchg`) swap the old party for the new one (#884).
  */
 function recordJobParticipants(
   db: import("better-sqlite3").Database,
@@ -1545,6 +1643,10 @@ function recordJobParticipants(
   // new escrow, whose own init event records them under the escrow's id; the
   // factory itself is not anyone's job.
   if (eventType.toLowerCase() === "created") return;
+
+  const change = parseRoleChange(eventType, dataJson);
+  if (change) applyRoleChange(db, contractId, change);
+
   try {
     const data = JSON.parse(dataJson) as Record<string, unknown>;
     const insertStmt = db.prepare(
@@ -1555,6 +1657,8 @@ function recordJobParticipants(
     if (typeof data.client === "string" && data.client.trim().length > 0) {
       insertStmt.run(contractId, data.client.trim(), "client");
     }
+    // A role-change event names the *current* holder under `freelancer` (arbchg)
+    // or not at all (freerot), so the generic keys never resurrect a removed party.
     if (typeof data.freelancer === "string" && data.freelancer.trim().length > 0) {
       insertStmt.run(contractId, data.freelancer.trim(), "freelancer");
     }

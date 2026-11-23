@@ -69,6 +69,32 @@ export const timeRemainingCache = new NodeCache({
   useClones: false,
 });
 export const inFlightTimeRemainingRequests = new Map<string, Promise<number>>();
+
+/**
+ * time-remaining caches the absolute deadline (epoch ms), not the countdown,
+ * so a hit served N seconds after caching reports N seconds less (#879).
+ */
+export function cacheTimeRemaining(
+  key: string,
+  secondsRemaining: number,
+  nowMs: number = Date.now(),
+): boolean {
+  // Negative or non-integer-safe values (e.g. a u64::MAX "never" sentinel)
+  // would turn into a nonsense deadline; serve them but never cache them.
+  if (!Number.isSafeInteger(secondsRemaining) || secondsRemaining < 0) return false;
+  timeRemainingCache.set(key, nowMs + secondsRemaining * 1000);
+  return true;
+}
+
+/** Seconds left until the cached deadline, clamped at 0; undefined on a miss. */
+export function getCachedTimeRemaining(
+  key: string,
+  nowMs: number = Date.now(),
+): number | undefined {
+  const deadlineMs = timeRemainingCache.get<number>(key);
+  if (deadlineMs === undefined) return undefined;
+  return Math.max(0, Math.ceil((deadlineMs - nowMs) / 1000));
+}
 export function resetTimeRemainingCache(): void {
   timeRemainingCache.flushAll();
   inFlightTimeRemainingRequests.clear();

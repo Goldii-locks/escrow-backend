@@ -1,6 +1,38 @@
 // Simulation error helpers (#83) live in utils/soroban-call.ts (#620).
 export { classifySimError, SimError } from "../../utils/soroban-call.js";
 
+import { SimError as SimErrorClass, classifySimError as classify } from "../../utils/soroban-call.js";
+import { formatError } from "../../utils/format-error.js";
+
+/**
+ * Turn a `prepareTransaction` failure into a `SimError` carrying the status and
+ * message `classifySimError` maps it to (#877). Contract rejections such as
+ * "claim too early" become 4xx; unrecognised failures stay 500.
+ */
+export function toPrepareSimError(err: unknown): SimErrorClass {
+  if (err instanceof SimErrorClass) return err;
+  const rawError = formatError(err);
+  const { status, message } = classify(rawError);
+  return new SimErrorClass(status, message, rawError);
+}
+
+/**
+ * Rethrow a `prepareTransaction` failure for build-tx / claim-auto-release:
+ * contract rejections (4xx) become a `SimError` the route turns into that
+ * status; everything else is rethrown untouched so it is still logged in full
+ * and answered with a generic 500 (#877).
+ */
+export function throwPrepareFailure(err: unknown): never {
+  const classified = toPrepareSimError(err);
+  if (isContractRejection(classified)) throw classified;
+  throw err;
+}
+
+/** True when the failure is an expected rejection (4xx) rather than a server fault. */
+export function isContractRejection(err: SimErrorClass): boolean {
+  return err.status >= 400 && err.status < 500;
+}
+
 // ---------------------------------------------------------------------------
 // Submit error helper  – maps sendTransaction / XDR errors to HTTP statuses
 // ---------------------------------------------------------------------------
