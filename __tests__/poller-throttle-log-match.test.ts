@@ -29,7 +29,7 @@ describe("Poller scheduled delay vs logged pollIntervalMs (#639)", () => {
   });
 
   afterAll(() => {
-    stopPoller();
+    void stopPoller();
     testDb.close();
   });
 
@@ -40,11 +40,11 @@ describe("Poller scheduled delay vs logged pollIntervalMs (#639)", () => {
     registerContract("CONTRACT-LOG-MATCH", "log-match-test");
     mockGetLatestLedger.mockReset();
     mockGetEvents.mockReset();
-    stopPoller();
+    void stopPoller();
   });
 
   afterEach(() => {
-    stopPoller();
+    void stopPoller();
     jest.useRealTimers();
   });
 

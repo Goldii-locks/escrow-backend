@@ -95,4 +95,33 @@ describe("startup sequence (#950)", () => {
     });
     expect(order).toEqual(["migrations", "started", "network", "exit"]);
   });
+
+  it("binds no port while a slow, mismatched network check is pending (#868)", async () => {
+    let rejectCheck!: (err: Error) => void;
+    const listen = jest.fn(() => fakeServer());
+    const exit = jest.fn();
+    const pending = main({
+      createApp: () => express(),
+      runMigrations: jest.fn(),
+      markIndexerStarted: jest.fn(),
+      assertRpcNetworkMatches: () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectCheck = reject;
+        }),
+      startPoller: jest.fn(),
+      startReconciliationJob: jest.fn(),
+      registerShutdownHandlers: jest.fn(),
+      listen,
+      exit,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    // No listener yet, so /api/jobs/build-tx cannot answer 200.
+    expect(listen).not.toHaveBeenCalled();
+
+    rejectCheck(new Error("network passphrase mismatch"));
+    await pending;
+    expect(exit).toHaveBeenCalledWith(1);
+    expect(listen).not.toHaveBeenCalled();
+  });
 });

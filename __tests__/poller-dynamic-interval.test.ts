@@ -54,11 +54,11 @@ describe("Dynamic polling interval — duplicate_prevention (poller)", () => {
     registerContract("CONTRACT-POLL-TEST", "poll-test");
     mockGetLatestLedger.mockReset();
     mockGetEvents.mockReset();
-    stopPoller();
+    void stopPoller();
   });
 
   afterEach(() => {
-    stopPoller();
+    void stopPoller();
   });
 
   // ---------------------------------------------------------------------

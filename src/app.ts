@@ -12,6 +12,7 @@ import { globalCors } from "./middleware/global-cors.js";
 import { requestIdMiddleware, requestLogger } from "./middleware/request-id.js";
 import { globalErrorHandler } from "./middleware/error-handler.js";
 import { resolveTrustProxy } from "./utils/trust-proxy.js";
+import { sendError } from "./utils/api-response.js";
 
 // Fail fast in production rather than booting into a silently insecure or
 // misdirected state. Without this the server starts happily and passes
@@ -95,6 +96,9 @@ export function createApp(): express.Express {
   app.use("/api/webhooks", webhookRoutes);
   app.use("/api/tokens", tokenRoutes);
   app.use("/api/stats", statsRoutes);
+
+  // JSON 404 for unknown routes instead of Express's HTML page (#869).
+  app.use((_req, res) => sendError(res, 404, "Not found"));
 
   app.use(globalErrorHandler);
 

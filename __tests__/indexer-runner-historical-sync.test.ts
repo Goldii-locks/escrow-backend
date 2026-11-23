@@ -251,7 +251,7 @@ describe("indexer_runner dynamic historical sync ranges (#254)", () => {
           await new Promise((resolve) => setImmediate(resolve));
         }
       } finally {
-        stopPoller();
+        void stopPoller();
       }
 
       const ledgerRequests = mockGetEvents.mock.calls
