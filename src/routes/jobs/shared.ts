@@ -38,6 +38,7 @@ import {
   buildTxSecurityHeaders,
 } from "../../middleware/job-contract-security.js";
 import { sendError, sendSuccess } from "../../utils/api-response.js";
+import { config } from "../../config.js";
 import { validate, validateWithFields } from "../../middleware/validate.js";
 import type { RequestWithValidatedQuery } from "../../middleware/validate.js";
 import { createJobDraftValidation } from "../../middleware/create-job-draft-validation.js";
@@ -94,7 +95,9 @@ export function maskAddress(address: string | undefined | null): string {
   return `${address.slice(0, 4)}\u2026${address.slice(-4)}`;
 }
 
-export const CONTRACT_ID = process.env.CONTRACT_ID || "";
+export function getContractId(): string {
+  return config.contractId;
+}
 // The RPC Server, network config and read-simulation source live in
 // utils/soroban-call.ts (#620); re-exported here for the route modules.
 export { NETWORK_PASSPHRASE, server, getRpcUrl, simulationSource };

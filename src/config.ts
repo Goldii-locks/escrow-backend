@@ -51,6 +51,14 @@ function testAwareFallback(testValue: number, prodValue: number): number {
 }
 
 export const config = {
+  get contractId(): string {
+    return (process.env.CONTRACT_ID || "").trim();
+  },
+
+  get jsonBodyLimit(): string {
+    return (process.env.JSON_BODY_LIMIT || "64kb").trim() || "64kb";
+  },
+
   // RPC / Stellar
   get rpcTimeoutMs(): number {
     return readIntEnv("RPC_TIMEOUT_MS", 10000, 1);

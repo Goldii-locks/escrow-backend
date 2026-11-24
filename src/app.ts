@@ -12,6 +12,7 @@ import { globalCors } from "./middleware/global-cors.js";
 import { requestIdMiddleware, requestLogger } from "./middleware/request-id.js";
 import { globalErrorHandler } from "./middleware/error-handler.js";
 import { resolveTrustProxy } from "./utils/trust-proxy.js";
+import { config } from "./config.js";
 
 // Fail fast in production rather than booting into a silently insecure or
 // misdirected state. Without this the server starts happily and passes
@@ -71,13 +72,13 @@ export function createApp(): express.Express {
   app.use(requestIdMiddleware);
   app.use(globalCors());
   app.use(helmet());
-  app.use(express.json());
+  app.use(express.json({ limit: config.jsonBodyLimit }));
 
   // Structured HTTP request logging (#86), tagged with the request id (#773).
   app.use(requestLogger);
 
   app.get("/health", (_req, res) => {
-    res.json({ status: "ok", contract: process.env.CONTRACT_ID });
+    res.json({ status: "ok", contract: config.contractId });
   });
 
   // Readiness reflects the database and the poller; /health stays pure liveness.

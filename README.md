@@ -59,6 +59,16 @@ cp .env.example .env  # configure required production / local keys
 npm run dev
 ```
 
+### Request body size
+
+JSON request bodies are limited by `JSON_BODY_LIMIT` (default `64kb`, passed to
+`express.json()`). Requests above the limit return `413` with the standard JSON
+error envelope: `{ "success": false, "error": "Payload too large" }`.
+
+`CONTRACT_ID` is read through the central config getter, so `/health`, the
+indexer and the route layer always see the current value, even when the
+environment changes after module import.
+
 ## Architecture
 
 - [Architecture overview](./docs/ARCHITECTURE.md) — live request/indexer paths and reachability table
