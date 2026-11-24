@@ -146,8 +146,11 @@ print(obj.get('Health', ''))" 2>/dev/null \
     # probe the TLS server; --resolve keeps SNI and the certificate valid.
     RESPONSE=$(curl -sS --max-time 5 --resolve milestonepay.app:443:127.0.0.1 \
       https://milestonepay.app/health 2>/dev/null || true)
-    if echo "${RESPONSE}" | grep -q '"status":"ok"'; then
-      echo "  /health OK"
+    # #894: a stale container also reports status=ok; require the deployed
+    # build's SHA in the response before treating the rollout as successful.
+    if echo "${RESPONSE}" | grep -q '"status":"ok"' \
+      && echo "${RESPONSE}" | grep -Fq "\"version\":\"${TAG}\""; then
+      echo "  /health OK (version=${TAG})"
       NGINX_OK=1
       break
     fi
@@ -156,7 +159,7 @@ print(obj.get('Health', ''))" 2>/dev/null \
   done
 
   if [ "${NGINX_OK}" -ne 1 ]; then
-    echo '!! /health did not return {"status":"ok"} within 60 s' >&2
+    echo "!! /health did not return {\"status\":\"ok\",\"version\":\"${TAG}\"} within 60 s" >&2
     rollback
   fi
 

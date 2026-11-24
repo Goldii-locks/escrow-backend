@@ -44,6 +44,7 @@ import { formatError } from "../utils/format-error.js";
 import { config } from "../config.js";
 import { rpcAllowHttp } from "../utils/rpc-allow-http.js";
 import logger from "../utils/logger.js";
+import { captureError } from "../utils/error-reporting.js";
 import { stringifyWithBigInt } from "../utils/safe-json.js";
 
 const RPC_URL =
@@ -145,8 +146,18 @@ export function getLastSuccessfulPollAt(): number | null {
   return failureMonitor.getLastSuccessfulAt();
 }
 
+// #893: ledger lag seen by the last *successful* cycle. Derived from the chain
+// head the poll already fetched, so readiness needs no extra RPC call.
+let lastObservedLedgerLag: number | null = null;
+
+/** Chain head minus the furthest ledger actually stored last poll. */
+export function getLastObservedLedgerLag(): number | null {
+  return lastObservedLedgerLag;
+}
+
 export function resetFailureState(): void {
   failureMonitor.reset();
+  lastObservedLedgerLag = null;
   resetPollDiagnosticsThrottle();
 }
 
@@ -837,6 +848,13 @@ export async function pollEvents(): Promise<boolean> {
       groups.set(lastLedgerSequence, group);
     }
 
+    // #893: start with the lag at each group's pointer (covers caught-up and
+    // skipped groups), then keep the worst lag left by page limits/clamping.
+    let observedLedgerLag = 0;
+    for (const pointer of groups.keys()) {
+      observedLedgerLag = Math.max(observedLedgerLag, currentLedger - pointer);
+    }
+
     let totalEvents = 0;
     // Webhooks must cover the earliest ledger any group fetched from, so a
     // catching-up contract's backfilled events are delivered too.
@@ -1022,6 +1040,7 @@ export async function pollEvents(): Promise<boolean> {
         totalEvents += pageEvents.length + childEventCount;
         diagnosticsBatch.push(...batch);
         lastStoredLedger = newLedger;
+        observedLedgerLag = Math.max(observedLedgerLag, currentLedger - lastStoredLedger);
         if (isLastPage) break;
         cursor = nextCursor;
       }
@@ -1031,6 +1050,7 @@ export async function pollEvents(): Promise<boolean> {
     ensureCurrentCycle();
     const totalElapsed = performance.now() - pollStart;
     failureMonitor.recordSuccess();
+    lastObservedLedgerLag = Math.max(0, observedLedgerLag);
     await recordActiveNodeSuccess();
 
     // --- Dynamic poller throttling ---
@@ -1092,6 +1112,13 @@ export async function pollEvents(): Promise<boolean> {
         consecutiveFailures: failureMonitor.getConsecutiveFailures(),
         threshold: failureMonitor.getFailureThreshold(),
         lastSuccessAt: failureMonitor.getLastSuccessfulAt(),
+      });
+      captureError(err, {
+        tags: {
+          source: "poller",
+          operation: "poll_events",
+          consecutiveFailures: failureMonitor.getConsecutiveFailures(),
+        },
       });
     }
 
@@ -1165,6 +1192,15 @@ async function runPollCycle(): Promise<void> {
       error: formatError(err),
       consecutiveFailures,
     });
+    if (failureMonitor.getConsecutiveFailures() >= failureMonitor.getFailureThreshold()) {
+      captureError(err, {
+        tags: {
+          source: "poller",
+          operation: "run_poll_cycle",
+          consecutiveFailures,
+        },
+      });
+    }
   }
 }
 

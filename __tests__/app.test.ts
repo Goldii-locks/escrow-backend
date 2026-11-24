@@ -58,6 +58,19 @@ describe("createApp (#625)", () => {
     expect(res.body.status).toBe("ok");
   });
 
+  it("serves the running build version from /health (#894)", async () => {
+    const previous = process.env.GIT_SHA;
+    process.env.GIT_SHA = "abc123";
+    try {
+      const res = await request(createApp()).get("/health");
+      expect(res.body.status).toBe("ok");
+      expect(res.body.version).toBe("abc123");
+    } finally {
+      if (previous === undefined) delete process.env.GIT_SHA;
+      else process.env.GIT_SHA = previous;
+    }
+  });
+
   it("global error handler returns 500 without leaking internals", () => {
     const res = {
       status: jest.fn().mockReturnThis(),

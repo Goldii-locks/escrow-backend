@@ -77,7 +77,13 @@ export function createApp(): express.Express {
   app.use(requestLogger);
 
   app.get("/health", (_req, res) => {
-    res.json({ status: "ok", contract: process.env.CONTRACT_ID });
+    res.json({
+      status: "ok",
+      contract: process.env.CONTRACT_ID,
+      // #894: baked into the image so deploy smoke tests can prove which
+      // build is actually serving traffic.
+      version: process.env.GIT_SHA,
+    });
   });
 
   // Readiness reflects the database and the poller; /health stays pure liveness.

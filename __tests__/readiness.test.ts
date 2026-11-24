@@ -11,7 +11,9 @@ function deps(overrides: Partial<ReadinessDeps> = {}): ReadinessDeps {
     checkDatabase: () => {},
     getLastSuccessfulPollAt: () => Date.now(),
     getLastIndexedLedger: () => 12345,
+    getLastObservedLedgerLag: () => 0,
     maxPollAgeMs: 360000,
+    maxLedgerLag: 120,
     ...overrides,
   };
 }
@@ -29,7 +31,25 @@ describe("readiness probe (#622)", () => {
       status: "ready",
       lastIndexedLedger: 12345,
       lastSuccessfulPollAgeMs: 1000,
+      ledgerLag: 0,
     });
+  });
+
+  it("reports ready when the observed ledger lag is below the threshold", () => {
+    const result = checkReadiness(deps({ getLastObservedLedgerLag: () => 119 }));
+    expect(result).toEqual({
+      status: "ready",
+      lastIndexedLedger: 12345,
+      lastSuccessfulPollAgeMs: expect.any(Number),
+      ledgerLag: 119,
+    });
+  });
+
+  it("reports not_ready when the observed ledger lag exceeds the threshold", () => {
+    const result = checkReadiness(deps({ getLastObservedLedgerLag: () => 121 }));
+    expect(result.status).toBe("not_ready");
+    expect(result.failingCheck).toBe("ledgerLag");
+    expect(result.ledgerLag).toBe(121);
   });
 
   it("DB failure surfaces as not_ready naming the database check", () => {
@@ -68,6 +88,7 @@ describe("readiness probe (#622)", () => {
       "failingCheck",
       "lastIndexedLedger",
       "lastSuccessfulPollAgeMs",
+      "ledgerLag",
       "status",
     ].filter((k) => k in result));
   });
