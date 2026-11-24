@@ -637,7 +637,7 @@ function defaultPersistEvent(event: EventRow): boolean {
 }
 
 let defaultQueue = new IndexerMetricsEventQueue();
-let inFlightCollection: Promise<IndexerMetrics> | null = null;
+let _inFlightCollection: Promise<IndexerMetrics> | null = null;
 
 /** The monitor backing `collectIndexerMetrics`. */
 export function getIndexerMetricsMonitor(): IndexerMetricsFailureMonitor {
@@ -815,7 +815,7 @@ export function assertIndexerMetricsSchemaValid(
 export function resetIndexerMetricsCollectorState(): void {
   defaultMonitor = new IndexerMetricsFailureMonitor();
   defaultQueue = new IndexerMetricsEventQueue();
-  inFlightCollection = null;
+  _inFlightCollection = null;
 }
 
 // ---------------------------------------------------------------------------

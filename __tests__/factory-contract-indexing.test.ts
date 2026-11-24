@@ -25,7 +25,7 @@ const {
   setDb,
   runMigrations,
   getActiveContractIds,
-  getActiveContractsWithPointers,
+  getActiveContractsWithPointers: _getActiveContractsWithPointers,
   getJobsByWallet,
   setLastIndexedLedger,
 } = await import("../src/indexer/db.js");

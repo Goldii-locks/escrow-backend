@@ -713,7 +713,7 @@ export function extractOldestLedger(source: unknown): number | undefined {
       if (typeof v === "number" && Number.isInteger(v) && v > 0) return v;
       if (typeof v === "string" && /^\d+$/.test(v)) return parseInt(v, 10);
     }
-    const nested = (obj as any).data ?? (obj as any).response;
+    const nested = (obj as Record<string, unknown>).data ?? (obj as Record<string, unknown>).response;
     if (nested && nested !== source) {
       const fromNested = extractOldestLedger(nested);
       if (fromNested !== undefined) return fromNested;
@@ -872,7 +872,7 @@ export async function pollEvents(): Promise<boolean> {
       const fetchPageRetentionAware = async (
         pageStart: number,
         cursorValue: string | undefined,
-      ): Promise<any> => {
+      ): Promise<Api.GetEventsResponse> => {
         try {
           // All RPC calls share RpcPollerClient's single retry policy, which
           // backs off on timeouts, resets, 429s (honouring Retry-After) and
@@ -927,7 +927,7 @@ export async function pollEvents(): Promise<boolean> {
         const events = await fetchPageRetentionAware(startLedger, cursor);
         ensureCurrentCycle();
 
-        const pageEvents: any[] = (events as any).events ?? [];
+        const pageEvents: Api.EventResponse[] = events.events ?? [];
         // Build the batch to be written atomically (#84)
         // Decode per event so one bad event cannot block the page (#658).
         const batch: EventRow[] = decodeEventsIsolated(pageEvents, groupContractIds[0]);
@@ -969,7 +969,7 @@ export async function pollEvents(): Promise<boolean> {
               }),
             );
             ensureCurrentCycle();
-            const childPage: any[] = (childEvents as any).events ?? [];
+            const childPage: Api.EventResponse[] = childEvents.events ?? [];
             const childBatch: EventRow[] = decodeEventsIsolated(
               childPage,
               childContractId as string,
@@ -982,7 +982,7 @@ export async function pollEvents(): Promise<boolean> {
               childPage.length < pageLimit
                 ? currentLedger
                 : Math.max(
-                    ...childPage.map((e: any) => Number(e.ledger) || ev.ledgerSequence)
+                    ...childPage.map((e: Api.EventResponse) => Number(e.ledger) || ev.ledgerSequence)
                   );
             updateContractPointer(childContractId, childLedger);
           } catch (childErr) {
@@ -996,9 +996,9 @@ export async function pollEvents(): Promise<boolean> {
 
         const pageMaxLedger =
           pageEvents.length > 0
-            ? Math.max(...pageEvents.map((e: any) => Number(e.ledger) || startLedger))
+            ? Math.max(...pageEvents.map((e: Api.EventResponse) => Number(e.ledger) || startLedger))
             : lastStoredLedger;
-        const nextCursor = (events as any)?.cursor as string | undefined;
+        const nextCursor = events.cursor as string | undefined;
         const isLastPage =
           pageEvents.length < pageLimit || !nextCursor;
 
@@ -1006,7 +1006,7 @@ export async function pollEvents(): Promise<boolean> {
         // processed, or to the RPC's latest ledger once the final page ran
         // short and there is nothing left to collect.
         const newLedger = isLastPage
-          ? ((events as any)?.latestLedger ?? currentLedger)
+          ? (events.latestLedger ?? currentLedger)
           : pageMaxLedger;
 
         // Persist the page and advance both pointers atomically per page.

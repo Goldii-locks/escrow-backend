@@ -400,7 +400,7 @@ describe("GET /api/jobs/by-wallet/:address – HTTP", () => {
   });
 
   it("returns success:true with jobs array and pagination fields", async () => {
-    const addr = VALID_WALLET;
+    const _addr = VALID_WALLET;
     seedEvent(testDb, {
       contractId: "HTTP-C1",
       eventType: "initialized",
@@ -446,7 +446,7 @@ describe("GET /api/jobs/by-wallet/:address – HTTP", () => {
   });
 
   it("each job entry has the expected shape", async () => {
-    const addr = VALID_WALLET;
+    const _addr = VALID_WALLET;
     seedEvent(testDb, {
       contractId: "SHAPE-C",
       eventType: "funded",

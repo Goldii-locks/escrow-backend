@@ -261,7 +261,7 @@ export function getLedgerRangeSnapshot(): LedgerRangeSnapshot {
     const row = db
       .prepare("SELECT value FROM indexer_state WHERE key = 'last_ledger_sequence'")
       .get();
-    const ledger = row ? parseInt((row as any).value, 10) : 0;
+    const ledger = row ? parseInt((row as { value: string }).value, 10) : 0;
     return {
       lastIndexedLedger: ledger,
       timestamp: Date.now(),
@@ -352,7 +352,7 @@ export function advanceLedgerUnconditional(newLedger: number): void {
  * @param endLedger Inclusive end of ledger range
  * @returns Array of events within the range
  */
-export function readLedgerRange(startLedger: number, endLedger: number): any[] {
+export function readLedgerRange(startLedger: number, endLedger: number): unknown[] {
   const db = getDb();
 
   const readTransaction = db.transaction(() => {

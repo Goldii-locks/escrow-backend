@@ -153,7 +153,7 @@ describe("POST /api/jobs/build-tx — validation", () => {
   });
 
   it("returns 400 if method is missing", async () => {
-    const { method, ...bodyWithoutMethod } = VALID_BODY;
+    const { method: _method, ...bodyWithoutMethod } = VALID_BODY;
     const res = await request(app).post("/api/jobs/build-tx").send(bodyWithoutMethod).expect(400);
     expect(res.body.success).toBe(false);
     expect(res.body.fields).toBeDefined();

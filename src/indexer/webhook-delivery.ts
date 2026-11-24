@@ -234,7 +234,7 @@ export async function deliverToUrl(
       timestamp: event.timestamp,
       data: JSON.parse(event.data_json),
     };
-  } catch (err) {
+  } catch {
     return {
       ok: false,
       errorCode: "PAYLOAD_PARSE_ERROR",

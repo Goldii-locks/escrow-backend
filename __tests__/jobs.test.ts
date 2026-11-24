@@ -28,7 +28,7 @@ function buildApp() {
   app.use("/api/jobs", router);
   // Add error interceptor for test coverage
   app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
-    const message = err instanceof Error ? err.message : String(err);
+    const _message = err instanceof Error ? err.message : String(err);
     res.status(500).json({ success: false, error: "Internal server error" });
   });
   return app;

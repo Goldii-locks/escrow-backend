@@ -31,6 +31,9 @@ import {
 } from "./caches.js";
 import { formatError } from "../../utils/format-error.js";
 
+/** Minimal shape of a validated build-tx argument element. */
+type ContractArg = { type: string; value: unknown };
+
 
 /**
  * build-tx answers with the standard envelope and, additively, the prepared
@@ -77,8 +80,9 @@ router.post(
     try {
       // Validate for whitelist management methods
       if (method === "add_whitelisted_token" || method === "remove_whitelisted_token") {
-        const adminArg = args.find((a: any) => a.type === "address" && a.value);
-        const tokenArg = args.find((a: any) => a.type === "address" && a.value && a !== adminArg);
+        const typedArgs = (args as ContractArg[]) || [];
+        const adminArg = typedArgs.find((a) => a.type === "address" && a.value);
+        const tokenArg = typedArgs.find((a) => a.type === "address" && a.value && a !== adminArg);
 
         if (!adminArg || !tokenArg) {
           logger.warn("Missing admin/token args for whitelist management", {
@@ -172,32 +176,32 @@ router.post(
             ...pathVars,
           });
 
-          const toScVal = (a: any): any => {
-            if (a.type === "address") return Address.fromString(a.value).toScVal();
-            if (a.type === "i128") return nativeToScVal(BigInt(a.value), { type: "i128" });
+          const toScVal = (a: ContractArg): ReturnType<typeof nativeToScVal> => {
+            if (a.type === "address") return Address.fromString(String(a.value)).toScVal();
+            if (a.type === "i128") return nativeToScVal(BigInt(String(a.value)), { type: "i128" });
             if (a.type === "u32") return nativeToScVal(a.value, { type: "u32" });
-            if (a.type === "u64") return nativeToScVal(BigInt(a.value), { type: "u64" });
+            if (a.type === "u64") return nativeToScVal(BigInt(String(a.value)), { type: "u64" });
             // A JS boolean always becomes scvBool; SDK v16 no longer types `type: "bool"`.
             if (a.type === "bool") return nativeToScVal(a.value);
             // Hex-encoded bytes, e.g. the BytesN<32> milestone spec hashes
             // and the salt `create_escrow` takes.
             if (a.type === "bytes") return nativeToScVal(Buffer.from(String(a.value), "hex"));
             if (a.type === "vec") {
-              return nativeToScVal(a.value.map((item: any) => toScVal(item)));
+              return nativeToScVal((a.value as ContractArg[]).map((item) => toScVal(item)));
             }
             // A unit enum variant is a one-symbol vec.
             if (a.type === "enum") return nativeToScVal([a.value], { type: "symbol" });
             if (a.type === "struct") {
               // #[contracttype] structs are maps keyed by field symbol, sorted.
-              const fields = Object.keys(a.value).sort();
+              const fields = Object.keys(a.value as Record<string, ContractArg>).sort();
               return nativeToScVal(
-                Object.fromEntries(fields.map((f) => [f, toScVal(a.value[f])])),
+                Object.fromEntries(fields.map((f) => [f, toScVal((a.value as Record<string, ContractArg>)[f])])),
                 { type: Object.fromEntries(fields.map((f) => [f, ["symbol", null]])) },
               );
             }
             return nativeToScVal(a.value);
           };
-          const scArgs = (args || []).map((a: any) => toScVal(a));
+          const scArgs = ((args as ContractArg[]) || []).map((a) => toScVal(a));
 
           const tx = new TransactionBuilder(account, {
             fee: inclusionFee,

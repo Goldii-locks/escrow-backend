@@ -93,7 +93,7 @@ describe("POST /api/jobs/build-tx – Stellar address validation", () => {
   });
 
   it("rejects a missing address field", async () => {
-    const { sourceAddress, ...rest } = VALID_BODY;
+    const { sourceAddress: _sourceAddress, ...rest } = VALID_BODY;
     const res = await request(buildApp())
       .post("/api/jobs/build-tx")
       .send(rest)

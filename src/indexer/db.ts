@@ -1210,7 +1210,7 @@ export function getLastIndexedLedger(): number {
   const row = db
     .prepare("SELECT value FROM indexer_state WHERE key = 'last_ledger_sequence'")
     .get();
-  return row ? parseInt((row as any).value, 10) : 0;
+  return row ? parseInt((row as { value: string }).value, 10) : 0;
 }
 
 /**
@@ -2813,7 +2813,7 @@ export function getHistoricalEventCounts(
 export interface JobDraftRecord {
   id: string;
   creatorAddress: string;
-  payload: any;
+  payload: unknown;
   createdAt: string;
   expiresAt: string | null;
 }
