@@ -2,7 +2,6 @@ import { Router } from "express";
 import type { Request, Response } from "express";
 import {
   iterateEventsByContract,
-  jobContractCors,
   jobContractSecurityHeaders,
   jobContractRateLimit,
   validate,
@@ -65,11 +64,9 @@ function extractParty(data: Record<string, unknown>, keys: string[]): string {
   return "";
 }
 
-router.options("/:contractId/history.csv", jobContractCors);
 
 router.get(
   "/:contractId/history.csv",
-  jobContractCors,
   jobContractSecurityHeaders,
   jobContractRateLimit,
   validate(contractIdParamsSchema, "params", (req) =>

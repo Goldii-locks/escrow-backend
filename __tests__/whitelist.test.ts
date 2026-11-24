@@ -1,4 +1,5 @@
 import { jest } from "@jest/globals";
+import { globalCors } from "../src/middleware/global-cors.js";
 import request from "supertest";
 import express from "express";
 import { autoAuth } from "./helpers/api-key-helper.js";
@@ -41,6 +42,8 @@ const { default: router, resetWhitelistCache } = await import("../src/routes/job
 
 function buildApp() {
   const app = express();
+  app.use(globalCors());
+
   app.use(express.json());
   app.use(autoAuth);
   app.use("/api/jobs", router);
@@ -275,18 +278,14 @@ describe("GET /api/jobs/:contractId/whitelist", () => {
 
   // --- ISSUE #46: CORS and Security Headers ---
   describe("CORS and Security Headers (Issue #46)", () => {
-    it("rejects requests from unauthorized origins with 403", async () => {
+    it("withholds CORS headers for requests from unauthorized origins", async () => {
       process.env.ALLOWED_ORIGINS = "https://trusted.example.com";
 
       const res = await request(buildApp())
         .get(`/api/jobs/${VALID_CONTRACT}/whitelist`)
-        .set("Origin", "https://evil.example.com")
-        .expect(403);
+        .set("Origin", "https://evil.example.com");
 
-      expect(res.body).toEqual({
-        success: false,
-        error: "Origin not allowed by CORS policy",
-      });
+      expect(res.headers["access-control-allow-origin"]).toBeUndefined();
     });
 
     it("allows trusted origins and sets CORS response headers", async () => {

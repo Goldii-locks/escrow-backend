@@ -39,6 +39,7 @@ Express + TypeScript backend for the Soroban milestone escrow platform.
     - [GET /api/admin/metrics](#get-apiadminmetrics)
     - [GET /api/admin/jobs](#get-apiadminjobs)
     - [GET /api/admin/webhook-subscriptions](#get-apiadminwebhook-subscriptions)
+    - [GET /api/admin/webhook-subscriptions/:id/deliveries](#get-apiadminwebhook-subscriptionsiddeliveries)
     - [POST /api/admin/backfill](#post-apiadminbackfill)
     - [GET /api/admin/backfill](#get-apiadminbackfill)
     - [GET /api/admin/contracts](#get-apiadmincontracts)
@@ -249,6 +250,13 @@ Monitored jobs with their participants, latest event and open-dispute flag, newe
 Every webhook subscription, plus the `active` and `disabled` subsets. A subscription is auto-disabled after `WEBHOOK_DISABLE_AFTER` consecutive failed deliveries (#701); subscribing again re-enables it.
 - **Auth**: Admin API Key
 - **Response**: `{ success: true, subscriptions, active, disabled }`
+
+#### GET /api/admin/webhook-subscriptions/:id/deliveries
+
+One subscription delivery history for "we never got the webhook" reports (#941): its `webhook_deliveries` rows newest first, joined to the event (`eventType`, `ledgerSequence`, `eventId`) plus the deterministic `X-Milesto-Delivery-Id` as `deliveryId`. The webhook URL query string is masked.
+- **Auth**: Admin API Key
+- **Query**: `status` (`pending`, `delivered`, `failed` or `dead`, optional), `limit` (1–200, default 50), `before` (the previous page `nextBefore`)
+- **Response**: `{ success: true, subscription, deliveries, nextBefore }`; `404` for an unknown subscription, `400` for a bad query
 
 #### POST /api/admin/backfill
 

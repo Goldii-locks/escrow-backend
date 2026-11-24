@@ -1,4 +1,5 @@
 import request from "supertest";
+import { globalCors } from "../src/middleware/global-cors.js";
 import express from "express";
 import { autoAuth } from "./helpers/api-key-helper.js";
 import { jest } from "@jest/globals";
@@ -19,6 +20,8 @@ jest.unstable_mockModule("../src/indexer/db.js", () => ({
 const { default: router } = await import("../src/routes/jobs.js");
 
 const app = express();
+app.use(globalCors());
+
 app.use(express.json());
 app.use(autoAuth);
 app.use("/api/jobs", router);
@@ -56,33 +59,19 @@ describe("GET /api/jobs/by-wallet/:address — security and CORS", () => {
         .expect(204);
 
       expect(res.headers["access-control-allow-origin"]).toBe("http://localhost:3000");
-      expect(res.headers["access-control-allow-methods"]).toContain("GET");
-      expect(res.headers["access-control-allow-methods"]).toContain("OPTIONS");
     });
 
-    it("rejects requests from an unauthorized origin", async () => {
+    it("withholds CORS headers for requests from an unauthorized origin", async () => {
       const res = await request(app)
         .get(`/api/jobs/by-wallet/${WALLET_ADDRESS}`)
-        .set("Origin", "https://malicious-site.com")
-        .expect(403);
-
-      expect(res.body).toEqual({
-        success: false,
-        error: "Origin not allowed by CORS policy",
-      });
+        .set("Origin", "https://malicious-site.com");
       expect(res.headers["access-control-allow-origin"]).toBeUndefined();
     });
 
     it("rejects OPTIONS requests from an unauthorized origin", async () => {
       const res = await request(app)
         .options(`/api/jobs/by-wallet/${WALLET_ADDRESS}`)
-        .set("Origin", "https://malicious-site.com")
-        .expect(403);
-
-      expect(res.body).toEqual({
-        success: false,
-        error: "Origin not allowed by CORS policy",
-      });
+        .set("Origin", "https://malicious-site.com");
       expect(res.headers["access-control-allow-origin"]).toBeUndefined();
     });
 

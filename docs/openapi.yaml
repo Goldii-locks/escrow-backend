@@ -906,6 +906,95 @@ paths:
         '401':
           description: Unauthorized (missing or invalid admin API key)
 
+  /api/admin/webhook-subscriptions/{id}/deliveries:
+    get:
+      summary: Inspect a webhook subscription delivery history
+      description: >
+        Delivery attempts for one subscription, newest first, joined to the
+        event they carry. Each row includes the deterministic
+        `X-Milesto-Delivery-Id` value as `deliveryId`. The subscription
+        webhook URL has its query string masked. Paginate by passing
+        `nextBefore` as `before` (#941).
+      security:
+        - AdminApiKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [pending, delivered, failed, dead]
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+        - name: before
+          in: query
+          description: Return only deliveries with an id lower than this (keyset cursor)
+          schema:
+            type: integer
+            minimum: 1
+      responses:
+        '200':
+          description: Deliveries, newest first
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  subscription:
+                    type: object
+                  deliveries:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: integer
+                        deliveryId:
+                          type: string
+                          format: uuid
+                        status:
+                          type: string
+                        attempts:
+                          type: integer
+                        lastError:
+                          type: string
+                          nullable: true
+                        nextAttemptAt:
+                          type: integer
+                          nullable: true
+                        updatedAt:
+                          type: string
+                          nullable: true
+                        eventType:
+                          type: string
+                          nullable: true
+                        ledgerSequence:
+                          type: integer
+                          nullable: true
+                        eventId:
+                          type: string
+                          nullable: true
+                  nextBefore:
+                    type: integer
+                    nullable: true
+        '400':
+          description: Invalid status, limit or before
+        '401':
+          description: Unauthorized (missing or invalid admin API key)
+        '404':
+          description: Unknown webhook subscription
+
   /api/admin/backfill:
     post:
       summary: Start a historical ledger backfill

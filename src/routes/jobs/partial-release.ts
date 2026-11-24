@@ -6,7 +6,6 @@ import {
   nativeToScVal,
   Address,
   partialReleaseRateLimit,
-  partialReleaseCors,
   partialReleaseSecurityHeaders,
   sendError,
   validateWithFields,
@@ -42,14 +41,8 @@ const router = Router();
 // ---------------------------------------------------------------------------
 // POST /api/jobs/:contractId/milestones/:index/partial-release
 // ---------------------------------------------------------------------------
-router.options(
-  "/:contractId/milestones/:index/partial-release",
-  partialReleaseCors,
-);
-
 router.post(
   "/:contractId/milestones/:index/partial-release",
-  partialReleaseCors,
   partialReleaseSecurityHeaders,
   partialReleaseRateLimit,
   validateWithFields(contractMilestoneParamsSchema, "params", (req) =>
