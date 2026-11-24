@@ -114,7 +114,6 @@ Legend:
 | `src/utils/logger.ts` | live | — |
 | `src/utils/partial_payment_allocator.ts` | unwired | [#718](https://github.com/Goldii-locks/escrow-backend/issues/718) |
 | `src/utils/partial-payment-allocator.ts` | live | — |
-| `src/utils/push_notification_service.ts` | unwired | [#718](https://github.com/Goldii-locks/escrow-backend/issues/718) |
 | `src/utils/refund_ratio_helper.ts` | unwired | [#718](https://github.com/Goldii-locks/escrow-backend/issues/718) |
 | `src/utils/rounding.ts` | live | — |
 | `src/utils/rpc-allow-http.ts` | live | — |

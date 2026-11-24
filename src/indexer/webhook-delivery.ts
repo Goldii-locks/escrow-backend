@@ -8,6 +8,7 @@ import {
 } from "./db.js";
 import logger from "../utils/logger.js";
 import { assertDeliveryTargetAllowed } from "../utils/webhook-url-guard.js";
+import { config } from "../config.js";
 
 const MAX_RETRIES = 3;
 const BACKOFF_MS = [500, 1500, 4500];
@@ -24,34 +25,33 @@ export const DEFAULT_WEBHOOK_TIMEOUT_MS = 5000;
 
 /**
  * Read the timeout per attempt so a deployment (or a test) can change it
- * without reloading the module. Invalid or non-positive values fall back to
- * the default.
+ * without reloading the module. Validated at startup by
+ * validateConfigAtStartup() (#859); invalid values throw there instead of
+ * silently falling back here.
  */
 function webhookTimeoutMs(): number {
-  const configured = Number.parseInt(process.env.WEBHOOK_TIMEOUT_MS ?? "", 10);
-  return Number.isFinite(configured) && configured > 0
-    ? configured
-    : DEFAULT_WEBHOOK_TIMEOUT_MS;
+  return config.webhookTimeoutMs;
 }
 
 /**
  * Number of consecutive failed deliveries after which a subscription is
  * auto-disabled (#701). A permanently dead endpoint (expired domain, removed
  * route) used to be retried for every matching event, forever, delaying every
- * healthy subscriber behind it in the sequential delivery loop.
+ * healthy subscriber behind it in the sequential delivery loop. Read through
+ * config at use time (#859) so a bad value fails fast at startup.
  */
-export const WEBHOOK_DISABLE_AFTER = Math.max(
-  1,
-  parseInt(process.env.WEBHOOK_DISABLE_AFTER || "50", 10) || 50,
-);
+export function webhookDisableAfter(): number {
+  return config.webhookDisableAfter;
+}
 
 /**
  * Number of ledgers scanned per query inside deliverWebhooks (#690). Paging
  * the range keeps peak memory bounded even after long downtime, when the
  * range to deliver can span thousands of ledgers.
  */
-const WEBHOOK_DELIVERY_LEDGER_PAGE_SIZE =
-  parseInt(process.env.WEBHOOK_DELIVERY_PAGE_SIZE || "500", 10) || 500;
+function webhookDeliveryLedgerPageSize(): number {
+  return config.webhookDeliveryPageSize;
+}
 
 /**
  * Subscription opt-out is not yet supported by the live delivery path. The
@@ -291,17 +291,15 @@ export async function deliverToUrl(
  * down for more than the inline backoff window still receives the event on
  * a later sweep, and operators can list dead deliveries.
  */
-export const WEBHOOK_RETRY_BASE_DELAY_MS = parseInt(
-  process.env.WEBHOOK_RETRY_BASE_DELAY_MS || "60000",
-  10
-);
-export const WEBHOOK_RETRY_MAX_AGE_MS =
-  parseInt(process.env.WEBHOOK_RETRY_MAX_AGE_DAYS || "7", 10) *
-  24 * 60 * 60 * 1000;
-export const WEBHOOK_MAX_DELIVERY_ATTEMPTS = parseInt(
-  process.env.WEBHOOK_MAX_DELIVERY_ATTEMPTS || "25",
-  10
-);
+export function webhookRetryBaseDelayMs(): number {
+  return config.webhookRetryBaseDelayMs;
+}
+export function webhookRetryMaxAgeMs(): number {
+  return config.webhookRetryMaxAgeDays * 24 * 60 * 60 * 1000;
+}
+export function webhookMaxDeliveryAttempts(): number {
+  return config.webhookMaxDeliveryAttempts;
+}
 
 export interface DeadDelivery {
   id: number;
@@ -338,7 +336,7 @@ function ensureDeliveriesTable(): void {
 
 export function computeWebhookRetryDelayMs(attempts: number): number {
   return Math.min(
-    WEBHOOK_RETRY_BASE_DELAY_MS * 2 ** Math.max(0, attempts - 1),
+    webhookRetryBaseDelayMs() * 2 ** Math.max(0, attempts - 1),
     60 * 60 * 1000
   );
 }
@@ -406,6 +404,54 @@ export function getDeadDeliveries(limit = 100): DeadDelivery[] {
   } catch {
     return [];
   }
+}
+
+/** Input accepted by replayWebhookDeliveries (#857): either explicit ids, or a filter. */
+export interface ReplayDeliveriesFilter {
+  ids?: number[];
+  subscriptionId?: number;
+  /** Defaults to "dead" when omitted, so a filter never revives rows still mid-backoff. */
+  status?: string;
+  /** Only rows last updated at or after this unix-ms timestamp. */
+  since?: number;
+}
+
+/**
+ * Reset matching delivery rows back to a retryable state, for an operator
+ * bringing a receiver back online after it was dead-lettered (#857). Returns
+ * the number of rows queued for retry.
+ */
+export function replayWebhookDeliveries(filter: ReplayDeliveriesFilter): number {
+  ensureDeliveriesTable();
+  const db = getDb();
+  const where: string[] = [];
+  const params: Array<number | string> = [];
+
+  if (filter.ids && filter.ids.length > 0) {
+    where.push(`id IN (${filter.ids.map(() => "?").join(", ")})`);
+    params.push(...filter.ids);
+  } else {
+    if (filter.subscriptionId !== undefined) {
+      where.push("subscription_id = ?");
+      params.push(filter.subscriptionId);
+    }
+    where.push("status = ?");
+    params.push(filter.status ?? "dead");
+    if (filter.since !== undefined) {
+      where.push("CAST(strftime('%s', updated_at) AS INTEGER) >= ?");
+      params.push(Math.floor(filter.since / 1000));
+    }
+  }
+  if (where.length === 0) return 0;
+
+  const result = db
+    .prepare(
+      `UPDATE webhook_deliveries
+       SET status = 'failed', attempts = 0, next_attempt_at = ?, updated_at = CURRENT_TIMESTAMP
+       WHERE ${where.join(" AND ")}`
+    )
+    .run(Date.now(), ...params);
+  return result.changes;
 }
 
 export const DELIVERY_STATUSES = ["pending", "delivered", "failed", "dead"] as const;
@@ -571,8 +617,8 @@ export async function retryFailedDeliveries(): Promise<number> {
     // Expire rows older than the max age instead of retrying forever.
     const eventAgeMs = Date.now() - new Date(event.created_at).getTime();
     if (
-      row.attempts >= WEBHOOK_MAX_DELIVERY_ATTEMPTS ||
-      (!Number.isNaN(eventAgeMs) && eventAgeMs > WEBHOOK_RETRY_MAX_AGE_MS)
+      row.attempts >= webhookMaxDeliveryAttempts() ||
+      (!Number.isNaN(eventAgeMs) && eventAgeMs > webhookRetryMaxAgeMs())
     ) {
       try {
         db.prepare(
@@ -722,12 +768,13 @@ export async function deliverWebhooks(
 
   const results: DeliveryResult[] = [];
 
+  const pageSize = webhookDeliveryLedgerPageSize();
   for (
     let pageStart = startLedger;
     pageStart <= endLedger;
-    pageStart += WEBHOOK_DELIVERY_LEDGER_PAGE_SIZE
+    pageStart += pageSize
   ) {
-    const pageEnd = Math.min(pageStart + WEBHOOK_DELIVERY_LEDGER_PAGE_SIZE - 1, endLedger);
+    const pageEnd = Math.min(pageStart + pageSize - 1, endLedger);
     const events = pageQuery.all(pageStart, pageEnd, ...contractIds) as EventDbRow[];
 
     for (const event of events) {
@@ -771,10 +818,11 @@ export async function deliverWebhooks(
             durationMs: result.durationMs,
           });
         } else {
+          const disableAfter = webhookDisableAfter();
           const failure = recordSubscriptionFailure(
             sub.id,
             result.error ?? result.errorCode ?? "delivery failed",
-            WEBHOOK_DISABLE_AFTER,
+            disableAfter,
           );
           logger.error("Webhook delivery failed after all attempts", {
             subscriptionId: sub.id,
@@ -794,7 +842,7 @@ export async function deliverWebhooks(
                 subscriptionId: sub.id,
                 webhookUrl: sub.webhook_url,
                 consecutiveFailures: failure.consecutiveFailures,
-                disableAfter: WEBHOOK_DISABLE_AFTER,
+                disableAfter,
               },
             );
           }

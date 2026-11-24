@@ -14,9 +14,9 @@ import {
   deliverToUrl,
   retryFailedDeliveries,
   getDeadDeliveries,
-  WEBHOOK_MAX_DELIVERY_ATTEMPTS,
-  WEBHOOK_RETRY_MAX_AGE_MS,
-  WEBHOOK_DISABLE_AFTER,
+  webhookMaxDeliveryAttempts,
+  webhookRetryMaxAgeMs,
+  webhookDisableAfter,
 } from "../src/indexer/webhook-delivery.js";
 import logger from "../src/utils/logger.js";
 
@@ -141,7 +141,7 @@ describe("webhook retry, dead-lettering and error outcomes (#952)", () => {
     it("marks a row dead once attempts reach the configured maximum", async () => {
       const sub = addSubscription(CONTRACT, URL, ["fund"]);
       const eventId = seedEvent();
-      seedFailedDelivery(sub.id, eventId, WEBHOOK_MAX_DELIVERY_ATTEMPTS);
+      seedFailedDelivery(sub.id, eventId, webhookMaxDeliveryAttempts());
 
       expect(await retryFailedDeliveries()).toBe(0);
       expect(getDeadDeliveries()).toEqual([
@@ -154,7 +154,7 @@ describe("webhook retry, dead-lettering and error outcomes (#952)", () => {
       const sub = addSubscription(CONTRACT, URL, ["fund"]);
       const eventId = seedEvent("2000-01-01T00:00:00Z");
       seedFailedDelivery(sub.id, eventId, 1);
-      expect(WEBHOOK_RETRY_MAX_AGE_MS).toBeGreaterThan(0);
+      expect(webhookRetryMaxAgeMs()).toBeGreaterThan(0);
 
       expect(await retryFailedDeliveries()).toBe(0);
       expect(getDeadDeliveries()).toEqual([
@@ -206,9 +206,10 @@ describe("webhook retry, dead-lettering and error outcomes (#952)", () => {
   describe("auto-disable after repeated failures", () => {
     it("disables a subscription after WEBHOOK_DISABLE_AFTER failures and removes it from active delivery", () => {
       const sub = addSubscription(CONTRACT, URL, ["fund"]);
+      const disableAfter = webhookDisableAfter();
       let state = { disabled: false, consecutiveFailures: 0 };
-      for (let i = 0; i < WEBHOOK_DISABLE_AFTER; i++) {
-        state = recordSubscriptionFailure(sub.id, "HTTP_500", WEBHOOK_DISABLE_AFTER);
+      for (let i = 0; i < disableAfter; i++) {
+        state = recordSubscriptionFailure(sub.id, "HTTP_500", disableAfter);
       }
       expect(state.disabled).toBe(true);
       expect(getSubscriptions().find((s) => s.id === sub.id)?.disabled_at).not.toBeNull();
