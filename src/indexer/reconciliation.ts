@@ -25,6 +25,7 @@ import { Server } from "@stellar/stellar-sdk/rpc";
 import { getDb } from "./db.js";
 import { sumLedgerAmounts } from "../utils/audit_ledger_sum_checker.js";
 import logger from "../utils/logger.js";
+import { sendOpsAlert } from "../utils/ops-alerts.js";
 import { rpcAllowHttp } from "../utils/rpc-allow-http.js";
 import { config } from "../config.js";
 
@@ -277,6 +278,16 @@ export async function reconcileContract(
     persist(result);
     if (result.status === "mismatch") {
       logger.warn("Reconciliation mismatch", { contractId, expected: base.expected_balance, onchain: result.onchain_balance, delta: result.delta });
+      void sendOpsAlert({
+        severity: "critical",
+        title: "Reconciliation mismatch",
+        details: {
+          contractId,
+          expected: base.expected_balance,
+          onchain: result.onchain_balance,
+          delta: result.delta,
+        },
+      });
     }
     return result;
   } catch (err) {

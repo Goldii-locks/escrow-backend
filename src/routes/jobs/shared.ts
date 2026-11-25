@@ -74,6 +74,7 @@ import {
   simulationSource,
 } from "../../utils/soroban-call.js";
 import logger from "../../utils/logger.js";
+import { sendOpsAlert } from "../../utils/ops-alerts.js";
 import { isValidStellarContractId } from "../../utils/stellar.js";
 import { randomUUID } from "crypto";
 
@@ -123,6 +124,11 @@ export async function assertRpcNetworkMatches(): Promise<void> {
   }
 
   if (rpcPassphrase !== localPassphrase) {
+    await sendOpsAlert({
+      severity: "critical",
+      title: "Startup network mismatch",
+      details: { rpcPassphrase, localPassphrase, rpc: RPC_URL },
+    });
     throw new Error(
       `Network passphrase mismatch: RPC reported "${rpcPassphrase}" ` +
         `but SOROBAN_NETWORK_PASSPHRASE is set to "${localPassphrase}". ` +

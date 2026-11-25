@@ -2,6 +2,7 @@ import { Router } from "express";
 import { sendSuccess, sendError } from "../utils/api-response.js";
 import { requireApiKey } from "../middleware/apiKeyAuth.js";
 import { getSubscriptionsForContract } from "../indexer/db.js";
+import { parseWebhookFilters } from "../indexer/webhook-delivery.js";
 import { requireAdmin } from "../middleware/adminAuth.js";
 import { webhookLimiter } from "../middleware/rateLimiter.js";
 import {
@@ -45,6 +46,7 @@ router.get("/subscriptions", requireApiKey, (req, res) => {
     id: subscription.id,
     webhook_url: maskWebhookUrlQuery(subscription.webhook_url),
     event_types: parseEventTypes(subscription.event_types),
+    filters: parseWebhookFilters(subscription.filters_json),
     created_at: subscription.created_at,
   }));
 
@@ -61,6 +63,7 @@ router.post("/subscribe", webhookLimiter, requireAdmin, (req, res) => {
     contract_id: req.body?.contract_id,
     webhook_url: req.body?.webhook_url,
     event_types: req.body?.event_types,
+    filters: req.body?.filters,
   }, req.id);
 
   if (!result.ok) {

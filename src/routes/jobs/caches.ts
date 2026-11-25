@@ -1,8 +1,19 @@
 import NodeCache from "node-cache";
 import { config } from "../../config.js";
+import { safeCacheSet } from "../../utils/safe-cache.js";
+
+/**
+ * Upper bound shared by every job-route cache so a burst of distinct keys
+ * cannot grow them without bound (#…). See utils/safe-cache.ts.
+ */
+const MAX_KEYS = config.cacheMaxKeys;
 
 export const WHITELIST_TTL = config.whitelistCacheTtlS;
-export const whitelistCache = new NodeCache({ stdTTL: WHITELIST_TTL, useClones: false });
+export const whitelistCache = new NodeCache({
+  stdTTL: WHITELIST_TTL,
+  useClones: false,
+  maxKeys: MAX_KEYS,
+});
 export const inFlightWhitelistRequests = new Map<string, Promise<string[]>>();
 export function resetWhitelistCache(): void {
   whitelistCache.flushAll();
@@ -26,6 +37,7 @@ export const CLAIM_AUTO_RELEASE_TTL = config.claimAutoReleaseCacheTtlS;
 export const claimAutoReleaseCache = new NodeCache({
   stdTTL: CLAIM_AUTO_RELEASE_TTL,
   useClones: false,
+  maxKeys: MAX_KEYS,
 });
 export const inFlightClaimAutoReleaseRequests = new Map<string, Promise<BuildTxPayload>>();
 export function resetClaimAutoReleaseCache(): void {
@@ -37,6 +49,7 @@ export const SUBMIT_CACHE_TTL = config.submitCacheTtlS;
 export const submitCache = new NodeCache({
   stdTTL: SUBMIT_CACHE_TTL,
   useClones: false,
+  maxKeys: MAX_KEYS,
 });
 export const inFlightSubmitRequests = new Map<string, Promise<unknown>>();
 export function resetSubmitCache(): void {
@@ -48,6 +61,7 @@ export const BUILD_TX_CACHE_TTL = config.buildTxCacheTtlS;
 export const buildTxCache = new NodeCache({
   stdTTL: BUILD_TX_CACHE_TTL,
   useClones: false,
+  maxKeys: MAX_KEYS,
 });
 export const inFlightBuildTxRequests = new Map<string, Promise<BuildTxPayload>>();
 export function resetBuildTxCache(): void {
@@ -67,6 +81,7 @@ export const TIME_REMAINING_CACHE_TTL = config.timeRemainingCacheTtlS;
 export const timeRemainingCache = new NodeCache({
   stdTTL: TIME_REMAINING_CACHE_TTL,
   useClones: false,
+  maxKeys: MAX_KEYS,
 });
 export const inFlightTimeRemainingRequests = new Map<string, Promise<number>>();
 export function resetTimeRemainingCache(): void {
@@ -78,6 +93,7 @@ export const PARTIAL_RELEASE_CACHE_TTL = config.partialReleaseCacheTtlS;
 export const partialReleaseCache = new NodeCache({
   stdTTL: PARTIAL_RELEASE_CACHE_TTL,
   useClones: false,
+  maxKeys: MAX_KEYS,
 });
 export const inFlightPartialReleaseRequests = new Map<string, Promise<BuildTxPayload>>();
 export function resetPartialReleaseCache(): void {
@@ -93,6 +109,7 @@ export const FEE_PREVIEW_CACHE_TTL = config.feePreviewCacheTtlS;
 export const feePreviewCache = new NodeCache({
   stdTTL: FEE_PREVIEW_CACHE_TTL,
   useClones: false,
+  maxKeys: MAX_KEYS,
 });
 export const inFlightFeePreviewRequests = new Map<string, Promise<unknown>>();
 export function resetFeePreviewCache(): void {
@@ -188,5 +205,5 @@ export function setCachedBuildTx(
   );
   const ttl = Math.min(ttlSeconds, servableFor);
   if (ttl <= 0) return;
-  cache.set<CachedUnsignedXdr>(key, payload, ttl);
+  safeCacheSet<CachedUnsignedXdr>(cache, key, payload, ttl);
 }

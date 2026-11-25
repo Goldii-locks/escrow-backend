@@ -44,6 +44,13 @@ function readFirstIntEnv(names: string[], fallback: number, min = 0): number {
   return fallback;
 }
 
+/** First set (non-empty) string variable wins; empty string means "unset". */
+function readStrEnv(name: string, fallback = ""): string {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return fallback;
+  return raw;
+}
+
 const IS_TEST_ENV = process.env.NODE_ENV === "test";
 
 function testAwareFallback(testValue: number, prodValue: number): number {
@@ -157,6 +164,51 @@ export const config = {
   // Graceful shutdown (#623)
   get shutdownTimeoutMs(): number {
     return readIntEnv("SHUTDOWN_TIMEOUT_MS", 10000, 1);
+  },
+
+  // In-memory cache bounding (#…): upper bound on the number of keys every
+  // NodeCache instance may hold. node-cache throws ECACHEFULL once a cache is
+  // full; the bounded caches degrade that to a cache miss/skip instead of a
+  // 500 or an indexer crash.
+  get cacheMaxKeys(): number {
+    return readIntEnv("CACHE_MAX_KEYS", 5000, 1);
+  },
+
+  // Operator alerting (#…): outbound webhook for critical operational events.
+  // Unset disables alerting entirely (clean no-op).
+  get opsAlertWebhookUrl(): string {
+    return readStrEnv("OPS_ALERT_WEBHOOK_URL");
+  },
+  get opsAlertMinIntervalS(): number {
+    return readIntEnv("OPS_ALERT_MIN_INTERVAL_S", 900);
+  },
+
+  // Unauthenticated contract email notifications (#…). The whole feature is
+  // gated on SMTP_URL + EMAIL_FROM: unset disables delivery and the endpoints
+  // without breaking startup.
+  get smtpUrl(): string {
+    return readStrEnv("SMTP_URL");
+  },
+  get emailFrom(): string {
+    return readStrEnv("EMAIL_FROM");
+  },
+  get emailNotificationsEnabled(): boolean {
+    return readStrEnv("SMTP_URL").length > 0 && readStrEnv("EMAIL_FROM").length > 0;
+  },
+  get publicBaseUrl(): string {
+    return readStrEnv("PUBLIC_BASE_URL", `http://localhost:${process.env.PORT || 3001}`);
+  },
+  get emailRateWindowMs(): number {
+    return readIntEnv("EMAIL_RATE_WINDOW_MS", 3600000, 1);
+  },
+  get emailPerIpRateMax(): number {
+    return readIntEnv("EMAIL_PER_IP_RATE_MAX", 10, 1);
+  },
+  get emailPerAddressRateMax(): number {
+    return readIntEnv("EMAIL_PER_ADDRESS_RATE_MAX", 3, 1);
+  },
+  get emailMaxActivePerAddress(): number {
+    return readIntEnv("EMAIL_MAX_ACTIVE_PER_ADDRESS", 5, 1);
   },
 } as const;
 

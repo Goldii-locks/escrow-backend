@@ -31,6 +31,7 @@ import {
   feePreviewCache,
   inFlightFeePreviewRequests,
 } from "./caches.js";
+import { safeCacheSet } from "../../utils/safe-cache.js";
 import {
   SimError,
   classifySimError,
@@ -181,7 +182,7 @@ router.get(
             string,
             unknown
           >;
-          feePreviewCache.set(cacheKey, split);
+          safeCacheSet(feePreviewCache, cacheKey, split);
           return split;
         }
 

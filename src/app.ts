@@ -5,6 +5,7 @@ import adminRoutes from "./routes/admin.js";
 import webhookRoutes from "./routes/webhooks.js";
 import tokenRoutes from "./routes/tokens.js";
 import statsRoutes from "./routes/stats.js";
+import notificationRoutes, { unsubscribeRouter } from "./routes/notifications.js";
 import { generalLimiter } from "./middleware/rateLimiter.js";
 import { legacyApiDeprecation } from "./middleware/api-version.js";
 import { readinessHandler } from "./readiness.js";
@@ -90,11 +91,17 @@ export function createApp(): express.Express {
   app.use("/api/v1/webhooks", webhookRoutes);
   app.use("/api/v1/tokens", tokenRoutes);
   app.use("/api/v1/stats", statsRoutes);
+  app.use("/api/v1/notifications", notificationRoutes);
   app.use("/api/jobs", jobRoutes);
   app.use("/api/admin", adminRoutes);
   app.use("/api/webhooks", webhookRoutes);
   app.use("/api/tokens", tokenRoutes);
   app.use("/api/stats", statsRoutes);
+  app.use("/api/notifications", notificationRoutes);
+
+  // One-click opt-out link embedded in every notification email. Mounted at
+  // the root (not under /api) because that is the URL recipients click.
+  app.use(unsubscribeRouter);
 
   app.use(globalErrorHandler);
 
