@@ -34,7 +34,7 @@ const NETWORK_PASSPHRASE =
 const BASE_FEE = "100";
 
 /** Event types counted as inflows to the escrow. */
-export const INFLOW_EVENT_TYPES = ["fund"] as const;
+export const INFLOW_EVENT_TYPES = ["fund", "msfund"] as const;
 
 /**
  * Event types counted as outflows from the escrow. The amount field used for
@@ -54,10 +54,25 @@ export const OUTFLOW_EVENT_TYPES = [
   "adtxrls",
   "msadmrel",
   "msadmref",
+  "withdraw",
+  "sweep",
+  "unaccref",
+  "overdue",
+  "resolve",
+  "taxpaid",
+  "epclaim",
 ] as const;
 
 const EVENT_AMOUNT_FIELDS: Partial<Record<string, string>> = {
   fund: "total_amount",
+  msfund: "amount",
+  sweep: "amount",
+  withdraw: "amount",
+  unaccref: "amount",
+  overdue: "amount",
+  resolve: "amount",
+  taxpaid: "amount",
+  epclaim: "amount",
 };
 
 export type ReconciliationStatus = "match" | "mismatch" | "error";
@@ -104,6 +119,13 @@ function extractAmounts(
     } catch {
       throw new Error(`events row for ${row.event_type} has invalid data_json`);
     }
+
+    // Credited payouts (e.g. transfer failed and recorded as an Owed credit):
+    // Tokens remain in the contract until explicitly withdrawn.
+    if ((row.event_type === "approve" || row.event_type === "claim") && data.credited === true) {
+      continue;
+    }
+
     const value = data[field];
     if (value === undefined || value === null) {
       throw new Error(`${row.event_type} event is missing field "${field}"`);
@@ -129,7 +151,7 @@ function resolveToken(contractId: string): string | null {
   const row = getDb()
     .prepare(
       `SELECT data_json FROM events
-       WHERE contract_id = ? AND event_type IN ('init', 'fund')
+       WHERE contract_id = ? AND event_type IN ('init', 'fund', 'msfund')
        ORDER BY ledger_sequence DESC, id DESC LIMIT 1`
     )
     .get(contractId) as { data_json: string } | undefined;
@@ -299,7 +321,9 @@ export async function runReconciliation(
   reader: BalanceReader = readOnChainBalance
 ): Promise<ReconciliationResult[]> {
   const rows = getDb()
-    .prepare("SELECT contract_id FROM monitored_contracts WHERE active = 1 ORDER BY id")
+    .prepare(
+      "SELECT contract_id FROM monitored_contracts WHERE active = 1 AND (label IS NULL OR label != 'factory') ORDER BY id"
+    )
     .all() as Array<{ contract_id: string }>;
 
   const results: ReconciliationResult[] = [];
