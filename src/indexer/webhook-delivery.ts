@@ -7,7 +7,11 @@ import {
   EventDbRow,
 } from "./db.js";
 import logger from "../utils/logger.js";
-import { assertDeliveryTargetAllowed } from "../utils/webhook-url-guard.js";
+import {
+  assertDeliveryTargetAllowed,
+  createPinnedDispatcher,
+  type LookupFn,
+} from "../utils/webhook-url-guard.js";
 
 const MAX_RETRIES = 3;
 const BACKOFF_MS = [500, 1500, 4500];
@@ -195,7 +199,8 @@ function sleep(ms: number): Promise<void> {
 export async function deliverToUrl(
   webhookUrl: string,
   event: EventDbRow,
-  delivery: DeliveryAttempt = { deliveryId: randomUUID(), attempt: 1 }
+  delivery: DeliveryAttempt = { deliveryId: randomUUID(), attempt: 1 },
+  options: { lookup?: LookupFn } = {}
 ): Promise<DeliveryOutcome> {
   const startedAt = Date.now();
   const eventId = webhookEventId(event);
@@ -203,7 +208,7 @@ export async function deliverToUrl(
   // Re-check the target before every attempt (#605). The subscribe-time
   // validation is not enough: DNS can be re-pointed at an internal address
   // after the subscription exists.
-  const targetCheck = await assertDeliveryTargetAllowed(webhookUrl);
+  const targetCheck = await assertDeliveryTargetAllowed(webhookUrl, options.lookup);
   if (!targetCheck.ok) {
     logger.warn("Webhook delivery blocked by URL guard", {
       webhookUrl,
@@ -242,8 +247,17 @@ export async function deliverToUrl(
     };
   }
 
+  // Connect to the address the guard vetted instead of letting fetch resolve
+  // the name a second time, which a 0-TTL record could answer with a private
+  // address (DNS rebinding, #862). The URL keeps its hostname, so the Host
+  // header and TLS SNI/certificate checks still use the original name.
+  const dispatcher = targetCheck.address
+    ? createPinnedDispatcher(targetCheck.address)
+    : undefined;
+
   try {
     const response = await fetch(webhookUrl, {
+      ...(dispatcher ? ({ dispatcher } as Record<string, unknown>) : {}),
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -281,6 +295,9 @@ export async function deliverToUrl(
       errorCode: getFetchErrorCode(err),
       durationMs: Date.now() - startedAt,
     };
+  } finally {
+    // One short-lived agent per attempt; release its sockets.
+    dispatcher?.close().catch(() => undefined);
   }
 }
 

@@ -141,7 +141,7 @@ describe("assertDeliveryTargetAllowed (#605)", () => {
 
     await expect(
       assertDeliveryTargetAllowed("https://example.com/hook", lookup)
-    ).resolves.toEqual({ ok: true });
+    ).resolves.toEqual({ ok: true, address: { address: "93.184.216.34", family: 4 } });
     expect(lookup).toHaveBeenCalledWith("example.com");
   });
 

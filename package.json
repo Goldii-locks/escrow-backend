@@ -30,6 +30,7 @@
     "express-rate-limit": "^8.7.4",
     "helmet": "^8.0.0",
     "node-cache": "^5.1.2",
+    "undici": "^7.30.2",
     "winston": "^3.19.0",
     "zod": "^3.24.4"
   },
