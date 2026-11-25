@@ -38,12 +38,14 @@ import {
   adjustIndexerRunnerPollInterval,
 } from "./indexer_runner.js";
 import { deliverWebhooks } from "./webhook-delivery.js";
+import { enqueueEmailNotificationDelivery } from "./email-delivery.js";
 import { buildGetEventsRequest } from "./event_type_filter.js";
 import { invalidateJobStateForEvents } from "./job-state-cache.js";
 import { formatError } from "../utils/format-error.js";
 import { config } from "../config.js";
 import { rpcAllowHttp } from "../utils/rpc-allow-http.js";
 import logger from "../utils/logger.js";
+import { sendOpsAlert } from "../utils/ops-alerts.js";
 import { stringifyWithBigInt } from "../utils/safe-json.js";
 
 const RPC_URL =
@@ -776,6 +778,17 @@ export async function pollEvents(): Promise<boolean> {
         stallThresholdMs,
         consecutiveFailures: failureMonitor.getConsecutiveFailures(),
       });
+      // Alerting is best-effort and never throws; fire-and-forget so a slow
+      // alert endpoint cannot delay the poll loop.
+      void sendOpsAlert({
+        severity: "critical",
+        title: "Poller stall detected",
+        details: {
+          elapsedMs: elapsedMsSinceLastSuccess,
+          stallThresholdMs,
+          consecutiveFailures: failureMonitor.getConsecutiveFailures(),
+        },
+      });
     }
   }
 
@@ -1057,6 +1070,9 @@ export async function pollEvents(): Promise<boolean> {
       // Not awaited: polling keeps its cadence, but deliveries stay in ledger
       // order behind any slower earlier range (#682).
       void enqueueWebhookDelivery(minStartLedger, currentLedger);
+      // Email notifications use their own queue so a slow SMTP server cannot
+      // delay subscriber webhooks (and vice versa).
+      void enqueueEmailNotificationDelivery(minStartLedger, currentLedger);
     }
 
     if (!anyGroupPolled) {
@@ -1092,6 +1108,16 @@ export async function pollEvents(): Promise<boolean> {
         consecutiveFailures: failureMonitor.getConsecutiveFailures(),
         threshold: failureMonitor.getFailureThreshold(),
         lastSuccessAt: failureMonitor.getLastSuccessfulAt(),
+      });
+      void sendOpsAlert({
+        severity: "critical",
+        title: "Poller alert: consecutive failure threshold exceeded",
+        details: {
+          consecutiveFailures: failureMonitor.getConsecutiveFailures(),
+          threshold: failureMonitor.getFailureThreshold(),
+          lastSuccessAt: failureMonitor.getLastSuccessfulAt(),
+          error: formatError(err),
+        },
       });
     }
 

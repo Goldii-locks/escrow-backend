@@ -13,6 +13,8 @@ import {
   server,
 } from "./shared.js";
 import { rejectedRequestLogMeta, xdrLogMeta } from "../../utils/log-redaction.js";
+import { createHash } from "crypto";
+import { TransactionBuilder } from "@stellar/stellar-sdk";
 
 import {
   submitCache,
@@ -21,12 +23,34 @@ import {
 import {
   classifySubmitError,
 } from "./errors.js";
+import { safeCacheSet } from "../../utils/safe-cache.js";
 
 const router = Router();
 
+/**
+ * Cache/dedupe key for a signed submission: the Stellar transaction hash
+ * (sha256 of the network-bound signature payload) rather than the 1–2 kB XDR
+ * string. Two encodings of the same transaction — e.g. re-signed with a
+ * different signer order — share a hash and therefore dedupe, and the key
+ * stays a fixed 64 characters. Malformed XDR falls back to a sha256 of the
+ * input so the key is still bounded; the request is rejected downstream.
+ */
+export function submitCacheKey(signedXdr: string): string {
+  try {
+    const hash = TransactionBuilder.fromXDR(
+      signedXdr,
+      NETWORK_PASSPHRASE,
+    ).hash();
+    return Buffer.from(hash as Uint8Array).toString("hex");
+  } catch {
+    return createHash("sha256").update(signedXdr).digest("hex");
+  }
+}
+
 // ---------------------------------------------------------------------------
 // POST /api/jobs/submit – submit a signed transaction
-// Caches results by signedXdr to deduplicate concurrent identical submissions.
+// Caches results by transaction hash to deduplicate concurrent identical
+// submissions without retaining the full signed XDR in memory.
 // ---------------------------------------------------------------------------
 
 router.post(
@@ -43,7 +67,7 @@ router.post(
   ),
   async (req: Request, res: Response) => {
     const { signedXdr, sourceAddress } = req.body as { signedXdr: string; sourceAddress?: string };
-    const cacheKey = signedXdr;
+    const cacheKey = submitCacheKey(signedXdr);
     // Reuse the request id (#773); a fresh one when mounted without it.
     const traceId = req.id ?? randomUUID();
 
@@ -81,7 +105,7 @@ router.post(
         // (#614).
         const txStatus = (result as { status?: string })?.status;
         if (txStatus === "PENDING" || txStatus === "DUPLICATE") {
-          submitCache.set(cacheKey, result);
+          safeCacheSet(submitCache, cacheKey, result);
         }
         return result;
       })();

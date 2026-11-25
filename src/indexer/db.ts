@@ -3,7 +3,10 @@ import path from "path";
 import { fileURLToPath } from "url";
 import fs from "fs";
 import NodeCache from "node-cache";
+import { config } from "../config.js";
 import logger from "../utils/logger.js";
+import { sendOpsAlert } from "../utils/ops-alerts.js";
+import { safeCacheSet } from "../utils/safe-cache.js";
 import {
   getSqliteSchemaManagerFailureMonitor,
 } from "./sqlite_schema_manager.js";
@@ -125,6 +128,7 @@ const JOBS_BY_WALLET_CACHE_TTL_S = parseInt(
 const jobsByWalletCache = new NodeCache({
   stdTTL: JOBS_BY_WALLET_CACHE_TTL_S,
   useClones: false,
+  maxKeys: config.cacheMaxKeys,
 });
 const inFlightJobsByWalletRequests = new Map<string, Promise<PaginatedJobs>>();
 
@@ -628,6 +632,61 @@ const MIGRATIONS: Migration[] = [
 
       CREATE INDEX IF NOT EXISTS idx_undecodable_events_ledger
         ON undecodable_events (ledger_sequence);
+    `,
+  },
+  {
+    version: 20,
+    description: "webhook subscription filters (milestone index / party)",
+    // Optional per-subscription filters stored as a JSON object. NULL keeps
+    // the legacy behaviour of matching on event_types alone. Like migration
+    // 17, webhook_subscriptions is created by the bootstrap block, so add the
+    // column only when it is missing.
+    up: (database) => {
+      const columns = new Set(
+        (
+          database.prepare("PRAGMA table_info(webhook_subscriptions)").all() as {
+            name: string;
+          }[]
+        ).map((c) => c.name),
+      );
+      if (!columns.has("filters_json")) {
+        database.exec("ALTER TABLE webhook_subscriptions ADD COLUMN filters_json TEXT");
+      }
+    },
+  },
+  {
+    version: 21,
+    description: "email subscriptions for unauthenticated contract notifications",
+    // Unauthenticated contract email notifications (#…). A row starts as
+    // `pending` and only becomes `active` once the recipient opens the
+    // confirmation link; delivery only ever targets `active` rows.
+    // UNIQUE(contract_id, email) makes re-subscribing idempotent: a repeated
+    // request reuses the row, resets it to pending and issues fresh tokens.
+    up: `
+      CREATE TABLE IF NOT EXISTS email_subscriptions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        contract_id TEXT NOT NULL,
+        email TEXT NOT NULL,
+        event_types TEXT NOT NULL DEFAULT '["*"]',
+        status TEXT NOT NULL DEFAULT 'pending',
+        confirm_token TEXT NOT NULL,
+        unsubscribe_token TEXT NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        confirmed_at DATETIME,
+        unsubscribed_at DATETIME,
+        UNIQUE(contract_id, email)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_email_subscriptions_contract
+        ON email_subscriptions (contract_id);
+      CREATE INDEX IF NOT EXISTS idx_email_subscriptions_status
+        ON email_subscriptions (status);
+      CREATE INDEX IF NOT EXISTS idx_email_subscriptions_email
+        ON email_subscriptions (email);
+      CREATE INDEX IF NOT EXISTS idx_email_subscriptions_confirm_token
+        ON email_subscriptions (confirm_token);
+      CREATE INDEX IF NOT EXISTS idx_email_subscriptions_unsubscribe_token
+        ON email_subscriptions (unsubscribe_token);
     `,
   },
 ];
@@ -1253,6 +1312,14 @@ export function recordSkippedLedgerRange(from: number, to: number): SkippedLedge
     `INSERT INTO indexer_state (key, value) VALUES ('skipped_ledger_range', ?)
      ON CONFLICT(key) DO UPDATE SET value = excluded.value`
   ).run(JSON.stringify(entry));
+  // A skipped range means events in [from, to] were never indexed because the
+  // RPC node no longer retains them; alert the operator (best-effort,
+  // fire-and-forget because this function is synchronous).
+  void sendOpsAlert({
+    severity: "warning",
+    title: "Indexer skipped a ledger range",
+    details: { from, to, clampedTo },
+  });
   return entry;
 }
 
@@ -2019,7 +2086,7 @@ export async function getJobsByWallet(
     });
 
     const result = { jobs, total, page: safePage, limit: safeLimit };
-    jobsByWalletCache.set(cacheKey, result);
+    safeCacheSet(jobsByWalletCache, cacheKey, result);
     return result;
   })();
 
@@ -2350,12 +2417,26 @@ export interface IndexerStatusData {
   undecodableEvents: number;
 }
 
+/**
+ * Optional per-subscription delivery filters. An unset filter imposes no
+ * additional constraint beyond `event_types`; a set filter narrows delivery
+ * to events whose decoded data matches.
+ */
+export interface WebhookFilters {
+  /** Deliver only events whose decoded milestone index is listed. */
+  milestone_index?: number[];
+  /** Deliver only events that name this Stellar account as a party. */
+  party?: string;
+}
+
 export interface WebhookSubscription {
   id: number;
   contract_id: string;
   webhook_url: string;
   event_types: string;
   created_at: string;
+  /** Serialized `WebhookFilters`, or NULL when the subscription has none. */
+  filters_json: string | null;
   /**
    * Number of consecutive failed deliveries (#701). Reset to 0 after a
    * successful delivery and when the subscription is (re-)created.
@@ -2378,17 +2459,25 @@ export interface WebhookSubscription {
 export function addSubscription(
   contractId: string,
   webhookUrl: string,
-  eventTypes: string[]
+  eventTypes: string[],
+  filters: WebhookFilters | null = null
 ): WebhookSubscription {
   const db = getDb();
 
   const addTx = db.transaction(() => {
     const stmt = db.prepare(`
       INSERT OR IGNORE INTO webhook_subscriptions
-      (contract_id, webhook_url, event_types)
-      VALUES (?, ?, ?)
+      (contract_id, webhook_url, event_types, filters_json)
+      VALUES (?, ?, ?, ?)
     `);
-    stmt.run(contractId, webhookUrl, JSON.stringify(eventTypes));
+    stmt.run(
+      contractId,
+      webhookUrl,
+      JSON.stringify(eventTypes),
+      filters && (filters.milestone_index !== undefined || filters.party !== undefined)
+        ? JSON.stringify(filters)
+        : null
+    );
 
     // A fresh subscribe re-enables the subscription and clears the failure
     // history (#701).
@@ -2552,6 +2641,179 @@ export function getSubscriptionsForContract(contractId: string): WebhookSubscrip
   return db
     .prepare("SELECT * FROM webhook_subscriptions WHERE contract_id = ?")
     .all(contractId) as WebhookSubscription[];
+}
+
+// ---------------------------------------------------------------------------
+// Unauthenticated contract email notifications (#…)
+// ---------------------------------------------------------------------------
+// A subscription starts `pending`, becomes `active` after the recipient opens
+// the confirmation link, and ends `unsubscribed` after one-click opt-out.
+// Delivery targets only `active` rows, and its `event_types` mirror the
+// webhook subscription semantics (`*` or an array of event names).
+
+export const EMAIL_SUBSCRIPTION_STATUSES = [
+  "pending",
+  "active",
+  "unsubscribed",
+] as const;
+export type EmailSubscriptionStatus = (typeof EMAIL_SUBSCRIPTION_STATUSES)[number];
+
+export interface EmailSubscription {
+  id: number;
+  contract_id: string;
+  email: string;
+  /** JSON array of event names, or `*`. */
+  event_types: string;
+  status: EmailSubscriptionStatus;
+  confirm_token: string;
+  unsubscribe_token: string;
+  created_at: string;
+  confirmed_at: string | null;
+  unsubscribed_at: string | null;
+}
+
+export interface UpsertEmailSubscriptionParams {
+  contractId: string;
+  /** Already normalized (trimmed + lowercased) by the caller. */
+  email: string;
+  eventTypes: string[];
+  confirmToken: string;
+  unsubscribeToken: string;
+}
+
+/**
+ * Insert a new pending subscription, or reset an existing (contract, email)
+ * row back to `pending` with fresh tokens. Wrapped in a transaction so the
+ * returned row always matches what was committed.
+ */
+export function upsertEmailSubscription(
+  params: UpsertEmailSubscriptionParams,
+): EmailSubscription {
+  const db = getDb();
+
+  const upsertTx = db.transaction(() => {
+    db.prepare(
+      `INSERT INTO email_subscriptions
+         (contract_id, email, event_types, status, confirm_token, unsubscribe_token)
+       VALUES (?, ?, ?, 'pending', ?, ?)
+       ON CONFLICT(contract_id, email) DO UPDATE SET
+         event_types = excluded.event_types,
+         status = 'pending',
+         confirm_token = excluded.confirm_token,
+         unsubscribe_token = excluded.unsubscribe_token,
+         confirmed_at = NULL,
+         unsubscribed_at = NULL`,
+    ).run(
+      params.contractId,
+      params.email,
+      JSON.stringify(params.eventTypes),
+      params.confirmToken,
+      params.unsubscribeToken,
+    );
+
+    return db
+      .prepare(
+        "SELECT * FROM email_subscriptions WHERE contract_id = ? AND email = ?",
+      )
+      .get(params.contractId, params.email) as EmailSubscription;
+  });
+
+  return upsertTx();
+}
+
+export function getEmailSubscriptionByConfirmToken(
+  token: string,
+): EmailSubscription | undefined {
+  return getDb()
+    .prepare("SELECT * FROM email_subscriptions WHERE confirm_token = ?")
+    .get(token) as EmailSubscription | undefined;
+}
+
+export function getEmailSubscriptionByUnsubscribeToken(
+  token: string,
+): EmailSubscription | undefined {
+  return getDb()
+    .prepare("SELECT * FROM email_subscriptions WHERE unsubscribe_token = ?")
+    .get(token) as EmailSubscription | undefined;
+}
+
+/**
+ * Transition a subscription to `active`. Returns the row addressed by the
+ * token (even when it was already confirmed or is unsubscribed) or
+ * `undefined` when no row carries the token.
+ */
+export function confirmEmailSubscription(
+  token: string,
+): EmailSubscription | undefined {
+  const db = getDb();
+  const row = getEmailSubscriptionByConfirmToken(token);
+  if (!row) return undefined;
+  db.prepare(
+    `UPDATE email_subscriptions
+       SET status = 'active',
+           confirmed_at = COALESCE(confirmed_at, CURRENT_TIMESTAMP)
+     WHERE id = ? AND status = 'pending'`,
+  ).run(row.id);
+  return db
+    .prepare("SELECT * FROM email_subscriptions WHERE id = ?")
+    .get(row.id) as EmailSubscription;
+}
+
+/**
+ * Transition a subscription to `unsubscribed` via its one-click token.
+ * Returns the row addressed by the token, or `undefined` when unknown.
+ */
+export function unsubscribeEmailSubscription(
+  token: string,
+): EmailSubscription | undefined {
+  const db = getDb();
+  const row = getEmailSubscriptionByUnsubscribeToken(token);
+  if (!row) return undefined;
+  db.prepare(
+    `UPDATE email_subscriptions
+       SET status = 'unsubscribed',
+           unsubscribed_at = COALESCE(unsubscribed_at, CURRENT_TIMESTAMP)
+     WHERE id = ?`,
+  ).run(row.id);
+  return db
+    .prepare("SELECT * FROM email_subscriptions WHERE id = ?")
+    .get(row.id) as EmailSubscription;
+}
+
+/** Pending + active subscriptions for an email address (cap enforcement). */
+export function countActiveOrPendingEmailSubscriptions(email: string): number {
+  const row = getDb()
+    .prepare(
+      `SELECT COUNT(*) AS count FROM email_subscriptions
+       WHERE email = ? AND status IN ('pending', 'active')`,
+    )
+    .get(email) as { count: number };
+  return row.count;
+}
+
+/** Confirmed subscriptions that event delivery may target. */
+export function getActiveEmailSubscriptions(): EmailSubscription[] {
+  return getDb()
+    .prepare(
+      "SELECT * FROM email_subscriptions WHERE status = 'active' ORDER BY id ASC",
+    )
+    .all() as EmailSubscription[];
+}
+
+export function getEmailSubscriptionsForContract(
+  contractId: string,
+): EmailSubscription[] {
+  return getDb()
+    .prepare("SELECT * FROM email_subscriptions WHERE contract_id = ?")
+    .all(contractId) as EmailSubscription[];
+}
+
+export function getEmailSubscriptionsForAddress(
+  email: string,
+): EmailSubscription[] {
+  return getDb()
+    .prepare("SELECT * FROM email_subscriptions WHERE email = ?")
+    .all(email) as EmailSubscription[];
 }
 
 export function getIndexerStatusData(): IndexerStatusData {

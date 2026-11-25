@@ -1,4 +1,6 @@
 import NodeCache from "node-cache";
+import { config } from "../config.js";
+import { safeCacheSet } from "../utils/safe-cache.js";
 
 /**
  * Job state cache for GET /api/jobs/:contractId (#679).
@@ -18,6 +20,7 @@ export const JOB_STATE_CACHE_TTL_S = Number.isNaN(parsedTtl) ? 5 : Math.max(0, p
 export const jobStateCache = new NodeCache({
   stdTTL: JOB_STATE_CACHE_TTL_S,
   useClones: false,
+  maxKeys: config.cacheMaxKeys,
 });
 
 const inFlightJobStateRequests = new Map<string, Promise<unknown>>();
@@ -53,7 +56,7 @@ export async function getCachedJobState<T>(
   const request = (async () => {
     const value = await load();
     if (value !== null && generationOf(contractId) === startedAt && JOB_STATE_CACHE_TTL_S > 0) {
-      jobStateCache.set(contractId, value);
+      safeCacheSet(jobStateCache, contractId, value);
     }
     return value;
   })();

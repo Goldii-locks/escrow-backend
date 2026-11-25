@@ -5,8 +5,11 @@ import {
   recordSubscriptionFailure,
   recordSubscriptionSuccess,
   EventDbRow,
+  WebhookSubscription,
+  WebhookFilters,
 } from "./db.js";
 import logger from "../utils/logger.js";
+import { sendOpsAlert } from "../utils/ops-alerts.js";
 import { assertDeliveryTargetAllowed } from "../utils/webhook-url-guard.js";
 
 const MAX_RETRIES = 3;
@@ -665,10 +668,7 @@ function recordResult(result: DeliveryResult): void {
   );
 }
 
-function subscriptionsMatchEvent(
-  eventTypes: string,
-  eventType: string
-): boolean {
+function eventTypesMatch(eventTypes: string, eventType: string): boolean {
   if (eventTypes === "*") return true;
   try {
     const types = JSON.parse(eventTypes) as string[];
@@ -676,6 +676,85 @@ function subscriptionsMatchEvent(
   } catch {
     return eventTypes === eventType;
   }
+}
+
+/**
+ * Parse a subscription's stored `filters_json` into a `WebhookFilters`
+ * object. Returns `null` for an absent/empty/malformed value, which means
+ * "no filters" and preserves the legacy event_types-only behaviour.
+ */
+export function parseWebhookFilters(
+  filtersJson: string | null | undefined,
+): WebhookFilters | null {
+  if (!filtersJson) return null;
+  try {
+    const parsed: unknown = JSON.parse(filtersJson);
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return null;
+    }
+    return parsed as WebhookFilters;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Milestone index carried by a decoded event, or `null` when the event has
+ * none. Accepts both the snake_case `milestone_index` and its camel-case
+ * alias.
+ */
+function eventMilestoneIndex(data: Record<string, unknown> | null): number | null {
+  if (!data) return null;
+  for (const key of ["milestone_index", "milestoneIndex"]) {
+    const value = data[key];
+    if (typeof value === "number" && Number.isInteger(value)) return value;
+    if (typeof value === "string" && /^\d+$/.test(value)) return parseInt(value, 10);
+  }
+  return null;
+}
+
+/**
+ * Whether a subscription should receive an event.
+ *
+ * `event_types` is always applied. When the subscription carries no filters
+ * this is the whole test; when `milestone_index` / `party` filters are set,
+ * the event's decoded data must match every set filter. An event that lacks a
+ * filtered field (no milestone index, no party) is a non-match.
+ */
+export function subscriptionsMatchEvent(
+  subscription: Pick<WebhookSubscription, "event_types" | "filters_json">,
+  event: Pick<EventDbRow, "event_type" | "data_json">,
+): boolean {
+  if (!eventTypesMatch(subscription.event_types, event.event_type)) return false;
+
+  const filters = parseWebhookFilters(subscription.filters_json);
+  if (!filters) return true;
+
+  let data: Record<string, unknown> | null = null;
+  try {
+    const parsed: unknown = JSON.parse(event.data_json);
+    if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+      data = parsed as Record<string, unknown>;
+    }
+  } catch {
+    data = null;
+  }
+
+  if (filters.milestone_index !== undefined) {
+    const milestoneIndex = eventMilestoneIndex(data);
+    if (milestoneIndex === null || !filters.milestone_index.includes(milestoneIndex)) {
+      return false;
+    }
+  }
+
+  if (filters.party !== undefined) {
+    const parties = data
+      ? [data.client, data.freelancer, data.arbiter, data.caller]
+      : [];
+    if (!parties.some((value) => value === filters.party)) return false;
+  }
+
+  return true;
 }
 
 export async function deliverWebhooks(
@@ -732,7 +811,7 @@ export async function deliverWebhooks(
 
     for (const event of events) {
       for (const sub of subscriptionsByContract.get(event.contract_id) ?? []) {
-        if (!subscriptionsMatchEvent(sub.event_types, event.event_type)) {
+        if (!subscriptionsMatchEvent(sub, event)) {
           continue;
         }
 
@@ -797,6 +876,16 @@ export async function deliverWebhooks(
                 disableAfter: WEBHOOK_DISABLE_AFTER,
               },
             );
+            void sendOpsAlert({
+              severity: "warning",
+              title: "Webhook subscription auto-disabled",
+              details: {
+                subscriptionId: sub.id,
+                webhookUrl: sub.webhook_url,
+                consecutiveFailures: failure.consecutiveFailures,
+                disableAfter: WEBHOOK_DISABLE_AFTER,
+              },
+            });
           }
         }
       }

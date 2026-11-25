@@ -22,6 +22,7 @@ import {
   timeRemainingCache,
   inFlightTimeRemainingRequests,
 } from "./caches.js";
+import { safeCacheSet } from "../../utils/safe-cache.js";
 import {
   SimError,
   classifySimError,
@@ -102,7 +103,7 @@ router.get(
             if (!Number.isFinite(secondsRemaining)) {
               throw new SimError(500, "Internal server error");
             }
-            timeRemainingCache.set(cacheKey, secondsRemaining);
+            safeCacheSet(timeRemainingCache, cacheKey, secondsRemaining);
             return secondsRemaining;
           }
           throw new SimError(500, "Internal server error");

@@ -9,15 +9,17 @@
  */
 
 import { randomUUID } from "crypto";
+import { z } from "zod";
 import {
   addSubscription,
   removeSubscription,
   getActiveSubscriptions,
   getActiveContractIds,
   type WebhookSubscription,
+  type WebhookFilters,
 } from "../indexer/db.js";
 import { deliverWebhooks } from "../indexer/webhook-delivery.js";
-import { isValidStellarContractId } from "./stellar.js";
+import { isValidStellarContractId, isValidStellarAddress } from "./stellar.js";
 import { EVENT_TYPES } from "../indexer/event_type_filter.js";
 import logger from "./logger.js";
 import { validateWebhookUrl } from "./webhook-url-guard.js";
@@ -25,10 +27,31 @@ import { validateWebhookUrl } from "./webhook-url-guard.js";
 export const WEBHOOK_DISPATCHER_ROUTE_PREFIX = "/api/webhooks";
 const EVENT_TYPE_SET = new Set<string>(EVENT_TYPES);
 
+/**
+ * Optional subscription filters (#…). `milestone_index` is a non-empty list
+ * of non-negative milestone indices; `party` is a Stellar account address.
+ * Unknown keys are rejected so a typo cannot silently widen delivery.
+ */
+export const webhookFiltersSchema = z
+  .object({
+    milestone_index: z
+      .array(z.number().int().nonnegative())
+      .min(1)
+      .optional(),
+    party: z
+      .string()
+      .refine((value) => isValidStellarAddress(value), {
+        message: "party must be a valid Stellar account address (G…)",
+      })
+      .optional(),
+  })
+  .strict();
+
 export type SubscribeInput = {
   contract_id: string;
   webhook_url: string;
   event_types?: string[] | "*";
+  filters?: unknown;
 };
 
 export type UnsubscribeInput = {
@@ -114,6 +137,26 @@ function normalizeEventTypes(
 }
 
 /**
+ * Validate the optional `filters` object with Zod. `undefined`/`null` means
+ * "no filters" and yields `{ ok: true, filters: null }`.
+ */
+function parseSubscribeFilters(
+  input: unknown,
+): { ok: true; filters: WebhookFilters | null } | { ok: false; error: string } {
+  if (input === undefined || input === null) {
+    return { ok: true, filters: null };
+  }
+  const result = webhookFiltersSchema.safeParse(input);
+  if (!result.success) {
+    const detail = result.error.errors
+      .map((issue) => `${issue.path.join(".") || "filters"}: ${issue.message}`)
+      .join("; ");
+    return { ok: false, error: `Invalid filters: ${detail}` };
+  }
+  return { ok: true, filters: result.data as WebhookFilters };
+}
+
+/**
  * Subscribe a webhook URL to contract events. Emits pipeline telemetry.
  */
 export function dispatchSubscribe(
@@ -196,6 +239,20 @@ export function dispatchSubscribe(
     return { ok: false, status: 400, error: normalized.error, traceId };
   }
 
+  // Optional filters are validated with Zod. An absent/undefined value means
+  // "no filters" and keeps the legacy event_types-only delivery behaviour.
+  const filters = parseSubscribeFilters(input.filters);
+  if (!filters.ok) {
+    logger.debug("webhook_dispatcher subscribe response sent", {
+      traceId,
+      route,
+      status: 400,
+      success: false,
+      error: filters.error,
+    });
+    return { ok: false, status: 400, error: filters.error, traceId };
+  }
+
   try {
     // A contract that isn't monitored can never receive deliveries, so
     // subscribing to it is rejected with 404 rather than silently storing a
@@ -216,7 +273,8 @@ export function dispatchSubscribe(
     const subscription = addSubscription(
       input.contract_id,
       input.webhook_url,
-      normalized.types
+      normalized.types,
+      filters.filters
     );
 
     logger.info("webhook_dispatcher subscription created", {
