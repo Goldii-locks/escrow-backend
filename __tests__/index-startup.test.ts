@@ -133,29 +133,31 @@ describe("assertRpcNetworkMatches network label (#876)", () => {
     [Networks.TESTNET, "testnet"],
     [Networks.FUTURENET, "futurenet"],
     [Networks.STANDALONE, "standalone"],
-    ["Standalone Network ; February 2017", "custom"],
+    ["Some Custom Network ; 2026", "custom"],
   ];
 
   it.each(cases)("logs %s as %s", async (passphrase, expected) => {
-    jest.resetModules();
-    const info = jest.fn();
-    jest.doMock("../src/logger.js", () => ({
-      __esModule: true,
-      default: { info, warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
-    }));
-    jest.doMock("../src/rpc.js", () => ({
-      __esModule: true,
-      server: { getNetwork: jest.fn(async () => ({ passphrase })) },
-    }));
-
+    const { server } = await import("../src/utils/soroban-call.js");
+    const { default: logger } = await import("../src/utils/logger.js");
     const { assertRpcNetworkMatches } = await import("../src/routes/jobs/shared.js");
-    await assertRpcNetworkMatches();
+    const getNetwork = jest
+      .spyOn(server, "getNetwork")
+      .mockResolvedValue({ passphrase } as Awaited<ReturnType<typeof server.getNetwork>>);
+    const info = jest.spyOn(logger, "info").mockImplementation(() => logger);
+    const previous = process.env.SOROBAN_NETWORK_PASSPHRASE;
+    process.env.SOROBAN_NETWORK_PASSPHRASE = passphrase;
 
-    expect(info).toHaveBeenCalledWith(
-      expect.any(String),
-      expect.objectContaining({ network: expected }),
-    );
-    jest.dontMock("../src/logger.js");
-    jest.dontMock("../src/rpc.js");
+    try {
+      await assertRpcNetworkMatches();
+      expect(info).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ network: expected }),
+      );
+    } finally {
+      if (previous === undefined) delete process.env.SOROBAN_NETWORK_PASSPHRASE;
+      else process.env.SOROBAN_NETWORK_PASSPHRASE = previous;
+      getNetwork.mockRestore();
+      info.mockRestore();
+    }
   });
 });

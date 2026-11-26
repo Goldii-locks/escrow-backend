@@ -8,6 +8,7 @@ import { webhookDeliveryId } from "../src/indexer/webhook-delivery.js";
 process.env.ADMIN_API_KEY = "test-admin-key";
 
 jest.unstable_mockModule("../src/indexer/poller.js", () => ({
+  getActiveServer: jest.fn(),
   getConsecutiveFailures: jest.fn(() => 0),
   getLastSuccessfulPollAt: jest.fn(() => Date.now()),
   getCurrentPollIntervalMs: jest.fn(() => 15000),

@@ -12,6 +12,7 @@ let testDb: Database.Database;
 jest.unstable_mockModule("../src/indexer/poller.js", () => {
   let failureCount = 0;
   return {
+    getActiveServer: jest.fn(),
     getConsecutiveFailures: jest.fn(() => failureCount),
     getLastSuccessfulPollAt: jest.fn(() => Date.now()),
     getCurrentPollIntervalMs: jest.fn(() => 15000),

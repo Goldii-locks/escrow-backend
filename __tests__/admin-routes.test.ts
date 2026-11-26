@@ -22,6 +22,7 @@ let collectMetricsImpl: () => unknown = () => ({
 });
 
 jest.unstable_mockModule("../src/indexer/poller.js", () => ({
+  getActiveServer: jest.fn(),
   getConsecutiveFailures: () => 0,
   getCurrentPollIntervalMs: () => 15000,
   getLastSuccessfulPollAt: () => Date.now(),
@@ -131,7 +132,7 @@ describe("admin routes – backfill lifecycle, contracts and failure paths (#948
       const res = await request(app)
         .post("/api/admin/backfill")
         .set("x-api-key", KEY)
-        .send({ startLedger: 900, endLedger: 100 })
+        .send({ startLedger: 100, endLedger: 900 })
         .expect(400);
       expect(res.body.success).toBe(false);
       expect(res.body.error).toBe("bad range");

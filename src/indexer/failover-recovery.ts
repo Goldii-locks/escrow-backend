@@ -1,5 +1,5 @@
 import Database from "better-sqlite3";
-import { getDb, getLastIndexedLedger, getShippedMigrationVersions, eventDedupeId, recordJobParticipants, updateJobSummaryOnEvent } from "./db.js";
+import { getDb, getLastIndexedLedger, getShippedMigrationVersions, eventDedupeId } from "./db.js";
 import {
   validateLedgerRange,
   resolveHistoricalLedgerRange,
@@ -28,7 +28,7 @@ import logger from "../utils/logger.js";
  *                    treated as 1.
  * @param baseDelayMs Delay before the second attempt; doubles thereafter.
  */
-async function retryWithBackoff<T>(
+export async function retryWithBackoff<T>(
   operation: () => Promise<T>,
   maxAttempts = 3,
   baseDelayMs = 100,
@@ -92,7 +92,7 @@ export function logPollDiagnostics(
  * - `node_failure_events`  append-only audit log of failures
  */
 
-interface NodeHealthStatus {
+export interface NodeHealthStatus {
   nodeUrl: string;
   isHealthy: boolean;
   failureCount: number;
@@ -103,7 +103,7 @@ interface NodeHealthStatus {
   consecutiveSuccesses: number;
 }
 
-interface FailoverState {
+export interface FailoverState {
   activeNodeUrl: string | null;
   totalFailovers: number;
   lastFailoverAt: number | null;
@@ -199,7 +199,7 @@ function ensureNodeRow(nodeUrl: string): void {
 }
 
 /** Create or replace a node's full health record atomically. */
-async function recordNodeHealth(
+export async function recordNodeHealth(
   status: NodeHealthStatus
 ): Promise<boolean> {
   const db = getDb();
@@ -249,7 +249,7 @@ async function recordNodeHealth(
 }
 
 /** Read one node's health record, or null when the node is untracked. */
-function getNodeHealth(nodeUrl: string): NodeHealthStatus | null {
+export function getNodeHealth(nodeUrl: string): NodeHealthStatus | null {
   const row = getDb()
     .prepare("SELECT * FROM rpc_node_health WHERE node_url = ?")
     .get(nodeUrl) as HealthRow | undefined;
@@ -258,7 +258,7 @@ function getNodeHealth(nodeUrl: string): NodeHealthStatus | null {
 }
 
 /** Read every tracked node's health record. */
-function getAllNodeHealth(): NodeHealthStatus[] {
+export function getAllNodeHealth(): NodeHealthStatus[] {
   const rows = getDb()
     .prepare("SELECT * FROM rpc_node_health ORDER BY node_url")
     .all() as HealthRow[];
@@ -415,7 +415,7 @@ export async function recordNodeSuccess(
 }
 
 /** Read the current failover state, seeding defaults when the row is absent. */
-function getFailoverState(): FailoverState {
+export function getFailoverState(): FailoverState {
   const row = getDb()
     .prepare(
       "SELECT active_node_url, total_failovers, last_failover_at FROM failover_state WHERE id = 1"
@@ -434,7 +434,7 @@ function getFailoverState(): FailoverState {
 }
 
 /** URL of the node the indexer should currently be reading from. */
-function getActiveNodeUrl(): string | null {
+export function getActiveNodeUrl(): string | null {
   return getFailoverState().activeNodeUrl;
 }
 
@@ -442,7 +442,7 @@ function getActiveNodeUrl(): string | null {
  * Switch the active node and bump the failover counter in one transaction, so a
  * burst of concurrent failovers still yields an exact count.
  */
-async function failoverToNode(
+export async function failoverToNode(
   nodeUrl: string
 ): Promise<FailoverState | null> {
   const db = getDb();
@@ -491,7 +491,7 @@ async function failoverToNode(
  * failures, then most recent success. Untracked nodes are treated as healthy
  * since they have no failures on record. Returns null for an empty list.
  */
-function selectHealthiestNode(nodeUrls: string[]): string | null {
+export function selectHealthiestNode(nodeUrls: string[]): string | null {
   if (nodeUrls.length === 0) return null;
 
   const scored = nodeUrls.map((nodeUrl) => {
@@ -546,7 +546,7 @@ export async function createFailoverServer<T>(
 /**
  * Tables and columns required by indexer_failover_recovery to operate safely.
  */
-const FAILOVER_RECOVERY_REQUIRED_SCHEMA: Record<string, string[]> = {
+export const FAILOVER_RECOVERY_REQUIRED_SCHEMA: Record<string, string[]> = {
   rpc_node_health: [
     "node_url",
     "is_healthy",
@@ -573,7 +573,7 @@ const FAILOVER_RECOVERY_REQUIRED_SCHEMA: Record<string, string[]> = {
   schema_migrations: ["version"],
 };
 
-interface FailoverRecoverySchemaReport {
+export interface FailoverRecoverySchemaReport {
   valid: boolean;
   missingTables: string[];
   missingColumns: Record<string, string[]>;
@@ -582,7 +582,7 @@ interface FailoverRecoverySchemaReport {
   issues: string[];
 }
 
-class FailoverRecoverySchemaError extends Error {
+export class FailoverRecoverySchemaError extends Error {
   readonly issues: string[];
 
   constructor(message: string, issues: string[] = []) {
@@ -593,43 +593,43 @@ class FailoverRecoverySchemaError extends Error {
   }
 }
 
-type FailoverRecoveryMigrationHook = (
+export type FailoverRecoveryMigrationHook = (
   db: Database.Database,
 ) => string[] | string | void;
 
 const failoverRecoveryMigrationHooks = new Map<string, FailoverRecoveryMigrationHook>();
 
-function registerFailoverRecoveryMigrationHook(
+export function registerFailoverRecoveryMigrationHook(
   name: string,
   hook: FailoverRecoveryMigrationHook,
 ): void {
   failoverRecoveryMigrationHooks.set(name, hook);
 }
 
-function unregisterFailoverRecoveryMigrationHook(name: string): boolean {
+export function unregisterFailoverRecoveryMigrationHook(name: string): boolean {
   return failoverRecoveryMigrationHooks.delete(name);
 }
 
-function clearFailoverRecoveryMigrationHooks(): void {
+export function clearFailoverRecoveryMigrationHooks(): void {
   failoverRecoveryMigrationHooks.clear();
 }
 
-function getFailoverRecoveryMigrationHookNames(): string[] {
+export function getFailoverRecoveryMigrationHookNames(): string[] {
   return [...failoverRecoveryMigrationHooks.keys()];
 }
 
 // Aliases for generic migration hook registration
-const registerMigrationVerificationHook = registerFailoverRecoveryMigrationHook;
-const registerMigrationHook = registerFailoverRecoveryMigrationHook;
-const unregisterMigrationVerificationHook = unregisterFailoverRecoveryMigrationHook;
-const clearMigrationVerificationHooks = clearFailoverRecoveryMigrationHooks;
-const getMigrationVerificationHookNames = getFailoverRecoveryMigrationHookNames;
+export const registerMigrationVerificationHook = registerFailoverRecoveryMigrationHook;
+export const registerMigrationHook = registerFailoverRecoveryMigrationHook;
+export const unregisterMigrationVerificationHook = unregisterFailoverRecoveryMigrationHook;
+export const clearMigrationVerificationHooks = clearFailoverRecoveryMigrationHooks;
+export const getMigrationVerificationHookNames = getFailoverRecoveryMigrationHookNames;
 
 /**
  * Validate that every table, column, and migration required by indexer_failover_recovery
  * is present and healthy. Reports all issues at once rather than failing on the first.
  */
-function validateFailoverRecoverySchema(
+export function validateFailoverRecoverySchema(
   targetDb?: Database.Database,
 ): FailoverRecoverySchemaReport {
   const database = targetDb || getDb();
@@ -723,13 +723,13 @@ function validateFailoverRecoverySchema(
   };
 }
 
-const verifyFailoverRecoverySchema = validateFailoverRecoverySchema;
+export const verifyFailoverRecoverySchema = validateFailoverRecoverySchema;
 
 /**
  * Throw FailoverRecoverySchemaError unless all required tables, columns,
  * and migrations are present and healthy.
  */
-function assertFailoverRecoverySchemaValid(
+export function assertFailoverRecoverySchemaValid(
   targetDb?: Database.Database,
 ): FailoverRecoverySchemaReport {
   const report = validateFailoverRecoverySchema(targetDb);
@@ -748,9 +748,9 @@ function assertFailoverRecoverySchemaValid(
   );
 }
 
-const assertFailoverRecoverySchemaReady = assertFailoverRecoverySchemaValid;
+export const assertFailoverRecoverySchemaReady = assertFailoverRecoverySchemaValid;
 
-interface FailoverRecoveryStartOptions {
+export interface FailoverRecoveryStartOptions {
   targetDb?: Database.Database;
   autoInitialize?: boolean;
 }
@@ -758,11 +758,11 @@ interface FailoverRecoveryStartOptions {
 let failoverRecoveryStarted = false;
 let lastFailoverRecoverySchemaReport: FailoverRecoverySchemaReport | null = null;
 
-function isFailoverRecoveryStarted(): boolean {
+export function isFailoverRecoveryStarted(): boolean {
   return failoverRecoveryStarted;
 }
 
-function getFailoverRecoverySchemaReport(): FailoverRecoverySchemaReport | null {
+export function getFailoverRecoverySchemaReport(): FailoverRecoverySchemaReport | null {
   return lastFailoverRecoverySchemaReport;
 }
 
@@ -771,7 +771,7 @@ function getFailoverRecoverySchemaReport(): FailoverRecoverySchemaReport | null 
  * Verifies schema integrity and fails fast (throws FailoverRecoverySchemaError)
  * if the database state is out of sync.
  */
-function startFailoverRecovery(
+export function startFailoverRecovery(
   options: FailoverRecoveryStartOptions = {},
 ): FailoverRecoverySchemaReport {
   const db = options.targetDb || getDb();
@@ -801,14 +801,14 @@ function startFailoverRecovery(
   }
 }
 
-const startFailoverRecoveryClient = startFailoverRecovery;
+export const startFailoverRecoveryClient = startFailoverRecovery;
 
-function stopFailoverRecovery(): void {
+export function stopFailoverRecovery(): void {
   failoverRecoveryStarted = false;
   lastFailoverRecoverySchemaReport = null;
 }
 
-function resetFailoverRecovery(): void {
+export function resetFailoverRecovery(): void {
   stopFailoverRecovery();
   clearFailoverRecoveryMigrationHooks();
   resetFailoverRecoveryFailureMonitorState();
@@ -818,13 +818,13 @@ function resetFailoverRecovery(): void {
 // Consecutive failure and stall threshold alerting (#415)
 // ---------------------------------------------------------------------------
 
-const DEFAULT_FAILOVER_RECOVERY_FAILURE_THRESHOLD = 3;
-const DEFAULT_FAILOVER_FAILURE_THRESHOLD = DEFAULT_FAILOVER_RECOVERY_FAILURE_THRESHOLD;
+export const DEFAULT_FAILOVER_RECOVERY_FAILURE_THRESHOLD = 3;
+export const DEFAULT_FAILOVER_FAILURE_THRESHOLD = DEFAULT_FAILOVER_RECOVERY_FAILURE_THRESHOLD;
 
-const DEFAULT_FAILOVER_RECOVERY_STALL_THRESHOLD_MS = 120_000;
-const DEFAULT_FAILOVER_STALL_THRESHOLD_MS = DEFAULT_FAILOVER_RECOVERY_STALL_THRESHOLD_MS;
+export const DEFAULT_FAILOVER_RECOVERY_STALL_THRESHOLD_MS = 120_000;
+export const DEFAULT_FAILOVER_STALL_THRESHOLD_MS = DEFAULT_FAILOVER_RECOVERY_STALL_THRESHOLD_MS;
 
-type FailoverRecoveryFailureType =
+export type FailoverRecoveryFailureType =
   | "node_failure"
   | "failover"
   | "health_record"
@@ -834,7 +834,7 @@ type FailoverRecoveryFailureType =
   | "operation"
   | "query";
 
-interface FailoverRecoveryFailureDetails {
+export interface FailoverRecoveryFailureDetails {
   error?: string;
   operation?: string;
   nodeUrl?: string;
@@ -843,14 +843,14 @@ interface FailoverRecoveryFailureDetails {
   [key: string]: unknown;
 }
 
-interface FailoverRecoveryMonitorOptions {
+export interface FailoverRecoveryMonitorOptions {
   name?: string;
   failureThreshold?: number;
   stallThresholdMs?: number;
   repeatAlerts?: boolean;
 }
 
-interface FailoverRecoveryAlertConfig {
+export interface FailoverRecoveryAlertConfig {
   failureThreshold: number;
   stallThresholdMs: number;
 }
@@ -870,7 +870,7 @@ function readPositiveIntEnv(name: string, fallback: number): number {
   return value;
 }
 
-function getFailoverRecoveryAlertConfig(): FailoverRecoveryAlertConfig {
+export function getFailoverRecoveryAlertConfig(): FailoverRecoveryAlertConfig {
   const failureThreshold =
     process.env.FAILOVER_RECOVERY_FAILURE_THRESHOLD !== undefined
       ? readPositiveIntEnv(
@@ -906,8 +906,8 @@ function getFailoverRecoveryAlertConfig(): FailoverRecoveryAlertConfig {
   return { failureThreshold, stallThresholdMs };
 }
 
-const getFailoverAlertConfig = getFailoverRecoveryAlertConfig;
-const getIndexerFailoverRecoveryAlertConfig = getFailoverRecoveryAlertConfig;
+export const getFailoverAlertConfig = getFailoverRecoveryAlertConfig;
+export const getIndexerFailoverRecoveryAlertConfig = getFailoverRecoveryAlertConfig;
 
 /**
  * Tracks consecutive indexer_failover_recovery operation failures and stalls,
@@ -916,7 +916,7 @@ const getIndexerFailoverRecoveryAlertConfig = getFailoverRecoveryAlertConfig;
  * Backed by the shared `FailureMonitor` implementation in
  * `./failure-monitor.ts` (#722).
  */
-class FailoverRecoveryFailureMonitor extends FailureMonitor {
+export class FailoverRecoveryFailureMonitor extends FailureMonitor {
   readonly component: string;
   readonly repeatAlerts: boolean;
 
@@ -998,38 +998,38 @@ class FailoverRecoveryFailureMonitor extends FailureMonitor {
   }
 }
 
-const IndexerFailoverRecoveryFailureMonitor = FailoverRecoveryFailureMonitor;
+export const IndexerFailoverRecoveryFailureMonitor = FailoverRecoveryFailureMonitor;
 
 let defaultFailoverRecoveryFailureMonitor = new FailoverRecoveryFailureMonitor();
 
-function getFailoverRecoveryFailureMonitor(): FailoverRecoveryFailureMonitor {
+export function getFailoverRecoveryFailureMonitor(): FailoverRecoveryFailureMonitor {
   return defaultFailoverRecoveryFailureMonitor;
 }
 
-const getIndexerFailoverRecoveryFailureMonitor = getFailoverRecoveryFailureMonitor;
+export const getIndexerFailoverRecoveryFailureMonitor = getFailoverRecoveryFailureMonitor;
 
-function resetFailoverRecoveryFailureMonitorState(): void {
+export function resetFailoverRecoveryFailureMonitorState(): void {
   defaultFailoverRecoveryFailureMonitor = new FailoverRecoveryFailureMonitor();
 }
 
-const resetFailoverRecoveryAlertState = resetFailoverRecoveryFailureMonitorState;
-const resetIndexerFailoverRecoveryFailureState = resetFailoverRecoveryFailureMonitorState;
+export const resetFailoverRecoveryAlertState = resetFailoverRecoveryFailureMonitorState;
+export const resetIndexerFailoverRecoveryFailureState = resetFailoverRecoveryFailureMonitorState;
 
-function recordFailoverRecoveryFailure(
+export function recordFailoverRecoveryFailure(
   failureType: FailoverRecoveryFailureType,
   details?: FailoverRecoveryFailureDetails,
 ): number {
   return defaultFailoverRecoveryFailureMonitor.recordFailure(failureType, details);
 }
 
-function recordFailoverRecoverySuccess(details?: {
+export function recordFailoverRecoverySuccess(details?: {
   operation?: string;
   nodeUrl?: string;
 }): void {
   defaultFailoverRecoveryFailureMonitor.recordSuccess(details);
 }
 
-function checkFailoverRecoveryStall(): boolean {
+export function checkFailoverRecoveryStall(): boolean {
   return defaultFailoverRecoveryFailureMonitor.checkStall();
 }
 
@@ -1044,7 +1044,7 @@ function checkFailoverRecoveryStall(): boolean {
 // delay back toward the minimum.
 
 /** Configured throttle parameters sizing the failover recovery poll wait delay. */
-interface FailoverRecoveryThrottleParameters {
+export interface FailoverRecoveryThrottleParameters {
   /** Interval the poll loop starts from (and resets to on activity). */
   baseIntervalMs: number;
   /** Floor the delay is pulled toward under load. */
@@ -1060,7 +1060,7 @@ interface FailoverRecoveryThrottleParameters {
 }
 
 /** Snapshot of the current failover recovery throttle state. */
-interface FailoverRecoveryThrottleState {
+export interface FailoverRecoveryThrottleState {
   /** Current effective poll wait delay in ms. */
   currentIntervalMs: number;
   /** Event count observed during the most recent poll adjustment. */
@@ -1153,7 +1153,7 @@ let failoverRecoveryThrottleState: FailoverRecoveryThrottleState = {
 };
 
 /** Snapshot of the configured failover recovery throttle parameters (read-only). */
-function getFailoverRecoveryThrottleParameters(): FailoverRecoveryThrottleParameters {
+export function getFailoverRecoveryThrottleParameters(): FailoverRecoveryThrottleParameters {
   return {
     baseIntervalMs: FAILOVER_RECOVERY_BASE_POLL_INTERVAL_MS,
     minIntervalMs: FAILOVER_RECOVERY_MIN_POLL_INTERVAL_MS,
@@ -1165,12 +1165,12 @@ function getFailoverRecoveryThrottleParameters(): FailoverRecoveryThrottleParame
 }
 
 /** Snapshot of the current failover recovery throttle state (read-only copy). */
-function getFailoverRecoveryThrottleState(): FailoverRecoveryThrottleState {
+export function getFailoverRecoveryThrottleState(): FailoverRecoveryThrottleState {
   return { ...failoverRecoveryThrottleState };
 }
 
 /** Reset the failover recovery throttle state to defaults (useful for tests). */
-function resetFailoverRecoveryThrottleState(): void {
+export function resetFailoverRecoveryThrottleState(): void {
   failoverRecoveryThrottleState = {
     currentIntervalMs: FAILOVER_RECOVERY_BASE_POLL_INTERVAL_MS,
     lastProcessedEventCount: 0,
@@ -1180,13 +1180,13 @@ function resetFailoverRecoveryThrottleState(): void {
 }
 
 /** Poll wait delay the failover recovery loop should use before the next cycle. */
-function getFailoverRecoveryPollDelayMs(): number {
+export function getFailoverRecoveryPollDelayMs(): number {
   return failoverRecoveryThrottleState.currentIntervalMs;
 }
 
 /** Alias matching the poller/db getter naming. */
-const getFailoverRecoveryCurrentPollIntervalMs = getFailoverRecoveryPollDelayMs;
-const getCurrentFailoverRecoveryPollIntervalMs = getFailoverRecoveryPollDelayMs;
+export const getFailoverRecoveryCurrentPollIntervalMs = getFailoverRecoveryPollDelayMs;
+export const getCurrentFailoverRecoveryPollIntervalMs = getFailoverRecoveryPollDelayMs;
 
 /**
  * Next failover recovery poll delay given the current one and whether the
@@ -1196,7 +1196,7 @@ const getCurrentFailoverRecoveryPollIntervalMs = getFailoverRecoveryPollDelayMs;
  * active poll drops straight back to the base interval. Pure function so the
  * backoff curve can be reasoned about (and tested) without running the loop.
  */
-function nextFailoverRecoveryPollIntervalMs(
+export function nextFailoverRecoveryPollIntervalMs(
   currentIntervalMs: number,
   sawActivity: boolean
 ): number {
@@ -1222,7 +1222,7 @@ function nextFailoverRecoveryPollIntervalMs(
  * @param processedEventCount - Number of events handled in the last poll.
  * @returns Updated throttle state snapshot.
  */
-function adjustFailoverRecoveryPollInterval(
+export function adjustFailoverRecoveryPollInterval(
   processedEventCount: number
 ): FailoverRecoveryThrottleState {
   const state = failoverRecoveryThrottleState;
@@ -1252,8 +1252,8 @@ function adjustFailoverRecoveryPollInterval(
 }
 
 /** Aliases for the load-based adjustment entry point. */
-const adjustFailoverRecoveryPollDelay = adjustFailoverRecoveryPollInterval;
-const adjustIndexerFailoverRecoveryPollInterval = adjustFailoverRecoveryPollInterval;
+export const adjustFailoverRecoveryPollDelay = adjustFailoverRecoveryPollInterval;
+export const adjustIndexerFailoverRecoveryPollInterval = adjustFailoverRecoveryPollInterval;
 
 // ---------------------------------------------------------------------------
 // Dynamic historical sync ranges (#416)
@@ -1267,18 +1267,19 @@ const adjustIndexerFailoverRecoveryPollInterval = adjustFailoverRecoveryPollInte
 // `advanceLivePointer` is set.
 
 /** Inclusive historical range page size; matches the live poller RPC `limit`. */
-const DEFAULT_FAILOVER_RECOVERY_HISTORICAL_PAGE_SIZE = 100;
+export const DEFAULT_FAILOVER_RECOVERY_HISTORICAL_PAGE_SIZE = 100;
 
-const FailoverRecoveryLedgerRangeValidationError = LedgerRangeValidationError;
-type FailoverRecoveryLedgerRange = LedgerRange;
+export { LedgerRangeValidationError };
+export const FailoverRecoveryLedgerRangeValidationError = LedgerRangeValidationError;
+export type FailoverRecoveryLedgerRange = LedgerRange;
 
-interface FailoverRecoveryHistoricalRangeConfig {
+export interface FailoverRecoveryHistoricalRangeConfig {
   startLedger?: number;
   endLedger?: number;
   pageSize?: number;
 }
 
-interface FailoverRecoveryHistoricalRangeOptions {
+export interface FailoverRecoveryHistoricalRangeOptions {
   startLedger?: number;
   endLedger?: number;
   /** Fallback start when no custom/env start is set (typically lastIndexed+1). */
@@ -1318,12 +1319,12 @@ interface FailoverRecoveryHistoricalRangeOptions {
 }
 
 /** Number of events indexed for a single ledger ("block"). */
-interface FailoverRecoveryLedgerEventCount {
+export interface FailoverRecoveryLedgerEventCount {
   ledgerSequence: number;
   eventCount: number;
 }
 
-interface FailoverRecoveryHistoricalImportResult {
+export interface FailoverRecoveryHistoricalImportResult {
   range: LedgerRange;
   pages: LedgerRange[];
   /** Events accepted into the requested range (pre-persist). */
@@ -1367,7 +1368,7 @@ function validateOptionalFailoverLedger(name: string, value: unknown): number {
  * Aggregate per-ledger ("block") event counts, ascending by ledger sequence.
  * Tests assert against this to prove a custom range indexed every block.
  */
-function countFailoverRecoveryEventsByLedger(
+export function countFailoverRecoveryEventsByLedger(
   events: Array<{ ledgerSequence?: unknown; ledger?: unknown }>
 ): FailoverRecoveryLedgerEventCount[] {
   const counts = new Map<number, number>();
@@ -1386,7 +1387,7 @@ function countFailoverRecoveryEventsByLedger(
  * Store optional historical start/end/pageSize for failover recovery imports.
  * When both start and end are supplied they are validated as a pair.
  */
-function configureFailoverRecoveryHistoricalRange(
+export function configureFailoverRecoveryHistoricalRange(
   options: FailoverRecoveryHistoricalRangeConfig = {}
 ): FailoverRecoveryHistoricalRangeConfig {
   if (options.startLedger !== undefined && options.endLedger !== undefined) {
@@ -1406,11 +1407,11 @@ function configureFailoverRecoveryHistoricalRange(
   return { ...failoverRecoveryHistoricalRangeConfig };
 }
 
-function getFailoverRecoveryHistoricalRangeConfig(): FailoverRecoveryHistoricalRangeConfig {
+export function getFailoverRecoveryHistoricalRangeConfig(): FailoverRecoveryHistoricalRangeConfig {
   return { ...failoverRecoveryHistoricalRangeConfig };
 }
 
-function resetFailoverRecoveryHistoricalRangeConfig(): void {
+export function resetFailoverRecoveryHistoricalRangeConfig(): void {
   failoverRecoveryHistoricalRangeConfig = {};
 }
 
@@ -1423,7 +1424,7 @@ function resetFailoverRecoveryHistoricalRangeConfig(): void {
  * Throws `LedgerRangeValidationError` on non-integers, values below 1, or
  * an inverted range (start > end).
  */
-function resolveFailoverRecoveryHistoricalRange(
+export function resolveFailoverRecoveryHistoricalRange(
   options: FailoverRecoveryHistoricalRangeOptions = {}
 ): LedgerRange {
   return resolveHistoricalLedgerRange({
@@ -1445,7 +1446,7 @@ function resolveFailoverRecoveryHistoricalRange(
  * live ledger pointer unless `advanceLivePointer` is set, so live
  * synchronization is unaffected.
  */
-async function importFailoverRecoveryHistoricalRange(
+export async function importFailoverRecoveryHistoricalRange(
   options: FailoverRecoveryHistoricalRangeOptions = {}
 ): Promise<FailoverRecoveryHistoricalImportResult> {
   const startedAt = performance.now();
@@ -1501,8 +1502,6 @@ async function importFailoverRecoveryHistoricalRange(
       );
       if (result.changes > 0) {
         insertedCount += 1;
-        recordJobParticipants(db, ev.contractId, ev.eventType, ev.dataJson);
-        updateJobSummaryOnEvent(db, ev.contractId, ev.eventType, ev.dataJson);
       } else {
         duplicateCount += 1;
       }
@@ -1541,9 +1540,9 @@ async function importFailoverRecoveryHistoricalRange(
 }
 
 /** Aliases matching sibling module naming. */
-const resolveFailoverHistoricalRange = resolveFailoverRecoveryHistoricalRange;
-const importFailoverHistoricalRange = importFailoverRecoveryHistoricalRange;
-const countFailoverEventsByLedger = countFailoverRecoveryEventsByLedger;
+export const resolveFailoverHistoricalRange = resolveFailoverRecoveryHistoricalRange;
+export const importFailoverHistoricalRange = importFailoverRecoveryHistoricalRange;
+export const countFailoverEventsByLedger = countFailoverRecoveryEventsByLedger;
 
 
 

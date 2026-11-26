@@ -101,7 +101,8 @@ export function classifySimError(
     /Error\(Storage,\s*MissingValue\)/i.test(rawError) ||
     /\bcontract not found\b/i.test(rawError) ||
     /\bContractNotFound\b/i.test(rawError) ||
-    /\bno such contract\b/i.test(rawError)
+    /\bno such contract\b/i.test(rawError) ||
+    /\bnot found\b|\bNotFound\b/i.test(rawError)
   ) {
     return { status: 404, message: "Contract not found on network" };
   }

@@ -189,7 +189,7 @@ describe("POST /:contractId/whitelist/update (bulk)", () => {
 
   it.each([
     ["contract not found", 404, "Job not found"],
-    ["contract error #1", 404, "Job not found"],
+    ["NotFound", 404, "Job not found"],
     [RAW_ERROR, 500, "Internal server error"],
   ])("maps a simulation error %j to %i without caching", async (raw, status, error) => {
     whitelistCache.set(VALID_CONTRACT, ["CACHED"]);

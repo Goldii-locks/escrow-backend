@@ -1,6 +1,7 @@
 import { jest } from "@jest/globals";
 import request from "supertest";
 import express from "express";
+import { globalCors } from "../src/middleware/global-cors.js";
 import Database from "better-sqlite3";
 import { server } from "../src/utils/soroban-call.js";
 
@@ -32,6 +33,7 @@ let testDb: Database.Database;
 
 function buildApp() {
   const app = express();
+  app.use(globalCors());
   app.use("/api/disputes", disputeRoutes);
   return app;
 }
@@ -355,7 +357,7 @@ describe("Disputes API (#919)", () => {
       const res = await request(app)
         .options(`/api/disputes/${DISPUTE_ID}`)
         .set("Origin", "http://localhost:3000")
-        .expect(200);
+        .expect(204);
 
       expect(res.headers["access-control-allow-origin"]).toBe("http://localhost:3000");
     });

@@ -335,6 +335,22 @@ Unsubscribe an existing webhook registration.
 - **Auth**: None (Public)
 - **Body**: `{ contract_id, webhook_url }`
 
+#### POST /api/webhooks/test
+
+Send a test ping to a webhook endpoint without creating a delivery row (#858).
+- **Auth**: Admin
+- **Body**: `{ contract_id, webhook_url }`
+
+#### POST /api/admin/webhook-deliveries/replay
+
+Reset dead (or matching) webhook deliveries so they are retried.
+- **Auth**: Admin
+
+#### GET /api/admin/audit-log
+
+List recorded administrative actions (#928).
+- **Auth**: Admin
+
 #### GET /api/webhooks/subscriptions
 
 List the webhook subscriptions for a contract (#705). Query strings in webhook URLs are masked.

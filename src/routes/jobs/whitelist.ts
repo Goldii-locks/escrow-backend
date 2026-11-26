@@ -258,7 +258,15 @@ router.post(
         return;
       } catch (err: unknown) {
         const message = formatError(err);
-        const { status, message: classified } = classifySimError(message);
+        const classifiedErr = classifySimError(message);
+        const classified = /account not found/i.test(message)
+          ? "Internal server error"
+          : classifiedErr.message;
+        // classifySimError does not cover auth errors, and a missing *account*
+        // is a server-side misconfiguration, not a missing job.
+        const unauthorized = /unauthorized|invalid authentication/i.test(message);
+        const accountMissing = /account not found/i.test(message);
+        const status = unauthorized ? 401 : accountMissing ? 500 : classifiedErr.status;
         if (status === 401) {
           logger.warn("Unauthorized request for whitelist update", { contractId });
           sendError(res, 401, "Unauthorized");
@@ -313,7 +321,13 @@ router.post(
       );
     } catch (err: unknown) {
       const message = formatError(err);
-      const { status, message: classified } = classifySimError(message);
+      const classifiedErr = classifySimError(message);
+      const classified = /account not found/i.test(message)
+          ? "Internal server error"
+          : classifiedErr.message;
+      const unauthorized = /unauthorized|invalid authentication/i.test(message);
+      const accountMissing = /account not found/i.test(message);
+      const status = unauthorized ? 401 : accountMissing ? 500 : classifiedErr.status;
       if (status === 401) {
         logger.warn("Unauthorized request for whitelist update", { contractId });
         sendError(res, 401, "Unauthorized");

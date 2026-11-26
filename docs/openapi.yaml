@@ -1318,6 +1318,56 @@ paths:
         '400':
           description: Validation error
 
+  /api/webhooks/test:
+    post:
+      summary: Send a test ping to a webhook endpoint
+      description: Admin-only. Delivers a synthetic event to the given URL without creating a delivery row or touching subscription failure counters.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - contract_id
+                - webhook_url
+              properties:
+                contract_id:
+                  type: string
+                webhook_url:
+                  type: string
+      responses:
+        '200':
+          description: Test ping result
+        '400':
+          description: Validation error
+        '401':
+          description: Missing or invalid admin key
+        '429':
+          description: Rate limit exceeded
+
+  /api/admin/webhook-deliveries/replay:
+    post:
+      summary: Replay dead webhook deliveries
+      description: Admin-only. Resets dead (or matching) webhook deliveries so the retry sweep picks them up again.
+      responses:
+        '200':
+          description: Deliveries reset for replay
+        '400':
+          description: Validation error
+        '401':
+          description: Missing or invalid admin key
+
+  /api/admin/audit-log:
+    get:
+      summary: List admin audit log entries
+      description: Admin-only. Returns recorded administrative actions, newest first.
+      responses:
+        '200':
+          description: Audit log entries
+        '401':
+          description: Missing or invalid admin key
+
   /api/webhooks/subscriptions:
     get:
       summary: List webhook subscriptions for a contract

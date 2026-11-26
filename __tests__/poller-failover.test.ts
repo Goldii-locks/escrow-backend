@@ -16,6 +16,7 @@ jest.unstable_mockModule("../src/utils/logger.js", () => ({
   default: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
 }));
 jest.unstable_mockModule("../src/indexer/webhook-delivery.js", () => ({
+  pruneWebhookDeliveries: jest.fn(() => ({ delivered: 0, dead: 0 })),
   deliverWebhooks: jest.fn<() => Promise<void>>().mockResolvedValue(undefined),
 }));
 jest.unstable_mockModule("@stellar/stellar-sdk/rpc", () => ({
