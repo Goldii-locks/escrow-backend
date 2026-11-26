@@ -1408,3 +1408,123 @@ paths:
                     type: boolean
                   stats:
                     type: object
+  /api/client-errors:
+    post:
+      summary: Report frontend error
+      description: Ingests scrubbed browser client errors for monitoring. Accepted reports return 204.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [source, message]
+              properties:
+                source:
+                  type: string
+                  enum: [api, tx, render, unhandled]
+                message:
+                  type: string
+                  maxLength: 500
+                route:
+                  type: string
+                status:
+                  type: integer
+                  minimum: 100
+                  maximum: 599
+                requestId:
+                  type: string
+      responses:
+        '204':
+          description: Client error report accepted
+        '400':
+          description: Invalid error report or payload exceeds 4 kB limit
+        '429':
+          description: Rate limit exceeded
+
+  /api/csp-report:
+    post:
+      summary: Content Security Policy violation report
+      description: Ingests CSP violation reports in application/csp-report or application/reports+json format.
+      requestBody:
+        required: true
+        content:
+          application/csp-report:
+            schema:
+              type: object
+          application/reports+json:
+            schema:
+              type: array
+              items:
+                type: object
+      responses:
+        '204':
+          description: CSP report accepted
+        '400':
+          description: Malformed JSON or payload exceeds 8 kB limit
+        '429':
+          description: Rate limit exceeded
+
+  /api/disputes/{disputeId}:
+    get:
+      summary: Get dispute state for a milestone
+      description: Retrieves dispute state using get_dispute_info, milestone info, and party addresses.
+      parameters:
+        - name: disputeId
+          in: path
+          required: true
+          description: "Dispute identifier formatted as <contractId>:<milestoneIndex>"
+          schema:
+            type: string
+            example: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC:0"
+      responses:
+        '200':
+          description: Dispute state retrieved successfully
+        '400':
+          description: Invalid dispute ID format
+        '404':
+          description: Milestone has never been disputed or dispute not found
+        '429':
+          description: Rate limit exceeded
+
+  /api/disputes/{disputeId}/history:
+    get:
+      summary: Get dispute event timeline for a milestone
+      description: Retrieves chronological timeline of dispute events for the requested milestone.
+      parameters:
+        - name: disputeId
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC:0"
+      responses:
+        '200':
+          description: Dispute event history retrieved successfully
+        '400':
+          description: Invalid dispute ID format
+        '404':
+          description: Milestone has never been disputed
+        '429':
+          description: Rate limit exceeded
+
+  /api/disputes/{disputeId}/evidence:
+    get:
+      summary: Get dispute evidence events for a milestone
+      description: Retrieves evidence submission events for the requested milestone.
+      parameters:
+        - name: disputeId
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC:0"
+      responses:
+        '200':
+          description: Dispute evidence list retrieved successfully
+        '400':
+          description: Invalid dispute ID format
+        '404':
+          description: Milestone has never been disputed
+        '429':
+          description: Rate limit exceeded

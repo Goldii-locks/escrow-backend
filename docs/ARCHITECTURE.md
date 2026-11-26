@@ -74,6 +74,9 @@ Legend:
 | `src/middleware/validate.ts` | live | — |
 | `src/readiness.ts` | live | — |
 | `src/routes/admin.ts` | live | — |
+| `src/routes/client-errors.ts` | live | — |
+| `src/routes/csp-report.ts` | live | — |
+| `src/routes/disputes.ts` | live | — |
 | `src/routes/jobs.ts` | live | — |
 | `src/routes/jobs/build-tx.ts` | live | — |
 | `src/routes/jobs/by-wallet.ts` | live | — |
@@ -93,6 +96,7 @@ Legend:
 | `src/routes/tokens.ts` | live | — |
 | `src/routes/webhooks.ts` | live | — |
 | `src/routes/whitelist.test.ts` | unwired | [#718](https://github.com/Goldii-locks/escrow-backend/issues/718) |
+| `src/schemas/client-errors.ts` | live | — |
 | `src/schemas/jobs.ts` | live | — |
 | `src/shutdown.ts` | live | — |
 | `src/types/express.d.ts` | unwired | [#718](https://github.com/Goldii-locks/escrow-backend/issues/718) |

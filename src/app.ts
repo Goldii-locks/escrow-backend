@@ -5,6 +5,9 @@ import adminRoutes from "./routes/admin.js";
 import webhookRoutes from "./routes/webhooks.js";
 import tokenRoutes from "./routes/tokens.js";
 import statsRoutes from "./routes/stats.js";
+import clientErrorRoutes from "./routes/client-errors.js";
+import cspReportRoutes from "./routes/csp-report.js";
+import disputeRoutes from "./routes/disputes.js";
 import { generalLimiter } from "./middleware/rateLimiter.js";
 import { legacyApiDeprecation } from "./middleware/api-version.js";
 import { readinessHandler } from "./readiness.js";
@@ -73,10 +76,21 @@ export function createApp(): express.Express {
   app.use(requestIdMiddleware);
   app.use(globalCors());
   app.use(helmet());
+<<<<<<< HEAD
   app.use(express.json({ limit: config.jsonBodyLimit }));
 
   // Structured HTTP request logging (#86), tagged with the request id (#773).
+=======
+>>>>>>> pr996
   app.use(requestLogger);
+
+  // #917, #918: Dedicated route-level body parsers with specific payload limits
+  app.use("/api/v1/client-errors", clientErrorRoutes);
+  app.use("/api/client-errors", clientErrorRoutes);
+  app.use("/api/v1/csp-report", cspReportRoutes);
+  app.use("/api/csp-report", cspReportRoutes);
+
+  app.use(express.json());
 
   app.get("/health", (_req, res) => {
     res.json({
@@ -98,11 +112,13 @@ export function createApp(): express.Express {
   app.use("/api/v1/webhooks", webhookRoutes);
   app.use("/api/v1/tokens", tokenRoutes);
   app.use("/api/v1/stats", statsRoutes);
+  app.use("/api/v1/disputes", disputeRoutes);
   app.use("/api/jobs", jobRoutes);
   app.use("/api/admin", adminRoutes);
   app.use("/api/webhooks", webhookRoutes);
   app.use("/api/tokens", tokenRoutes);
   app.use("/api/stats", statsRoutes);
+  app.use("/api/disputes", disputeRoutes);
 
   // JSON 404 for unknown routes instead of Express's HTML page (#869).
   app.use((_req, res) => sendError(res, 404, "Not found"));

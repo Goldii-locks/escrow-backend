@@ -30,6 +30,9 @@ jobs:
       - name: Architecture reachability table
         run: node scripts/reachability.mjs --check
 
+      - name: Knip unused files and exports check
+        run: npm run knip
+
       - name: Lint
         run: npm run lint
 
