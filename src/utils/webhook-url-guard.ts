@@ -16,11 +16,26 @@
  *
  * Delivery also uses `redirect: "manual"` (see `webhook-delivery.ts`) so a
  * public URL cannot bounce the request to an internal one.
+ *
+ * DNS rebinding (#862): checking a name and then letting `fetch` resolve it
+ * again leaves a window in which a 0-TTL record can answer the second lookup
+ * with a private address. `assertDeliveryTargetAllowed` therefore returns the
+ * address it vetted, and delivery connects to exactly that address.
  */
 
 import { promises as dns } from "dns";
+import type { LookupAddress as DnsLookupAddress, LookupOptions } from "dns";
+import { Agent } from "undici";
 
 export type UrlCheckResult = { ok: true } | { ok: false; error: string };
+
+/**
+ * Delivery-time result. When the host is a DNS name that resolved, `address`
+ * is the vetted address the request must connect to (#862).
+ */
+export type DeliveryTargetResult =
+  | { ok: true; address?: LookupAddress }
+  | { ok: false; error: string };
 
 export type LookupAddress = { address: string; family: number };
 
@@ -290,7 +305,7 @@ export function validateWebhookUrl(rawUrl: string): UrlCheckResult {
 export async function assertDeliveryTargetAllowed(
   rawUrl: string,
   lookup: LookupFn = defaultLookup
-): Promise<UrlCheckResult> {
+): Promise<DeliveryTargetResult> {
   let parsed: URL;
   try {
     parsed = new URL(rawUrl);
@@ -341,5 +356,40 @@ export async function assertDeliveryTargetAllowed(
     return { ok: false, error: BLOCKED_PRIVATE_ERROR };
   }
 
-  return { ok: true };
+  // Every answer was vetted; connect to the first one and never resolve again.
+  return { ok: true, address: addresses[0] };
+}
+
+
+type LookupCallback = (
+  err: NodeJS.ErrnoException | null,
+  address: string | DnsLookupAddress[],
+  family?: number
+) => void;
+
+/**
+ * A `dns.lookup`-compatible resolver that always answers with the vetted
+ * address, whatever hostname it is asked about (#862). Used as the socket
+ * lookup for delivery so the connection cannot be re-resolved elsewhere.
+ */
+export function pinnedLookup(vetted: LookupAddress) {
+  return (
+    _hostname: string,
+    options: LookupOptions | number | LookupCallback,
+    callback?: LookupCallback
+  ): void => {
+    const cb = (typeof options === "function" ? options : callback) as LookupCallback;
+    const all = typeof options === "object" && options !== null && options.all === true;
+    if (all) cb(null, [{ address: vetted.address, family: vetted.family }]);
+    else cb(null, vetted.address, vetted.family);
+  };
+}
+
+/**
+ * undici dispatcher whose connections go to `vetted` only. The request URL
+ * keeps its hostname, so the Host header and TLS SNI/certificate validation
+ * still use the original name.
+ */
+export function createPinnedDispatcher(vetted: LookupAddress): Agent {
+  return new Agent({ connect: { lookup: pinnedLookup(vetted) } });
 }
