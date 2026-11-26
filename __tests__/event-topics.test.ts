@@ -111,7 +111,6 @@ describe("event topics_json (#930)", () => {
   });
 
   it("preserves all extra topics", async () => {
-    const GABC2 = "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBWHF";
     mockGetEvents.mockResolvedValue({
       events: [
         buildEvent(1005, [
