@@ -330,29 +330,6 @@ export interface DeadDelivery {
   status: string;
 }
 
-const CREATE_DELIVERIES_TABLE_SQL = `
-  CREATE TABLE IF NOT EXISTS webhook_deliveries (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    subscription_id INTEGER NOT NULL,
-    event_id INTEGER NOT NULL,
-    status TEXT NOT NULL DEFAULT 'pending',
-    attempts INTEGER NOT NULL DEFAULT 0,
-    last_error TEXT,
-    next_attempt_at INTEGER,
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(subscription_id, event_id)
-  );
-  CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_retry
-    ON webhook_deliveries (status, next_attempt_at);
-  CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_event
-    ON webhook_deliveries (event_id);
-`;
-
-/** Lazily create the table so in-memory test databases work without migrations. */
-function ensureDeliveriesTable(): void {
-  getDb().exec(CREATE_DELIVERIES_TABLE_SQL);
-}
-
 export function computeWebhookRetryDelayMs(attempts: number): number {
   return Math.min(
     WEBHOOK_RETRY_BASE_DELAY_MS * 2 ** Math.max(0, attempts - 1),
@@ -368,7 +345,6 @@ function recordDeliveryOutcome(
   lastError?: string
 ): void {
   try {
-    ensureDeliveriesTable();
     const db = getDb();
     const now = Date.now();
     if (success) {
@@ -411,7 +387,6 @@ function recordDeliveryOutcome(
 /** Admin visibility into permanently failed deliveries (#611). */
 export function getDeadDeliveries(limit = 100): DeadDelivery[] {
   try {
-    ensureDeliveriesTable();
     return getDb()
       .prepare(
         `SELECT id, subscription_id, event_id, attempts, last_error,
@@ -449,7 +424,6 @@ export function getSubscriptionDeliveries(
   subscriptionId: number,
   opts: { status?: string; limit?: number; before?: number } = {}
 ): SubscriptionDelivery[] {
-  ensureDeliveriesTable();
   const where = ["d.subscription_id = ?"];
   const params: Array<number | string> = [subscriptionId];
   if (opts.status) {
@@ -500,7 +474,6 @@ export function getSubscriptionDeliveries(
 
 export function getFailedDeliveryCount(): number {
   try {
-    ensureDeliveriesTable();
     const row = getDb()
       .prepare(
         `SELECT COUNT(*) AS cnt FROM webhook_deliveries WHERE status IN ('failed', 'dead')`
@@ -519,12 +492,7 @@ export function getFailedDeliveryCount(): number {
  * was down for one cycle receives the missed event on the next one.
  */
 export async function retryFailedDeliveries(): Promise<number> {
-  try {
-    ensureDeliveriesTable();
-  } catch {
-    return 0;
-  }
-  const db = getDb();
+  let db: ReturnType<typeof getDb>;
   const now = Date.now();
   let rows: Array<{
     subscription_id: number;
@@ -533,6 +501,7 @@ export async function retryFailedDeliveries(): Promise<number> {
     last_error: string | null;
   }>;
   try {
+    db = getDb();
     rows = db
       .prepare(
         `SELECT subscription_id, event_id, attempts, last_error
