@@ -1,13 +1,10 @@
 /**
  * Centralized token metadata registry (#699).
  *
- * Asset metadata used to be hard-coded in five separate registries, each with
- * its own (and mutually disagreeing) decimals and labels:
+ * Asset metadata used to be hard-coded in separate registries, each with its
+ * own (and mutually disagreeing) decimals and labels:
  *
- *   - `src/utils/stablecoin_cents_multiplier.ts`  – `STABLECOIN_CONFIGS`
- *   - `src/utils/refund_ratio_helper.ts`           – `KNOWN_REFUND_ASSETS`
  *   - `src/utils/financial_report_exporter.ts`     – `KNOWN_REPORT_ASSETS`
- *   - `src/utils/conversion_rate_math.ts`          – `KNOWN_ASSETS`
  *   - `src/utils/audit_ledger_sum_checker.ts`      – `KNOWN_ASSETS`
  *
  * Escrow jobs are keyed by *token contract address* (`InitializedEvent.token`),

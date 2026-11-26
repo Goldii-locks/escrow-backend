@@ -13,8 +13,6 @@ import {
 } from "../src/utils/db-precision.js";
 import * as token from "../src/utils/token_decimals_converter.js";
 import { formatLedgerValueForDb } from "../src/utils/audit_ledger_sum_checker.js";
-import { formatForDb } from "../src/utils/conversion_rate_math.js";
-import * as refund from "../src/utils/refund_ratio_helper.js";
 import * as allocator from "../src/utils/partial-payment-allocator.js";
 
 describe("formatDecimalForDb", () => {
@@ -56,11 +54,9 @@ describe("formatDecimalForDb", () => {
       const expected = formatDecimalForDb(value, decimals);
       expect(formatRefundValueForDb(value, decimals)).toBe(expected);
       expect(formatLedgerValueForDb(value, decimals)).toBe(expected);
-      expect(formatForDb(value, decimals)).toBe(expected);
     }
     expect(() => formatRefundValueForDb(1n, -1)).toThrow(/^formatRefundValueForDb:/);
     expect(() => formatLedgerValueForDb(1n, -1)).toThrow(/^formatLedgerValueForDb:/);
-    expect(() => formatForDb(1n, -1)).toThrow(/^formatForDb:/);
   });
 });
 
@@ -170,9 +166,7 @@ describe("re-exports keep existing import paths working", () => {
     expect(token.configureFormatColumns).toBe(configureFormatColumns);
   });
 
-  it("refund_ratio_helper and partial-payment-allocator re-export their helpers", () => {
-    expect(refund.formatRefundValueForDb).toBe(formatRefundValueForDb);
-    expect(refund.parseRefundDbValue).toBe(parseRefundDbValue);
+  it("partial-payment-allocator re-exports its helpers", () => {
     expect(allocator.formatAmountForDatabase).toBe(formatAmountForDatabase);
     expect(allocator.parseAmountFromDatabase).toBe(parseAmountFromDatabase);
   });

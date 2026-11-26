@@ -70,9 +70,7 @@ Legend:
 | `src/middleware/job-contract-rate-limit.ts` | live | — |
 | `src/middleware/job-contract-security.ts` | live | — |
 | `src/middleware/rateLimiter.ts` | live | — |
-| `src/middleware/refund-ratio-rate-limit.ts` | unwired | [#718](https://github.com/Goldii-locks/escrow-backend/issues/718) |
 | `src/middleware/request-id.ts` | live | — |
-| `src/middleware/tax-deduction-rate-limit.ts` | unwired | [#718](https://github.com/Goldii-locks/escrow-backend/issues/718) |
 | `src/middleware/validate.ts` | live | — |
 | `src/readiness.ts` | live | — |
 | `src/routes/admin.ts` | live | — |
@@ -101,7 +99,6 @@ Legend:
 | `src/utils/api-keys.ts` | live | — |
 | `src/utils/api-response.ts` | live | — |
 | `src/utils/audit_ledger_sum_checker.ts` | live | — |
-| `src/utils/conversion_rate_math.ts` | unwired | [#718](https://github.com/Goldii-locks/escrow-backend/issues/718) |
 | `src/utils/csv-serializer.ts` | live | — |
 | `src/utils/db-precision.ts` | live | — |
 | `src/utils/digit-limit-validator.ts` | live | — |
@@ -115,14 +112,11 @@ Legend:
 | `src/utils/partial_payment_allocator.ts` | unwired | [#718](https://github.com/Goldii-locks/escrow-backend/issues/718) |
 | `src/utils/partial-payment-allocator.ts` | live | — |
 | `src/utils/push_notification_service.ts` | unwired | [#718](https://github.com/Goldii-locks/escrow-backend/issues/718) |
-| `src/utils/refund_ratio_helper.ts` | unwired | [#718](https://github.com/Goldii-locks/escrow-backend/issues/718) |
 | `src/utils/rounding.ts` | live | — |
 | `src/utils/rpc-allow-http.ts` | live | — |
 | `src/utils/safe-json.ts` | live | — |
 | `src/utils/soroban-call.ts` | live | — |
-| `src/utils/stablecoin_cents_multiplier.ts` | unwired | [#718](https://github.com/Goldii-locks/escrow-backend/issues/718) |
 | `src/utils/stellar.ts` | live | — |
-| `src/utils/tax_deduction_estimator.ts` | unwired | [#718](https://github.com/Goldii-locks/escrow-backend/issues/718) |
 | `src/utils/token_decimals_converter.ts` | live | — |
 | `src/utils/token-metadata.ts` | live | — |
 | `src/utils/trust-proxy.ts` | live | — |

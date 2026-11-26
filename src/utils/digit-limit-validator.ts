@@ -1,10 +1,9 @@
 /**
  * Shared digit-limit validator for overflow-guard utils.
  *
- * `digitCount()` was byte-identical across audit_ledger_sum_checker.ts,
- * conversion_rate_math.ts, interest_yield_estimator.ts and
- * refund_ratio_helper.ts, and `parseIntegerInput()` was byte-identical
- * across three of them. This module is the single source of truth; callers
+ * `digitCount()` was duplicated across audit_ledger_sum_checker.ts and
+ * interest_yield_estimator.ts, and `parseIntegerInput()` was duplicated
+ * across the same callers. This module is the single source of truth; callers
  * keep their own ERROR_CODES and pass the invalid-input code in (as before).
  *
  * Negative values remain accepted by default for callers that allow them.
