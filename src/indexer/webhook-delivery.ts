@@ -397,7 +397,6 @@ export function pruneWebhookDeliveries(deliveredRetentionDays: number): {
   delivered: number;
   dead: number;
 } {
-  ensureDeliveriesTable();
   const db = getDb();
   const del = (status: string, days: number): number =>
     db
@@ -697,7 +696,6 @@ export async function deliverWebhooks(
   endLedger: number,
   contractIds?: string[]
 ): Promise<DeliveryResult[]> {
-  ensureDeliveriesTable();
   const db = getDb();
 
   // Retry previously failed deliveries first, so a subscriber that was down

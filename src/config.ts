@@ -152,6 +152,9 @@ export const config = {
   get maxLedgersPerImport(): number {
     return readIntEnv("MAX_LEDGERS_PER_IMPORT", 10000, 1);
   },
+  get reconciliationRetentionDays(): number {
+    return readIntEnv("RECONCILIATION_RETENTION_DAYS", 14, 1);
+  },
 
   // Readiness probe (#622)
   get readyMaxPollAgeMs(): number {

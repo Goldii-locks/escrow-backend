@@ -218,16 +218,31 @@ export function toEventTimestamp(ledgerClosedAt: unknown): number | null {
   return Math.floor(millis / 1000);
 }
 
+// NOTE: topics_json is NULL for rows indexed before migration 20. Historical
+// topics are unrecoverable from the database — their XDR was never stored.
+// To recover them, re-import events through POST /api/admin/backfill.
 /** Map an RPC event notification onto the row shape `events` stores. */
 function toEventRow(event: Api.EventResponse, fallbackContractId: string): EventRow {
+  const decodedType = scValToNative(event.topic[0]);
+  if (typeof decodedType !== "string") {
+    throw new Error(
+      `event topic[0] decoded to ${typeof decodedType} (expected string); event_id=${event.id ?? "unknown"}`,
+    );
+  }
+  const extraTopics = event.topic.slice(1);
+  const topicsJson =
+    extraTopics.length > 0
+      ? stringifyWithBigInt(extraTopics.map((t) => scValToNative(t)))
+      : null;
   return {
     contractId: event.contractId?.contractId() ?? fallbackContractId,
-    eventType: scValToNative(event.topic[0]) as string,
+    eventType: decodedType,
     ledgerSequence: event.ledger,
     timestamp: toEventTimestamp(event.ledgerClosedAt),
     // i128/u64 event fields decode to bigint; store them as decimal strings
     // like the API does (#719).
     dataJson: stringifyWithBigInt(scValToNative(event.value)),
+    topicsJson,
     eventId:
       typeof event.id === "string" && event.id
         ? event.id
@@ -1465,6 +1480,25 @@ export function runMaintenanceCycle(): void {
     logger.info("SQLite maintenance: pruned webhook deliveries", pruned);
   } catch (err) {
     logger.error("SQLite maintenance: webhook delivery prune failed", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  // Reconciliation results retention (#925). Runs unconditionally; default 14 days.
+  try {
+    const retentionDays = config.reconciliationRetentionDays;
+    const cutoff = Math.floor(Date.now() / 1000) - retentionDays * 86400;
+    const result = getDb()
+      .prepare("DELETE FROM reconciliation_results WHERE checked_at < ?")
+      .run(cutoff);
+    if (result.changes > 0) {
+      logger.info("SQLite maintenance: pruned reconciliation results", {
+        retentionDays,
+        deleted: result.changes,
+      });
+    }
+  } catch (err) {
+    logger.error("SQLite maintenance: reconciliation retention pruning failed", {
       error: err instanceof Error ? err.message : String(err),
     });
   }
