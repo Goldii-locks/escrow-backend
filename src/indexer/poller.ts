@@ -1340,7 +1340,18 @@ export function withPollCycleWatchdog<T>(
  * return, but a defensive catch keeps the loop alive even if a future code
  * path throws outside that contract (or rejects the interval update).
  */
-async function runPollCycle(): Promise<void> {
+/** The cycle currently running, so stopPoller() can wait for it (#870). */
+let activeCycle: Promise<void> | null = null;
+
+function runPollCycle(): Promise<void> {
+  const cycle = runPollCycleUnsafe();
+  activeCycle = cycle;
+  return cycle.finally(() => {
+    if (activeCycle === cycle) activeCycle = null;
+  });
+}
+
+async function runPollCycleUnsafe(): Promise<void> {
   try {
     // pollEvents() adjusts the interval itself, so the logged and scheduled
     // delays match (#639). The watchdog bounds a hung RPC that never settles.
@@ -1378,6 +1389,8 @@ async function pollLoop() {
   pollerTimeout.unref?.();
 }
 
+let startupCycle: Promise<void> | null = null;
+
 export function startPoller() {
   if (pollerRunning) return;
 
@@ -1400,6 +1413,10 @@ export function startPoller() {
         pollerRunning ? runPollCycle() : undefined,
       )
     : runPollCycle();
+  startupCycle = firstCycle.then(
+    () => undefined,
+    () => undefined,
+  );
   void firstCycle
     .catch((err) => {
       logger.error("Initial poll cycle failed", {
@@ -1417,7 +1434,12 @@ export function startPoller() {
   startMaintenanceScheduler();
 }
 
-export function stopPoller() {
+/**
+ * Stop scheduling new cycles. The returned promise resolves once the in-flight
+ * cycle and the event-insert and webhook-delivery queues have settled, so
+ * shutdown can close SQLite safely afterwards (#870).
+ */
+export async function stopPoller(): Promise<void> {
   pollerRunning = false;
   if (pollerTimeout) {
     clearTimeout(pollerTimeout);
@@ -1426,6 +1448,13 @@ export function stopPoller() {
   resetPollerThrottleState();
   currentPollIntervalMs = POLL_INTERVAL_MIN_MS;
   stopMaintenanceScheduler();
+
+  await startupCycle;
+  await activeCycle;
+  startupCycle = null;
+  // Writes and deliveries enqueued by the finished cycle.
+  await eventInsertTail;
+  await webhookDeliveryTail;
 }
 
 // ---------------------------------------------------------------------------

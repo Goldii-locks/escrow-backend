@@ -47,14 +47,14 @@ beforeAll(() => {
 });
 
 afterAll(() => {
-  stopPoller();
+  void stopPoller();
   testDb.close();
   if (ORIGINAL_CONTRACT_ID === undefined) delete process.env.CONTRACT_ID;
   else process.env.CONTRACT_ID = ORIGINAL_CONTRACT_ID;
 });
 
 beforeEach(() => {
-  stopPoller();
+  void stopPoller();
   resetFailureState();
   testDb.exec("DELETE FROM events");
   testDb.exec("DELETE FROM monitored_contracts");
@@ -67,7 +67,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  stopPoller();
+  void stopPoller();
   jest.useRealTimers();
   jest.restoreAllMocks();
 });
@@ -183,7 +183,7 @@ describe("startPoller() / stopPoller() scheduling", () => {
     expect(mockGetLatestLedger).toHaveBeenCalledTimes(1);
 
     const setTimeoutSpy = jest.spyOn(global, "setTimeout");
-    stopPoller();
+    void stopPoller();
     release({ sequence: 100 });
     await flushPromises();
 
@@ -203,7 +203,7 @@ describe("startPoller() / stopPoller() scheduling", () => {
     await flushPromises();
     const pending = jest.getTimerCount();
 
-    stopPoller();
+    void stopPoller();
     // stopPoller() clears both the poll-loop timer and the maintenance
     // scheduler timer that startPoller() sets up, so the count drops by 2.
     expect(jest.getTimerCount()).toBe(pending - 2);

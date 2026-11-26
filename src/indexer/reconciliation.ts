@@ -346,5 +346,16 @@ export function startReconciliationJob(
     }
   }, intervalMs);
   timer.unref();
+  reconciliationTimer = timer;
   return timer;
+}
+
+let reconciliationTimer: NodeJS.Timeout | null = null;
+
+/** Stop the scheduled reconciliation job started by startReconciliationJob (#870). */
+export function stopReconciliationJob(): void {
+  if (reconciliationTimer) {
+    clearInterval(reconciliationTimer);
+    reconciliationTimer = null;
+  }
 }
