@@ -45,6 +45,7 @@ beforeEach(() => {
   resetByWalletRateLimitBuckets();
   testDb.exec("DELETE FROM events");
   testDb.exec("DELETE FROM job_participants");
+  testDb.exec("DELETE FROM job_summary");
   resetJobsByWalletCache();
 });
 
