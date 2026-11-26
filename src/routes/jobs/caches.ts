@@ -44,6 +44,16 @@ export function resetSubmitCache(): void {
   inFlightSubmitRequests.clear();
 }
 
+/** Terminal transaction states (SUCCESS / FAILED) never change (#865). */
+export const TX_STATUS_CACHE_TTL = 60;
+export const txStatusCache = new NodeCache({
+  stdTTL: TX_STATUS_CACHE_TTL,
+  useClones: false,
+});
+export function resetTxStatusCache(): void {
+  txStatusCache.flushAll();
+}
+
 export const BUILD_TX_CACHE_TTL = config.buildTxCacheTtlS;
 export const buildTxCache = new NodeCache({
   stdTTL: BUILD_TX_CACHE_TTL,
@@ -170,6 +180,11 @@ export function unsignedTxValidUntil(tx: { timeBounds?: { maxTime: string } }): 
   const maxTime = Number(tx.timeBounds?.maxTime);
   if (Number.isFinite(maxTime) && maxTime > 0) return maxTime;
   return Math.floor(Date.now() / 1000) + UNSIGNED_TX_TIMEOUT_S;
+}
+
+export function isFreshBuildTx(entry: BuildTxPayload): boolean {
+  const remaining = entry.validUntil - Date.now() / 1000;
+  return remaining >= UNSIGNED_TX_MIN_REMAINING_S;
 }
 
 /**

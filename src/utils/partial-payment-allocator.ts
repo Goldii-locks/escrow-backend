@@ -285,7 +285,7 @@ export function allocatePayment(
 
   // Format all amounts for database storage
   const formattedRows: FormattedPaymentRow[] = [];
-  let precisionLoss = false;
+  let _precisionLoss = false;
 
   for (const recipient of recipients) {
     const formatted = formatPaymentRowForDatabase(
@@ -302,7 +302,7 @@ export function allocatePayment(
     );
 
     if (precisionCheck.precisionLoss) {
-      precisionLoss = true;
+      _precisionLoss = true;
       return {
         success: false,
         error: `Precision loss detected for recipient ${recipient.address}`,

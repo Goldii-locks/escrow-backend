@@ -1,6 +1,8 @@
 import { jest } from "@jest/globals";
 import request from "supertest";
 import express from "express";
+import Database from "better-sqlite3";
+import { runMigrations, setDb } from "../src/indexer/db.js";
 import {
   Account,
   Networks,
@@ -66,6 +68,12 @@ function decodeInvokeArgs(envelope: string): unknown[] {
   }
   return op.func.invokeContract.args.map((arg) => scValToNative(arg));
 }
+
+beforeAll(() => {
+  // Persisting a draft needs a database; use a fresh in-memory one.
+  setDb(new Database(":memory:"));
+  runMigrations();
+});
 
 beforeEach(() => {
   resetBuildTxRateLimitBuckets();

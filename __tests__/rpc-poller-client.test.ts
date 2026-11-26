@@ -580,7 +580,7 @@ describe("RpcPollerClient – database transaction isolation", () => {
       const dbPrepareSpy = jest.spyOn(testDb, "prepare").mockImplementation((sql: string) => {
         const stmt = (testDb as any).constructor.prototype.prepare.call(testDb, sql);
         if (sql.includes("SELECT * FROM webhook_subscriptions WHERE contract_id = ? AND webhook_url = ?")) {
-          stmt.get = (...params: any[]) => {
+          stmt.get = (..._params: any[]) => {
             throw new Error("simulated SELECT failure after INSERT");
           };
         }

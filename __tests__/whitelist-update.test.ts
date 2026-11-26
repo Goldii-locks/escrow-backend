@@ -208,9 +208,9 @@ describe("POST /api/jobs/:contractId/whitelist/update", () => {
       });
     });
 
-    it("returns 404 when simulation reports contract error #1", async () => {
+    it("returns 404 when simulation reports contract not found", async () => {
       mockSimulateTransaction.mockResolvedValue({
-        error: "contract error #1",
+        error: "contract not found",
       });
 
       const res = await request(buildApp())

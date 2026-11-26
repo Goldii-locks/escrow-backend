@@ -47,14 +47,14 @@ describe("indexer RPC timeouts and poll-cycle watchdog (#954)", () => {
   });
 
   afterAll(() => {
-    stopPoller();
+    void stopPoller();
     testDb.close();
     if (originalTimeout === undefined) delete process.env.RPC_TIMEOUT_MS;
     else process.env.RPC_TIMEOUT_MS = originalTimeout;
   });
 
   beforeEach(() => {
-    stopPoller();
+    void stopPoller();
     resetFailureState();
     mockGetLatestLedger.mockReset();
     mockGetEvents.mockReset();
@@ -66,7 +66,7 @@ describe("indexer RPC timeouts and poll-cycle watchdog (#954)", () => {
   });
 
   afterEach(() => {
-    stopPoller();
+    void stopPoller();
     jest.useRealTimers();
   });
 

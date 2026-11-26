@@ -46,6 +46,9 @@ export interface E2EState {
   client: string;
   freelancer: string;
   arbiter: string;
+  /** The lifecycle suite has the freelancer and arbiter sign too (#938). */
+  freelancerSecret: string;
+  arbiterSecret: string;
   milestoneAmounts: string[];
   /** escrow-factory instance, with the native token allowed. */
   factoryContractId: string;

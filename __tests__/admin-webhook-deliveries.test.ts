@@ -8,6 +8,7 @@ import { webhookDeliveryId } from "../src/indexer/webhook-delivery.js";
 process.env.ADMIN_API_KEY = "test-admin-key";
 
 jest.unstable_mockModule("../src/indexer/poller.js", () => ({
+  getActiveServer: jest.fn(),
   getConsecutiveFailures: jest.fn(() => 0),
   getLastSuccessfulPollAt: jest.fn(() => Date.now()),
   getCurrentPollIntervalMs: jest.fn(() => 15000),
@@ -65,11 +66,11 @@ describe("GET /api/admin/webhook-subscriptions/:id/deliveries (#941)", () => {
 
   it("lists only this subscription's deliveries, newest first, with event join and delivery id", async () => {
     const res = await get(`/api/admin/webhook-subscriptions/${subId}/deliveries`).expect(200);
-    const ids = res.body.deliveries.map((d: { id: number }) => d.id);
+    const ids = res.body.data.deliveries.map((d: { id: number }) => d.id);
     expect(ids).toHaveLength(5);
     expect([...ids].sort((a, b) => b - a)).toEqual(ids);
 
-    const newest = res.body.deliveries[0];
+    const newest = res.body.data.deliveries[0];
     expect(newest).toMatchObject({
       status: "failed",
       eventType: "funded",
@@ -78,38 +79,38 @@ describe("GET /api/admin/webhook-subscriptions/:id/deliveries (#941)", () => {
     });
     const eventRowId = (db.prepare("SELECT id FROM events WHERE event_id = 'evt-4'").get() as { id: number }).id;
     expect(newest.deliveryId).toBe(webhookDeliveryId(subId, eventRowId));
-    expect(res.body.nextBefore).toBeNull();
+    expect(res.body.data.nextBefore).toBeNull();
   });
 
   it("masks the webhook URL query string", async () => {
     const res = await get(`/api/admin/webhook-subscriptions/${subId}/deliveries`).expect(200);
-    expect(res.body.subscription.webhook_url).toBe("https://hooks.example.com/in?***");
+    expect(res.body.data.subscription.webhook_url).toBe("https://hooks.example.com/in?***");
     expect(JSON.stringify(res.body)).not.toContain("secret");
   });
 
   it("filters by status and rejects an unknown status", async () => {
     const res = await get(`/api/admin/webhook-subscriptions/${subId}/deliveries?status=delivered`).expect(200);
-    expect(res.body.deliveries).toHaveLength(2);
-    expect(res.body.deliveries.every((d: { status: string }) => d.status === "delivered")).toBe(true);
+    expect(res.body.data.deliveries).toHaveLength(2);
+    expect(res.body.data.deliveries.every((d: { status: string }) => d.status === "delivered")).toBe(true);
     await get(`/api/admin/webhook-subscriptions/${subId}/deliveries?status=nope`).expect(400);
   });
 
   it("paginates with keyset cursor via limit and before", async () => {
     const page1 = await get(`/api/admin/webhook-subscriptions/${subId}/deliveries?limit=2`).expect(200);
-    expect(page1.body.deliveries).toHaveLength(2);
-    expect(page1.body.nextBefore).toBe(page1.body.deliveries[1].id);
+    expect(page1.body.data.deliveries).toHaveLength(2);
+    expect(page1.body.data.nextBefore).toBe(page1.body.data.deliveries[1].id);
 
     const page2 = await get(
-      `/api/admin/webhook-subscriptions/${subId}/deliveries?limit=2&before=${page1.body.nextBefore}`
+      `/api/admin/webhook-subscriptions/${subId}/deliveries?limit=2&before=${page1.body.data.nextBefore}`
     ).expect(200);
-    expect(page2.body.deliveries).toHaveLength(2);
-    expect(page2.body.deliveries[0].id).toBeLessThan(page1.body.deliveries[1].id);
+    expect(page2.body.data.deliveries).toHaveLength(2);
+    expect(page2.body.data.deliveries[0].id).toBeLessThan(page1.body.data.deliveries[1].id);
 
     const page3 = await get(
-      `/api/admin/webhook-subscriptions/${subId}/deliveries?limit=2&before=${page2.body.nextBefore}`
+      `/api/admin/webhook-subscriptions/${subId}/deliveries?limit=2&before=${page2.body.data.nextBefore}`
     ).expect(200);
-    expect(page3.body.deliveries).toHaveLength(1);
-    expect(page3.body.nextBefore).toBeNull();
+    expect(page3.body.data.deliveries).toHaveLength(1);
+    expect(page3.body.data.nextBefore).toBeNull();
   });
 
   it("rejects invalid limit and before", async () => {

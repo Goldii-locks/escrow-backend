@@ -98,6 +98,8 @@ export default async function globalSetup(): Promise<void> {
     client: client.publicKey(),
     freelancer: freelancer.publicKey(),
     arbiter: arbiter.publicKey(),
+    freelancerSecret: freelancer.secret(),
+    arbiterSecret: arbiter.secret(),
     milestoneAmounts: MILESTONE_AMOUNTS,
     factoryContractId,
     deployLedger,

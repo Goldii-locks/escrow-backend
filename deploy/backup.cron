@@ -1,10 +1,18 @@
-# Daily indexer database backup at 03:15 UTC.
+# Daily indexer database backup at 03:15 UTC, monthly restore test on the 1st
+# at 05:00 UTC.
 # Install: sudo install -m 755 deploy/backup.sh /opt/escrow/backup.sh
+#          sudo install -m 755 deploy/restore-test.sh /opt/escrow/restore-test.sh
 #          sudo cp deploy/backup.cron /etc/cron.d/escrow-backup
-# Set BACKUP_S3_BUCKET below before installing.
+# Set BACKUP_S3_BUCKET below before installing; backup.sh and restore-test.sh
+# refuse to run while it is still YOUR_BUCKET. Also set one of the heartbeat
+# variables (see deploy/BACKUP.md) so a missed backup raises an alarm.
 SHELL=/bin/bash
 PATH=/usr/local/bin:/usr/bin:/bin
 BACKUP_S3_BUCKET=YOUR_BUCKET
 DB_PATH=/opt/escrow/data/escrow.db
+# BACKUP_CLOUDWATCH_NAMESPACE=Escrow
+# BACKUP_HEARTBEAT_URL=https://hc-ping.com/your-backup-uuid
+# RESTORE_TEST_HEARTBEAT_URL=https://hc-ping.com/your-restore-test-uuid
 
 15 3 * * * root /opt/escrow/backup.sh >> /var/log/escrow-backup.log 2>&1
+0 5 1 * * root /opt/escrow/restore-test.sh >> /var/log/escrow-backup.log 2>&1

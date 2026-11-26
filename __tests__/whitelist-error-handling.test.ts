@@ -140,9 +140,9 @@ describe("GET /api/jobs/:contractId/whitelist – Robust Error Handling (Issue #
       });
     });
 
-    it("returns 404 when simulation reports 'contract error #1'", async () => {
+    it("returns 404 when simulation reports 'contract not found'", async () => {
       mockSimulateTransaction.mockResolvedValue({
-        error: "contract error #1",
+        error: "contract not found",
       });
 
       const res = await request(buildApp())
@@ -531,7 +531,7 @@ describe("GET /api/jobs/:contractId/whitelist – Robust Error Handling (Issue #
   describe("Promise-based async error handling", () => {
     it("catches errors thrown in the inner requestPromise async function", async () => {
       mockSimulateTransaction.mockRejectedValue(
-        new Error("network timeout at internal server")
+        new Error("unexpected internal error from RPC")
       );
 
       const res = await request(buildApp())

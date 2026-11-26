@@ -28,7 +28,7 @@ function buildApp() {
   app.use("/api/jobs", router);
   // Add error interceptor for test coverage
   app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
-    const message = err instanceof Error ? err.message : String(err);
+    const _message = err instanceof Error ? err.message : String(err);
     res.status(500).json({ success: false, error: "Internal server error" });
   });
   return app;
@@ -142,10 +142,13 @@ describe("GET /api/jobs/:contractId – real ScVal decoding (#597)", () => {
       arbiter: ARBITER,
       token: TOKEN,
       funded: true,
+      autoReleaseSeconds: 0,
       milestones: [
         { index: 0, amount: "500", status: "Pending" },
         { index: 1, amount: big.toString(), status: "Released" },
-      ],
+      ].map((m) => ({
+        ...m, releasedAmount: "0", deliveredAt: 0, funded: false, specHash: null, deliverable: null,
+      })),
     });
   });
 

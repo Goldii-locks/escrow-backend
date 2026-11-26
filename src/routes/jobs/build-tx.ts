@@ -25,11 +25,15 @@ import {
   BUILD_TX_CACHE_TTL,
   UNSIGNED_TX_TIMEOUT_S,
   unsignedTxValidUntil,
-  getFreshCachedBuildTx,
   setCachedBuildTx,
+  isFreshBuildTx,
   type BuildTxPayload,
 } from "./caches.js";
+import { cachedSingleFlight } from "./dedupe.js";
 import { formatError } from "../../utils/format-error.js";
+
+/** Minimal shape of a validated build-tx argument element. */
+type ContractArg = { type: string; value: unknown };
 
 
 /**
@@ -77,8 +81,9 @@ router.post(
     try {
       // Validate for whitelist management methods
       if (method === "add_whitelisted_token" || method === "remove_whitelisted_token") {
-        const adminArg = args.find((a: any) => a.type === "address" && a.value);
-        const tokenArg = args.find((a: any) => a.type === "address" && a.value && a !== adminArg);
+        const typedArgs = (args as ContractArg[]) || [];
+        const adminArg = typedArgs.find((a) => a.type === "address" && a.value);
+        const tokenArg = typedArgs.find((a) => a.type === "address" && a.value && a !== adminArg);
 
         if (!adminArg || !tokenArg) {
           logger.warn("Missing admin/token args for whitelist management", {
@@ -111,43 +116,39 @@ router.post(
       const cacheKey = buildTxCacheKey(contractId, method, sourceAddress, args || []);
 
       logger.debug("Checking build-tx cache", { traceId, ...pathVars, cacheKey });
-      const cached = getFreshCachedBuildTx(buildTxCache, cacheKey);
-      if (cached !== undefined) {
-        logger.info("Build-tx XDR served from cache", {
-          traceId,
-          ...pathVars,
-          source: "cache",
-          xdrLength: cached.xdr.length,
-        });
-        logger.debug("Build-tx response body prepared", {
-          traceId,
-          ...pathVars,
-          success: true,
-          xdrLength: cached.xdr.length,
-        });
-        logger.info("Build-tx response sent", {
-          traceId,
-          ...pathVars,
-          status: 200,
-          success: true,
-          cached: true,
-          xdrLength: cached.xdr.length,
-        });
-        sendBuildTxSuccess(res, cached);
-        return;
-      }
-
-      let requestPromise = inFlightBuildTxRequests.get(cacheKey);
-      const servedFromInFlight = Boolean(requestPromise);
-
-      logger.debug("Checking in-flight build-tx requests", {
-        traceId,
-        ...pathVars,
-        cacheKey,
-      });
-
-      if (!requestPromise) {
-        requestPromise = (async (): Promise<BuildTxPayload> => {
+      const sourceRef = { current: "rpc" as "cache" | "in-flight" | "rpc" };
+      const payload = await cachedSingleFlight({
+        cache: buildTxCache,
+        inFlight: inFlightBuildTxRequests,
+        key: cacheKey,
+        isFresh: isFreshBuildTx,
+        log: (s) => {
+          sourceRef.current = s;
+          if (s === "cache") {
+            const cached = buildTxCache.get<BuildTxPayload>(cacheKey);
+            logger.info("Build-tx XDR served from cache", {
+              traceId,
+              ...pathVars,
+              source: "cache",
+              xdrLength: cached?.xdr.length ?? 0,
+            });
+            logger.debug("Build-tx response body prepared", {
+              traceId,
+              ...pathVars,
+              success: true,
+              xdrLength: cached?.xdr.length ?? 0,
+            });
+            logger.info("Build-tx response sent", {
+              traceId,
+              ...pathVars,
+              status: 200,
+              success: true,
+              cached: true,
+              xdrLength: cached?.xdr.length ?? 0,
+            });
+          }
+        },
+        produce: async () => {
           logger.info("Fetching build-tx XDR from Stellar RPC", {
             traceId,
             ...pathVars,
@@ -172,32 +173,32 @@ router.post(
             ...pathVars,
           });
 
-          const toScVal = (a: any): any => {
-            if (a.type === "address") return Address.fromString(a.value).toScVal();
-            if (a.type === "i128") return nativeToScVal(BigInt(a.value), { type: "i128" });
+          const toScVal = (a: ContractArg): ReturnType<typeof nativeToScVal> => {
+            if (a.type === "address") return Address.fromString(String(a.value)).toScVal();
+            if (a.type === "i128") return nativeToScVal(BigInt(String(a.value)), { type: "i128" });
             if (a.type === "u32") return nativeToScVal(a.value, { type: "u32" });
-            if (a.type === "u64") return nativeToScVal(BigInt(a.value), { type: "u64" });
+            if (a.type === "u64") return nativeToScVal(BigInt(String(a.value)), { type: "u64" });
             // A JS boolean always becomes scvBool; SDK v16 no longer types `type: "bool"`.
             if (a.type === "bool") return nativeToScVal(a.value);
             // Hex-encoded bytes, e.g. the BytesN<32> milestone spec hashes
             // and the salt `create_escrow` takes.
             if (a.type === "bytes") return nativeToScVal(Buffer.from(String(a.value), "hex"));
             if (a.type === "vec") {
-              return nativeToScVal(a.value.map((item: any) => toScVal(item)));
+              return nativeToScVal((a.value as ContractArg[]).map((item) => toScVal(item)));
             }
             // A unit enum variant is a one-symbol vec.
             if (a.type === "enum") return nativeToScVal([a.value], { type: "symbol" });
             if (a.type === "struct") {
               // #[contracttype] structs are maps keyed by field symbol, sorted.
-              const fields = Object.keys(a.value).sort();
+              const fields = Object.keys(a.value as Record<string, ContractArg>).sort();
               return nativeToScVal(
-                Object.fromEntries(fields.map((f) => [f, toScVal(a.value[f])])),
+                Object.fromEntries(fields.map((f) => [f, toScVal((a.value as Record<string, ContractArg>)[f])])),
                 { type: Object.fromEntries(fields.map((f) => [f, ["symbol", null]])) },
               );
             }
             return nativeToScVal(a.value);
           };
-          const scArgs = (args || []).map((a: any) => toScVal(a));
+          const scArgs = ((args as ContractArg[]) || []).map((a) => toScVal(a));
 
           const tx = new TransactionBuilder(account, {
             fee: inclusionFee,
@@ -234,38 +235,15 @@ router.post(
           });
           setCachedBuildTx(buildTxCache, cacheKey, payload, BUILD_TX_CACHE_TTL);
           return payload;
-        })();
+        },
+      });
 
-        inFlightBuildTxRequests.set(cacheKey, requestPromise);
-        logger.debug("In-flight build-tx promise registered", {
-          traceId,
-          ...pathVars,
-          cacheKey,
-        });
+      if (sourceRef.current === "cache") {
+        sendBuildTxSuccess(res, payload);
+        return;
       }
 
-      let payload: BuildTxPayload;
-      try {
-        payload = await requestPromise;
-      } catch (err: unknown) {
-        logger.debug("RPC promise rejected for build-tx, clearing cache entry", {
-          traceId,
-          ...pathVars,
-          cacheKey,
-          error: formatError(err),
-        });
-        buildTxCache.del(cacheKey);
-        throw err;
-      } finally {
-        inFlightBuildTxRequests.delete(cacheKey);
-        logger.debug("In-flight build-tx promise unregistered", {
-          traceId,
-          ...pathVars,
-          cacheKey,
-        });
-      }
-
-      if (servedFromInFlight) {
+      if (sourceRef.current === "in-flight") {
         logger.info("Build-tx XDR served from in-flight cache", {
           traceId,
           ...pathVars,

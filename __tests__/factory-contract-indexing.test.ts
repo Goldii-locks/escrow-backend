@@ -17,6 +17,7 @@ jest.unstable_mockModule("@stellar/stellar-sdk", () => ({
 }));
 
 jest.unstable_mockModule("../src/indexer/webhook-delivery.js", () => ({
+  pruneWebhookDeliveries: jest.fn(() => ({ delivered: 0, dead: 0 })),
   deliverWebhooks: mockDeliverWebhooks,
 }));
 
@@ -25,7 +26,7 @@ const {
   setDb,
   runMigrations,
   getActiveContractIds,
-  getActiveContractsWithPointers,
+  getActiveContractsWithPointers: _getActiveContractsWithPointers,
   getJobsByWallet,
   setLastIndexedLedger,
 } = await import("../src/indexer/db.js");

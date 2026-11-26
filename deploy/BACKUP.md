@@ -37,3 +37,65 @@ If no pre-migration backup exists (for example, the failed release did not apply
 migrations, or the database is new), the script logs the condition and proceeds
 with the image rollback only. Routine operational backups remain the
 responsibility of `deploy/backup.sh` / the existing backup cron.
+
+## Backup monitoring and alerting (#937)
+
+A backup that fails silently is only discovered when a restore is needed, so
+`deploy/backup.sh` reports success and an alarm fires when the report is missing.
+Failures it can hit: full disk, expired AWS credentials, a failed integrity
+check, or the `YOUR_BUCKET` placeholder never replaced (the script now exits
+immediately in that case).
+
+### Heartbeat on success
+
+After a fully successful run (backup, integrity check and upload) the script
+publishes a heartbeat. Configure either or both in `/etc/cron.d/escrow-backup`:
+
+| Variable | Effect |
+| --- | --- |
+| `BACKUP_CLOUDWATCH_NAMESPACE` | `aws cloudwatch put-metric-data` with metric `EscrowBackupSuccess=1` in that namespace. The instance role needs `cloudwatch:PutMetricData`. |
+| `BACKUP_HEARTBEAT_URL` | `curl` of this URL (healthchecks.io, Cronitor, etc.). |
+
+Nothing is published on failure, so the alarm below is the alert path.
+
+### Alarm: no heartbeat for 26 hours
+
+The job runs every 24 h, so 26 h allows one run plus slack.
+
+- **CloudWatch:** alarm on `EscrowBackupSuccess`, statistic `Sum`, period 1 h,
+  26 evaluation periods, threshold `< 1`, **treat missing data as breaching**,
+  action: an SNS topic that notifies the on-call:
+
+  ```sh
+  aws cloudwatch put-metric-alarm --alarm-name escrow-backup-missing \
+    --namespace Escrow --metric-name EscrowBackupSuccess --statistic Sum \
+    --period 3600 --evaluation-periods 26 --datapoints-to-alarm 26 \
+    --threshold 1 --comparison-operator LessThanThreshold \
+    --treat-missing-data breaching --alarm-actions <sns-topic-arn>
+  ```
+
+- **Ping URL service:** create a check with a 24 h period and a 2 h grace
+  period (26 h total) and route its alerts to the on-call.
+
+When the alarm fires, check `/var/log/escrow-backup.log`: the script logs
+`[backup] ERROR: ...` with the reason.
+
+## Restore test (`deploy/restore-test.sh`)
+
+A backup that cannot be restored is not a backup. `restore-test.sh` runs
+monthly from cron (1st of the month, 05:00 UTC). It downloads the newest
+`escrow-*.db.gz` from the bucket, restores it into a scratch directory, and
+requires `PRAGMA integrity_check` to return `ok` and `SELECT COUNT(*) FROM
+events` to succeed. It exits non-zero on any failure and reports success the
+same way as the backup: `BACKUP_CLOUDWATCH_NAMESPACE` publishes
+`EscrowRestoreTestSuccess=1`, and `RESTORE_TEST_HEARTBEAT_URL` is pinged.
+Alarm on it like the backup heartbeat, with a window of about 35 days.
+
+Run it by hand any time:
+
+```sh
+BACKUP_S3_BUCKET=my-bucket /opt/escrow/restore-test.sh
+```
+
+Set `BACKUP_TMPDIR` to a volume with free space if the root volume is small;
+both scripts use it for the scratch copy.

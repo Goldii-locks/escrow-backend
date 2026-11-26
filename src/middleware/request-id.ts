@@ -24,15 +24,31 @@ export function requestLogger(
   next: NextFunction,
 ): void {
   const start = Date.now();
-  res.on("finish", () => {
-    logger.info("HTTP request", {
+  const legacyReq = req as Request & { isLegacyApi?: boolean; legacyRequestCount?: number };
+  let logged = false;
+  const logRequest = (aborted: boolean): void => {
+    if (logged) return;
+    logged = true;
+    const fields = {
       requestId: req.id,
       method: req.method,
       url: req.originalUrl,
       status: res.statusCode,
       durationMs: Date.now() - start,
       ip: req.ip ?? req.socket?.remoteAddress,
-    });
+      ...(legacyReq.isLegacyApi
+        ? { isLegacyApi: true, legacyRequestCount: legacyReq.legacyRequestCount }
+        : {}),
+    };
+    if (aborted) {
+      logger.warn("HTTP request", { ...fields, aborted: true });
+    } else {
+      logger.info("HTTP request", fields);
+    }
+  };
+  res.on("finish", () => logRequest(false));
+  res.on("close", () => {
+    if (!res.writableFinished) logRequest(true);
   });
   next();
 }

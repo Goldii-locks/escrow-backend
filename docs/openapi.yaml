@@ -6,6 +6,10 @@ info:
     Express + TypeScript backend for the Soroban milestone escrow platform.
     Provides API endpoints for job querying, transaction building, transaction submission,
     indexer health, and event webhook subscriptions.
+    Every /api/* path below is also mounted under the /api/v1 server prefix;
+    requests using the unversioned /api/* prefix receive `Deprecation: true`
+    (#697). Liveness is /health, readiness (SQLite + poller + ledger lag) is
+    /ready.
 servers:
   - url: http://localhost:3001
     description: Local development server
@@ -15,6 +19,13 @@ servers:
     description: "Legacy compatibility base path (returns Deprecation: true)"
 
 components:
+  headers:
+    Deprecation:
+      description: Present on every unversioned /api/* response to point clients at /api/v1.
+      schema:
+        type: string
+        example: "true"
+
   securitySchemes:
     ApiKeyAuth:
       type: apiKey
@@ -58,6 +69,31 @@ components:
         contract:
           type: string
           example: CARZQMYKDGA4TTIE2XBDJ42EX27VYLLJGGG4WGUIXXWIVHPDTX3UCLJA
+        version:
+          type: string
+          nullable: true
+          description: GIT_SHA baked into the running image (#894).
+          example: 6d06868b1a2b3c4d5e6f708192a3b4c5d6e7f809
+
+    ReadinessResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [ready, not_ready]
+        lastIndexedLedger:
+          type: integer
+          nullable: true
+        lastSuccessfulPollAgeMs:
+          type: integer
+          nullable: true
+        ledgerLag:
+          type: integer
+          nullable: true
+          description: Chain head minus the last stored ledger observed by the last poll (#893).
+        failingCheck:
+          type: string
+          enum: [database, poller, ledgerLag]
 
     ApiError:
       type: object
@@ -95,10 +131,26 @@ components:
           type: string
         amount:
           type: string
+        releasedAmount:
+          type: string
+          description: Amount already released (stroops), useful for PartiallyReleased milestones.
         status:
           type: string
         approved:
           type: boolean
+        deliveredAt:
+          type: integer
+          description: Ledger timestamp (seconds) of delivery; 0 when not delivered.
+        funded:
+          type: boolean
+        specHash:
+          type: string
+          nullable: true
+          description: Committed spec hash as lowercase hex; null when unset (all zeroes).
+        deliverable:
+          type: string
+          nullable: true
+          description: Deliverable hash as lowercase hex; null when unset (all zeroes).
 
     JobState:
       type: object
@@ -119,6 +171,9 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/JobMilestone'
+        autoReleaseSeconds:
+          type: integer
+          description: Seconds after deliveredAt before a milestone can be auto-released.
 
     JobDraft:
       type: object
@@ -167,8 +222,8 @@ components:
 paths:
   /health:
     get:
-      summary: Health check endpoint
-      description: Returns health status of the backend server and configured contract ID.
+      summary: Liveness probe
+      description: Returns health status, configured contract ID and the running GIT_SHA (#894).
       responses:
         '200':
           description: Server is healthy
@@ -176,6 +231,27 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HealthResponse'
+
+  /ready:
+    get:
+      summary: Readiness probe
+      description: >
+        Unauthenticated. 200 only when SQLite answers, the last successful poll
+        is recent and the ledger lag observed by that poll is within
+        READY_MAX_LEDGER_LAG; otherwise 503 with the failing check (#622, #893).
+      responses:
+        '200':
+          description: Ready to serve indexed data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadinessResponse'
+        '503':
+          description: Not ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadinessResponse'
 
   /api/jobs/by-wallet/{address}:
     get:
@@ -286,6 +362,29 @@ paths:
                 $ref: '#/components/schemas/ValidationError'
         '429':
           description: Rate limit exceeded (CREATE_JOB_DRAFT_RATE_MAX)
+
+  /api/jobs/drafts/{id}:
+    get:
+      summary: Fetch a persisted job draft
+      description: Returns an off-chain draft created by POST /api/jobs/create-job-draft (#667).
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: The stored draft payload
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobDraft'
+        '404':
+          description: Draft not found
+        '500':
+          description: Draft store unavailable
 
   /api/jobs/query:
     get:
@@ -428,6 +527,26 @@ paths:
                       total:
                         type: integer
                         description: Present only when includeTotal=true.
+        '400':
+          description: Invalid contractId or pagination
+
+  /api/jobs/{contractId}/history.csv:
+    get:
+      summary: Job event history as CSV
+      description: Same indexed event timeline as /history, serialised as CSV for spreadsheets.
+      parameters:
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: CSV event history
+          content:
+            text/csv:
+              schema:
+                type: string
         '400':
           description: Invalid contractId or pagination
 
@@ -740,6 +859,62 @@ paths:
           description: Invalid transaction payload
         '429':
           description: Rate limit exceeded (SUBMIT_RATE_MAX)
+
+  /api/jobs/tx/{hash}:
+    get:
+      summary: Get submitted transaction status
+      description: |
+        Looks up a transaction submitted via /api/jobs/submit. Poll until the
+        status is SUCCESS or FAILED; NOT_FOUND means it is still pending (or
+        unknown). Terminal states are cached for 60 seconds.
+
+        Polling example:
+        ```js
+        let data;
+        do {
+          await new Promise((r) => setTimeout(r, 2000));
+          ({ data } = await (await fetch(`/api/jobs/tx/${hash}`)).json());
+        } while (data.status === "NOT_FOUND");
+        ```
+      parameters:
+        - name: hash
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^[0-9a-fA-F]{64}$'
+      responses:
+        '200':
+          description: Transaction status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      status:
+                        type: string
+                        enum: [NOT_FOUND, SUCCESS, FAILED]
+                      ledger:
+                        type: integer
+                        nullable: true
+                      createdAt:
+                        type: integer
+                        nullable: true
+                      resultCode:
+                        type: string
+                        nullable: true
+                      error:
+                        type: string
+                        description: Client-safe failure reason, only for FAILED.
+        '400':
+          description: Invalid transaction hash
+        '429':
+          description: Rate limit exceeded (JOB_CONTRACT_RATE_MAX)
 
   /api/admin/indexer-status:
     get:
@@ -1143,6 +1318,56 @@ paths:
         '400':
           description: Validation error
 
+  /api/webhooks/test:
+    post:
+      summary: Send a test ping to a webhook endpoint
+      description: Admin-only. Delivers a synthetic event to the given URL without creating a delivery row or touching subscription failure counters.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - contract_id
+                - webhook_url
+              properties:
+                contract_id:
+                  type: string
+                webhook_url:
+                  type: string
+      responses:
+        '200':
+          description: Test ping result
+        '400':
+          description: Validation error
+        '401':
+          description: Missing or invalid admin key
+        '429':
+          description: Rate limit exceeded
+
+  /api/admin/webhook-deliveries/replay:
+    post:
+      summary: Replay dead webhook deliveries
+      description: Admin-only. Resets dead (or matching) webhook deliveries so the retry sweep picks them up again.
+      responses:
+        '200':
+          description: Deliveries reset for replay
+        '400':
+          description: Validation error
+        '401':
+          description: Missing or invalid admin key
+
+  /api/admin/audit-log:
+    get:
+      summary: List admin audit log entries
+      description: Admin-only. Returns recorded administrative actions, newest first.
+      responses:
+        '200':
+          description: Audit log entries
+        '401':
+          description: Missing or invalid admin key
+
   /api/webhooks/subscriptions:
     get:
       summary: List webhook subscriptions for a contract
@@ -1214,5 +1439,142 @@ paths:
           description: Invalid contract id
         '404':
           description: Contract does not implement the token interface
+        '429':
+          description: Rate limit exceeded
+
+  /api/stats:
+    get:
+      summary: Platform statistics
+      description: Aggregate indexed job and event counts for the admin dashboard.
+      responses:
+        '200':
+          description: Statistics snapshot
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  stats:
+                    type: object
+  /api/client-errors:
+    post:
+      summary: Report frontend error
+      description: Ingests scrubbed browser client errors for monitoring. Accepted reports return 204.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [source, message]
+              properties:
+                source:
+                  type: string
+                  enum: [api, tx, render, unhandled]
+                message:
+                  type: string
+                  maxLength: 500
+                route:
+                  type: string
+                status:
+                  type: integer
+                  minimum: 100
+                  maximum: 599
+                requestId:
+                  type: string
+      responses:
+        '204':
+          description: Client error report accepted
+        '400':
+          description: Invalid error report or payload exceeds 4 kB limit
+        '429':
+          description: Rate limit exceeded
+
+  /api/csp-report:
+    post:
+      summary: Content Security Policy violation report
+      description: Ingests CSP violation reports in application/csp-report or application/reports+json format.
+      requestBody:
+        required: true
+        content:
+          application/csp-report:
+            schema:
+              type: object
+          application/reports+json:
+            schema:
+              type: array
+              items:
+                type: object
+      responses:
+        '204':
+          description: CSP report accepted
+        '400':
+          description: Malformed JSON or payload exceeds 8 kB limit
+        '429':
+          description: Rate limit exceeded
+
+  /api/disputes/{disputeId}:
+    get:
+      summary: Get dispute state for a milestone
+      description: Retrieves dispute state using get_dispute_info, milestone info, and party addresses.
+      parameters:
+        - name: disputeId
+          in: path
+          required: true
+          description: "Dispute identifier formatted as <contractId>:<milestoneIndex>"
+          schema:
+            type: string
+            example: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC:0"
+      responses:
+        '200':
+          description: Dispute state retrieved successfully
+        '400':
+          description: Invalid dispute ID format
+        '404':
+          description: Milestone has never been disputed or dispute not found
+        '429':
+          description: Rate limit exceeded
+
+  /api/disputes/{disputeId}/history:
+    get:
+      summary: Get dispute event timeline for a milestone
+      description: Retrieves chronological timeline of dispute events for the requested milestone.
+      parameters:
+        - name: disputeId
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC:0"
+      responses:
+        '200':
+          description: Dispute event history retrieved successfully
+        '400':
+          description: Invalid dispute ID format
+        '404':
+          description: Milestone has never been disputed
+        '429':
+          description: Rate limit exceeded
+
+  /api/disputes/{disputeId}/evidence:
+    get:
+      summary: Get dispute evidence events for a milestone
+      description: Retrieves evidence submission events for the requested milestone.
+      parameters:
+        - name: disputeId
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC:0"
+      responses:
+        '200':
+          description: Dispute evidence list retrieved successfully
+        '400':
+          description: Invalid dispute ID format
+        '404':
+          description: Milestone has never been disputed
         '429':
           description: Rate limit exceeded

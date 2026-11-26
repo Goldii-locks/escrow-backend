@@ -33,6 +33,7 @@ Express + TypeScript backend for the Soroban milestone escrow platform.
     - [GET /api/jobs/:contractId/milestones/:index/time-remaining](#get-apijobscontractidmilestonesindextime-remaining)
     - [POST /api/jobs/:contractId/milestones/:index/claim-auto-release](#post-apijobscontractidmilestonesindexclaim-auto-release)
     - [POST /api/jobs/submit](#post-apijobssubmit)
+    - [GET /api/jobs/tx/:hash](#get-apijobstxhash)
   - [Admin API](#admin-api)
     - [GET /api/admin/indexer-status](#get-apiadminindexer-status)
     - [POST /api/admin/undecodable-events/retry](#post-apiadminundecodable-eventsretry)
@@ -59,6 +60,16 @@ npm install
 cp .env.example .env  # configure required production / local keys
 npm run dev
 ```
+
+### Request body size
+
+JSON request bodies are limited by `JSON_BODY_LIMIT` (default `64kb`, passed to
+`express.json()`). Requests above the limit return `413` with the standard JSON
+error envelope: `{ "success": false, "error": "Payload too large" }`.
+
+`CONTRACT_ID` is read through the central config getter, so `/health`, the
+indexer and the route layer always see the current value, even when the
+environment changes after module import.
 
 ## Architecture
 
@@ -216,6 +227,27 @@ Submit a signed transaction to the Stellar network and return execution status.
 - **Rate Limit**: 5 requests / minute (`SUBMIT_RATE_MAX`)
 - **Body**: `{ signedXdr, sourceAddress? }`
 
+#### GET /api/jobs/tx/:hash
+
+Status of a transaction submitted via `/api/jobs/submit`. A `PENDING` submit only means the transaction was queued; poll this until it is `SUCCESS` or `FAILED`.
+- **Auth**: None (Public)
+- **Rate Limit**: 30 requests / minute (`JOB_CONTRACT_RATE_MAX`)
+- **Params**: `hash` (64 hex characters)
+- **Response**: `{ success: true, data: { status, ledger, createdAt, resultCode, error? } }` where `status` is `NOT_FOUND`, `SUCCESS` or `FAILED`; `error` is set only for `FAILED` (same messages as simulation errors, e.g. `Contract execution reverted (error code 3)`). Terminal states are cached for 60s; `NOT_FOUND` is never cached.
+
+```js
+async function waitForTx(hash, { intervalMs = 2000, timeoutMs = 60000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const res = await fetch(`/api/jobs/tx/${hash}`);
+    const { data } = await res.json();
+    if (data.status !== "NOT_FOUND") return data; // SUCCESS or FAILED
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  throw new Error("Transaction not confirmed in time");
+}
+```
+
 ---
 
 ### Admin API
@@ -302,6 +334,22 @@ Register a webhook URL to receive real-time notifications for contract events.
 Unsubscribe an existing webhook registration.
 - **Auth**: None (Public)
 - **Body**: `{ contract_id, webhook_url }`
+
+#### POST /api/webhooks/test
+
+Send a test ping to a webhook endpoint without creating a delivery row (#858).
+- **Auth**: Admin
+- **Body**: `{ contract_id, webhook_url }`
+
+#### POST /api/admin/webhook-deliveries/replay
+
+Reset dead (or matching) webhook deliveries so they are retried.
+- **Auth**: Admin
+
+#### GET /api/admin/audit-log
+
+List recorded administrative actions (#928).
+- **Auth**: Admin
 
 #### GET /api/webhooks/subscriptions
 

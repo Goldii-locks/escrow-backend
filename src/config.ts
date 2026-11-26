@@ -15,7 +15,7 @@ import { z } from "zod";
 
 const intSchema = z.coerce.number().int();
 
-function readIntEnv(name: string, fallback: number, min = 0): number {
+export function readIntEnv(name: string, fallback: number, min = 0): number {
   const raw = process.env[name];
   if (raw === undefined || raw === "") return fallback;
   const parsed = intSchema.safeParse(raw);
@@ -51,6 +51,14 @@ function testAwareFallback(testValue: number, prodValue: number): number {
 }
 
 export const config = {
+  get contractId(): string {
+    return (process.env.CONTRACT_ID || "").trim();
+  },
+
+  get jsonBodyLimit(): string {
+    return (process.env.JSON_BODY_LIMIT || "64kb").trim() || "64kb";
+  },
+
   // RPC / Stellar
   get rpcTimeoutMs(): number {
     return readIntEnv("RPC_TIMEOUT_MS", 10000, 1);
@@ -91,6 +99,9 @@ export const config = {
   },
   get byWalletRateLimitMax(): number {
     return readIntEnv("BY_WALLET_RATE_LIMIT_MAX", 30, 1);
+  },
+  get webhookRateLimitMax(): number {
+    return readIntEnv("WEBHOOK_RATE_LIMIT_MAX", 30, 1);
   },
 
   // Indexer RPC retry/backoff
@@ -144,6 +155,9 @@ export const config = {
   get maxLedgersPerImport(): number {
     return readIntEnv("MAX_LEDGERS_PER_IMPORT", 10000, 1);
   },
+  get reconciliationRetentionDays(): number {
+    return readIntEnv("RECONCILIATION_RETENTION_DAYS", 14, 1);
+  },
 
   // Readiness probe (#622)
   get readyMaxPollAgeMs(): number {
@@ -153,17 +167,86 @@ export const config = {
       1,
     );
   },
+  // #893: ~10 min of Stellar ledgers (5 s each).
+  get readyMaxLedgerLag(): number {
+    return readIntEnv("READY_MAX_LEDGER_LAG", 120, 0);
+  },
+
+  // Webhook delivery bookkeeping retention (#940)
+  get webhookDeliveryRetentionDays(): number {
+    return readIntEnv("WEBHOOK_DELIVERY_RETENTION_DAYS", 7, 1);
+  },
 
   // Graceful shutdown (#623)
   get shutdownTimeoutMs(): number {
     return readIntEnv("SHUTDOWN_TIMEOUT_MS", 10000, 1);
   },
+
+  // Scheduled reconciliation (#714, #926)
+  get reconcileIntervalMs(): number {
+    return readIntEnv("RECONCILE_INTERVAL_MS", 3600000, 1);
+  },
+
+  // Legacy API sunset (#929)
+  get legacyApiSunset(): string | undefined {
+    const raw = process.env.LEGACY_API_SUNSET;
+    if (raw === undefined || raw.trim() === "") return undefined;
+    const date = new Date(raw.trim());
+    if (Number.isNaN(date.getTime())) {
+      throw new Error(
+        `Invalid date environment variable LEGACY_API_SUNSET=${JSON.stringify(raw)}: expected an ISO date string`,
+      );
+    }
+    return date.toUTCString();
+  },
+
+  // Webhook delivery (#859). Previously read at module load with bare
+  // parseInt in src/indexer/webhook-delivery.ts, so a typo'd value silently
+  // fell back to the default (for the two bounds) or became NaN (for the
+  // three retry/dead-letter settings), permanently disabling retries and
+  // dead-lettering instead of failing startup.
+  get webhookTimeoutMs(): number {
+    return readIntEnv("WEBHOOK_TIMEOUT_MS", 5000, 1);
+  },
+  get webhookDisableAfter(): number {
+    return readIntEnv("WEBHOOK_DISABLE_AFTER", 50, 1);
+  },
+  get webhookDeliveryPageSize(): number {
+    return readIntEnv("WEBHOOK_DELIVERY_PAGE_SIZE", 500, 1);
+  },
+  get webhookRetryBaseDelayMs(): number {
+    return readIntEnv("WEBHOOK_RETRY_BASE_DELAY_MS", 60000, 1);
+  },
+  get webhookRetryMaxAgeDays(): number {
+    return readIntEnv("WEBHOOK_RETRY_MAX_AGE_DAYS", 7, 1);
+  },
+  get webhookMaxDeliveryAttempts(): number {
+    return readIntEnv("WEBHOOK_MAX_DELIVERY_ATTEMPTS", 25, 1);
+  },
 } as const;
+
+/**
+ * Per-route rate limiters read `${prefix}_MAX` / `${prefix}_WINDOW_MS` (#873).
+ * Each limiter registers its prefix here so validateConfigAtStartup checks it.
+ */
+const routeRateLimitEnvs = new Map<string, { defaultMax: number; defaultWindowMs: number }>();
+
+export function registerRouteRateLimitEnv(
+  prefix: string,
+  defaultMax: number,
+  defaultWindowMs: number,
+): void {
+  routeRateLimitEnvs.set(prefix, { defaultMax, defaultWindowMs });
+}
 
 /** Throw at startup when any numeric env var is invalid, naming the variable. */
 export function validateConfigAtStartup(): void {
   // Accessing each property invokes its getter, which throws on invalid input.
   for (const key of Object.keys(config) as Array<keyof typeof config>) {
     void config[key];
+  }
+  for (const [prefix, { defaultMax, defaultWindowMs }] of routeRateLimitEnvs) {
+    readIntEnv(`${prefix}_MAX`, defaultMax, 1);
+    readIntEnv(`${prefix}_WINDOW_MS`, defaultWindowMs, 1);
   }
 }

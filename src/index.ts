@@ -12,23 +12,24 @@ import { startPoller } from "./indexer/poller.js";
 import { startReconciliationJob } from "./indexer/reconciliation.js";
 import { markIndexerStarted } from "./indexer/status.js";
 import { assertRpcNetworkMatches } from "./routes/jobs.js";
-import { registerShutdownHandlers } from "./shutdown.js";
+import { handleUncaughtException, registerShutdownHandlers } from "./shutdown.js";
 import { formatError } from "./utils/format-error.js";
 import logger from "./utils/logger.js";
+import { captureError, initErrorReporting } from "./utils/error-reporting.js";
 
-// Keep the process alive through unexpected async failures instead of
-// crash-looping under Docker (#689). The poll loop records its own
-// failures, so these handlers only log before the deliberate shutdown.
+// Unhandled rejections are logged and the process keeps running (#689); the
+// poll loop records its own failures. An uncaught exception leaves the process
+// in an undefined state, so it triggers the graceful shutdown and exit(1) (#867).
 process.on("unhandledRejection", (reason) => {
   logger.error("Unhandled promise rejection", {
     error: formatError(reason),
   });
+  captureError(reason, { tags: { source: "unhandledRejection" } });
 });
 
 process.on("uncaughtException", (err) => {
-  logger.error("Uncaught exception", {
-    error: formatError(err),
-  });
+  captureError(err, { tags: { source: "uncaughtException" } });
+  handleUncaughtException(err);
 });
 
 // Fail fast on malformed numeric env vars (RATE_LIMIT_MAX=100r, empty values,
@@ -38,6 +39,9 @@ validateConfigAtStartup();
 
 // Fail fast when required production env vars are missing.
 assertProductionEnv();
+
+// #895: opt-in error reporting, enabled only when SENTRY_DSN is set.
+initErrorReporting();
 
 // Initialize Express backend for Milesto Escrow Platform (pure, no side effects).
 const app = createApp();

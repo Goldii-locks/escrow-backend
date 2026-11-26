@@ -1,6 +1,7 @@
 import { jest } from "@jest/globals";
 import express from "express";
 import type { Server } from "http";
+import { Networks } from "@stellar/stellar-sdk";
 import { main } from "../src/index.js";
 
 function fakeServer(): Server {
@@ -94,5 +95,69 @@ describe("startup sequence (#950)", () => {
       exit: () => order.push("exit"),
     });
     expect(order).toEqual(["migrations", "started", "network", "exit"]);
+  });
+
+  it("binds no port while a slow, mismatched network check is pending (#868)", async () => {
+    let rejectCheck!: (err: Error) => void;
+    const listen = jest.fn(() => fakeServer());
+    const exit = jest.fn();
+    const pending = main({
+      createApp: () => express(),
+      runMigrations: jest.fn(),
+      markIndexerStarted: jest.fn(),
+      assertRpcNetworkMatches: () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectCheck = reject;
+        }),
+      startPoller: jest.fn(),
+      startReconciliationJob: jest.fn(),
+      registerShutdownHandlers: jest.fn(),
+      listen,
+      exit,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    // No listener yet, so /api/jobs/build-tx cannot answer 200.
+    expect(listen).not.toHaveBeenCalled();
+
+    rejectCheck(new Error("network passphrase mismatch"));
+    await pending;
+    expect(exit).toHaveBeenCalledWith(1);
+    expect(listen).not.toHaveBeenCalled();
+  });
+});
+
+describe("assertRpcNetworkMatches network label (#876)", () => {
+  const cases: Array<[string, string]> = [
+    [Networks.PUBLIC, "public"],
+    [Networks.TESTNET, "testnet"],
+    [Networks.FUTURENET, "futurenet"],
+    [Networks.STANDALONE, "standalone"],
+    ["Some Custom Network ; 2026", "custom"],
+  ];
+
+  it.each(cases)("logs %s as %s", async (passphrase, expected) => {
+    const { server } = await import("../src/utils/soroban-call.js");
+    const { default: logger } = await import("../src/utils/logger.js");
+    const { assertRpcNetworkMatches } = await import("../src/routes/jobs/shared.js");
+    const getNetwork = jest
+      .spyOn(server, "getNetwork")
+      .mockResolvedValue({ passphrase } as Awaited<ReturnType<typeof server.getNetwork>>);
+    const info = jest.spyOn(logger, "info").mockImplementation(() => logger);
+    const previous = process.env.SOROBAN_NETWORK_PASSPHRASE;
+    process.env.SOROBAN_NETWORK_PASSPHRASE = passphrase;
+
+    try {
+      await assertRpcNetworkMatches();
+      expect(info).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ network: expected }),
+      );
+    } finally {
+      if (previous === undefined) delete process.env.SOROBAN_NETWORK_PASSPHRASE;
+      else process.env.SOROBAN_NETWORK_PASSPHRASE = previous;
+      getNetwork.mockRestore();
+      info.mockRestore();
+    }
   });
 });

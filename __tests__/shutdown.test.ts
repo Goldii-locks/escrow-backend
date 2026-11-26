@@ -5,6 +5,7 @@ import {
   shutdown,
   closeHttpServer,
   registerShutdownHandlers,
+  handleUncaughtException,
   type ShutdownDeps,
 } from "../src/shutdown.js";
 
@@ -39,6 +40,22 @@ describe("graceful shutdown (#623)", () => {
       d.exit.mock.invocationCallOrder[0],
     ];
     expect([...order].sort((a, b) => a - b)).toEqual(order);
+    expect(d.exit).toHaveBeenCalledWith(0);
+  });
+
+  it("waits for an async stopPoller before closing the DB (#870)", async () => {
+    let releasePoll!: () => void;
+    const pollGate = new Promise<void>((resolve) => {
+      releasePoll = resolve;
+    });
+    const d = deps({ stopPoller: jest.fn(() => pollGate) });
+    const pending = shutdown(d);
+    await sleep(20);
+    expect(d.closeServer).not.toHaveBeenCalled();
+    expect(d.closeDb).not.toHaveBeenCalled();
+    releasePoll();
+    await pending;
+    expect(d.closeDb).toHaveBeenCalledTimes(1);
     expect(d.exit).toHaveBeenCalledWith(0);
   });
 
@@ -186,6 +203,32 @@ describe("registerShutdownHandlers (#950)", () => {
       expect(d.exit).toHaveBeenCalledWith(0);
     } finally {
       cleanup();
+    }
+  });
+});
+
+describe("uncaughtException (#867)", () => {
+  it("runs the graceful shutdown and exits 1", async () => {
+    const d = deps();
+    const before = {
+      term: process.listeners("SIGTERM"),
+      int: process.listeners("SIGINT"),
+    };
+    registerShutdownHandlers({} as any, d);
+    try {
+      handleUncaughtException(new Error("boom"), jest.fn());
+      await sleep(0);
+      expect(d.stopPoller).toHaveBeenCalledTimes(1);
+      expect(d.closeServer).toHaveBeenCalledTimes(1);
+      expect(d.closeDb).toHaveBeenCalledTimes(1);
+      expect(d.exit).toHaveBeenCalledWith(1);
+    } finally {
+      for (const l of process.listeners("SIGTERM")) {
+        if (!before.term.includes(l)) process.off("SIGTERM", l as () => void);
+      }
+      for (const l of process.listeners("SIGINT")) {
+        if (!before.int.includes(l)) process.off("SIGINT", l as () => void);
+      }
     }
   });
 });

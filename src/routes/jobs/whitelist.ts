@@ -16,9 +16,10 @@ import {
   logger,
   NETWORK_PASSPHRASE,
   server,
-  simulationSource,
   scValToNative,
+  buildSimulationTx,
 } from "./shared.js";
+import { classifySimError } from "./errors.js";
 import { rejectedRequestLogMeta } from "../../utils/log-redaction.js";
 import { getInclusionFee } from "../../utils/fee-helper.js";
 import type {
@@ -29,6 +30,30 @@ import { whitelistCache ,
   UNSIGNED_TX_TIMEOUT_S,
 } from "./caches.js";
 import { formatError } from "../../utils/format-error.js";
+
+/** True when `contractId` is the configured escrow factory. */
+function isFactory(contractId: string): boolean {
+  return contractId === process.env.FACTORY_CONTRACT_ID;
+}
+
+/**
+ * Returns the correct read method for fetching the token list from a contract.
+ * The factory exposes `get_allowed_tokens`; escrow contracts use `get_whitelisted_tokens`.
+ */
+function tokenReadMethod(contractId: string): string {
+  return isFactory(contractId) ? "get_allowed_tokens" : "get_whitelisted_tokens";
+}
+
+/**
+ * Returns the correct write methods for adding/removing a token from a contract's
+ * allowlist. The factory uses `allow_token`/`deny_token`; escrow contracts use
+ * `add_whitelisted_token`/`remove_whitelisted_token`.
+ */
+function tokenWriteMethods(contractId: string): { add: string; remove: string } {
+  return isFactory(contractId)
+    ? { add: "allow_token", remove: "deny_token" }
+    : { add: "add_whitelisted_token", remove: "remove_whitelisted_token" };
+}
 
 const router = Router();
 
@@ -75,21 +100,8 @@ router.get(
 
       // Fetch whitelisted tokens from contract. The escrow factory keeps its
       // list under get_allowed_tokens: those are the tokens new escrows may use.
-      const tokensMethod =
-        contractId === process.env.FACTORY_CONTRACT_ID
-          ? "get_allowed_tokens"
-          : "get_whitelisted_tokens";
       const requestPromise = (async (): Promise<string[]> => {
-        const contract = new Contract(contractId as string);
-        const account = simulationSource();
-        const tx = new TransactionBuilder(account, {
-          fee: await getInclusionFee(server),
-          networkPassphrase: NETWORK_PASSPHRASE,
-        })
-          .addOperation(contract.call(tokensMethod))
-          .setTimeout(30)
-          .build();
-
+        const tx = buildSimulationTx(contractId as string, tokenReadMethod(contractId as string));
         const result = await server.simulateTransaction(tx);
 
         // Handle simulation error
@@ -101,17 +113,10 @@ router.get(
             logger.info("Whitelisted tokens fetched successfully", { contractId, tokenCount: 0 });
             return [];
           }
-          // Contract not found on network
-          if (
-            /not found|NotFound|contract not found/i.test(errorMsg) ||
-            /contract error #1\b/i.test(errorMsg)
-          ) {
-            throw new Error("not found");
-          }
-          // Unexpected simulation error: log the detail server-side, then
-          // propagate it so the outer handler can classify and log it too.
+          // Classify and propagate all other errors via classifySimError (#908)
           logger.error("Failed to fetch whitelisted tokens: simulation error", { contractId, error: errorMsg });
-          throw new Error(errorMsg);
+          const { status } = classifySimError(errorMsg);
+          throw Object.assign(new Error(errorMsg), { httpStatus: status });
         }
 
         // Parse successful result
@@ -143,33 +148,44 @@ router.get(
 
       sendSuccess(res, { tokens });
     } catch (err: unknown) {
-      // Robust error handling with no stack trace leakage. Errors keep their
-      // original message so they can be classified here rather than collapsed
-      // into a single generic failure.
+      // Robust error handling with no stack trace leakage. Use classifySimError
+      // so the mapping stays consistent with every other route (#908).
       const message = formatError(err);
 
-      // 401: authentication rejected by the RPC layer
+      // Errors that already carry an HTTP status (set inside the promise above)
+      const httpStatus = (err as { httpStatus?: number }).httpStatus;
+      if (httpStatus !== undefined) {
+        if (httpStatus === 404) {
+          logger.warn("Job not found", { contractId });
+          sendError(res, 404, "Job not found");
+          return;
+        }
+        logger.error("Failed to fetch whitelisted tokens", { contractId, error: message });
+        sendError(res, httpStatus, "Internal server error");
+        return;
+      }
+
+      // 401: classifySimError does not cover auth errors; handle them first.
       if (/unauthorized|invalid authentication/i.test(message)) {
         logger.warn("Unauthorized request", { contractId });
         sendError(res, 401, "Unauthorized");
         return;
       }
 
-      // 404: the contract itself is missing. A missing *account* is a
-      // server-side misconfiguration (the deployer account we simulate from),
-      // so it falls through to the 500 branch instead.
-      if (/not found/i.test(message) && !/account not found/i.test(message)) {
+      const { status } = classifySimError(message);
+      if (status === 404) {
         logger.warn("Job not found", { contractId });
         sendError(res, 404, "Job not found");
         return;
       }
 
-      // 500: everything else — full detail server-side, generic body to client
+      // Log the original error message for server-side visibility, but send
+      // only the generic classified message to the client.
       logger.error("Failed to fetch whitelisted tokens", {
         contractId,
         error: message,
       });
-      sendError(res, 500, "Internal server error");
+      sendError(res, status, "Internal server error");
     }
   },
 );
@@ -214,10 +230,11 @@ router.post(
         const account = await server.getAccount(
           adminAddress || process.env.DEPLOYER_ADDRESS || "",
         );
+        const methods = tokenWriteMethods(contractId);
         const method =
           action === "remove"
-            ? "remove_whitelisted_token"
-            : "add_whitelisted_token";
+            ? methods.remove
+            : methods.add;
 
         const tx = new TransactionBuilder(account, {
           fee: await getInclusionFee(server),
@@ -241,18 +258,27 @@ router.post(
         return;
       } catch (err: unknown) {
         const message = formatError(err);
-        if (/unauthorized|invalid authentication/i.test(message)) {
+        const classifiedErr = classifySimError(message);
+        const classified = /account not found/i.test(message)
+          ? "Internal server error"
+          : classifiedErr.message;
+        // classifySimError does not cover auth errors, and a missing *account*
+        // is a server-side misconfiguration, not a missing job.
+        const unauthorized = /unauthorized|invalid authentication/i.test(message);
+        const accountMissing = /account not found/i.test(message);
+        const status = unauthorized ? 401 : accountMissing ? 500 : classifiedErr.status;
+        if (status === 401) {
           logger.warn("Unauthorized request for whitelist update", { contractId });
           sendError(res, 401, "Unauthorized");
           return;
         }
-        if (/not found/i.test(message) && !/account not found/i.test(message)) {
+        if (status === 404) {
           logger.warn("Job not found for whitelist update", { contractId });
           sendError(res, 404, "Job not found");
           return;
         }
         logger.error("Failed to update whitelist", { contractId, error: message });
-        sendError(res, 500, "Internal server error");
+        sendError(res, status, classified);
         return;
       }
     }
@@ -263,34 +289,26 @@ router.post(
     // point the caller at the single-token form instead of replying
     // `updated: true` for work that was never done (#613).
     try {
-      const contract = new Contract(contractId);
-      const account = simulationSource();
-      const tx = new TransactionBuilder(account, {
-        fee: await getInclusionFee(server),
-        networkPassphrase: NETWORK_PASSPHRASE,
-      })
-        .addOperation(contract.call("get_whitelisted_tokens"))
-        .setTimeout(30)
-        .build();
-
+      const tx = buildSimulationTx(contractId, tokenReadMethod(contractId));
       const result = await server.simulateTransaction(tx);
 
       if ("error" in result) {
         const errorMsg = String(result.error);
+        // Uninitialized contract is not an error for the bulk-rejection path:
+        // the contract exists; we just can't do a bulk update. Fall through.
         if (
           !errorMsg.includes("contract error #2") &&
           !errorMsg.includes("NotInitialized")
         ) {
-          if (
-            /not found|NotFound|contract not found/i.test(errorMsg) ||
-            /contract error #1\b/i.test(errorMsg)
-          ) {
+          // Classify via classifySimError rather than ad-hoc regexes (#908).
+          const { status, message: classified } = classifySimError(errorMsg);
+          if (status === 404) {
             logger.warn("Job not found for whitelist update", { contractId });
             sendError(res, 404, "Job not found");
             return;
           }
           logger.error("Failed to verify contract for whitelist update", { contractId, error: errorMsg });
-          sendError(res, 500, "Internal server error");
+          sendError(res, status, classified);
           return;
         }
       }
@@ -303,18 +321,25 @@ router.post(
       );
     } catch (err: unknown) {
       const message = formatError(err);
-      if (/unauthorized|invalid authentication/i.test(message)) {
+      const classifiedErr = classifySimError(message);
+      const classified = /account not found/i.test(message)
+          ? "Internal server error"
+          : classifiedErr.message;
+      const unauthorized = /unauthorized|invalid authentication/i.test(message);
+      const accountMissing = /account not found/i.test(message);
+      const status = unauthorized ? 401 : accountMissing ? 500 : classifiedErr.status;
+      if (status === 401) {
         logger.warn("Unauthorized request for whitelist update", { contractId });
         sendError(res, 401, "Unauthorized");
         return;
       }
-      if (/not found/i.test(message) && !/account not found/i.test(message)) {
+      if (status === 404) {
         logger.warn("Job not found for whitelist update", { contractId });
         sendError(res, 404, "Job not found");
         return;
       }
       logger.error("Failed to update whitelist", { contractId, error: message });
-      sendError(res, 500, "Internal server error");
+      sendError(res, status, classified);
     }
   },
 );

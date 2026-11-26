@@ -10,7 +10,7 @@ import Database from "better-sqlite3";
 
 const mockGetLatestLedger = jest.fn<() => Promise<{ sequence: number }>>();
 const mockGetEvents = jest.fn<(params: any) => Promise<{ events: unknown[] }>>();
-const mockDeliverWebhooks = jest.fn<(start: number, end: number) => Promise<unknown[]>>();
+const mockDeliverWebhooks = jest.fn<(start: number, end: number, contractIds?: string[]) => Promise<unknown[]>>();
 
 jest.unstable_mockModule("@stellar/stellar-sdk/rpc", () => ({
   Server: class MockServer {
@@ -24,10 +24,13 @@ jest.unstable_mockModule("@stellar/stellar-sdk", () => ({
 }));
 
 jest.unstable_mockModule("../src/indexer/webhook-delivery.js", () => ({
+  pruneWebhookDeliveries: jest.fn(() => ({ delivered: 0, dead: 0 })),
   deliverWebhooks: mockDeliverWebhooks,
 }));
 
-const { pollEvents, resetFailureState } = await import("../src/indexer/poller.js");
+const { pollEvents, resetFailureState, flushWebhookDeliveryQueueForTests } = await import(
+  "../src/indexer/poller.js"
+);
 const {
   setDb,
   runMigrations,
@@ -130,15 +133,17 @@ describe("pollEvents() with per-contract pointers", () => {
     expect(getLastIndexedLedger()).toBe(1010);
   });
 
-  it("delivers webhooks from the earliest ledger any group fetched", async () => {
+  it("delivers webhooks scoped to each polled contract group (#885)", async () => {
     setLastIndexedLedger(1000);
     registerContract("C-EXISTING");
     registerContract("C-NEW", "new", 400);
     mockGetLatestLedger.mockResolvedValue({ sequence: 1010 });
 
     await pollEvents();
+    await flushWebhookDeliveryQueueForTests();
 
-    expect(mockDeliverWebhooks).toHaveBeenCalledWith(400, 1010);
+    expect(mockDeliverWebhooks).toHaveBeenCalledWith(1001, 1010, ["C-EXISTING"]);
+    expect(mockDeliverWebhooks).toHaveBeenCalledWith(400, 1010, ["C-NEW"]);
   });
 
   it("merges contracts into one getEvents call once their pointers converge", async () => {
@@ -173,8 +178,9 @@ describe("pollEvents() with per-contract pointers", () => {
     mockGetLatestLedger.mockResolvedValue({ sequence: 705 });
 
     await pollEvents();
+    await flushWebhookDeliveryQueueForTests();
 
     expect(getEventsCalls()).toEqual([{ startLedger: 701, contractIds: ["C-ENV"] }]);
-    expect(mockDeliverWebhooks).toHaveBeenCalledWith(701, 705);
+    expect(mockDeliverWebhooks).toHaveBeenCalledWith(701, 705, ["C-ENV"]);
   });
 });

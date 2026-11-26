@@ -2,6 +2,7 @@ import { jest } from "@jest/globals";
 import request from "supertest";
 import type { Request, Response } from "express";
 import { createApp, assertProductionEnv, globalErrorHandler } from "../src/app.js";
+import { config } from "../src/config.js";
 
 describe("assertProductionEnv (#625)", () => {
   it("does nothing outside production", () => {
@@ -58,6 +59,19 @@ describe("createApp (#625)", () => {
     expect(res.body.status).toBe("ok");
   });
 
+  it("serves the running build version from /health (#894)", async () => {
+    const previous = process.env.GIT_SHA;
+    process.env.GIT_SHA = "abc123";
+    try {
+      const res = await request(createApp()).get("/health");
+      expect(res.body.status).toBe("ok");
+      expect(res.body.version).toBe("abc123");
+    } finally {
+      if (previous === undefined) delete process.env.GIT_SHA;
+      else process.env.GIT_SHA = previous;
+    }
+  });
+
   it("global error handler returns 500 without leaking internals", () => {
     const res = {
       status: jest.fn().mockReturnThis(),
@@ -83,5 +97,39 @@ describe("createApp (#625)", () => {
     } as unknown as Response;
     globalErrorHandler("plain string", { path: "/x" } as Request, res, jest.fn());
     expect(res.status).toHaveBeenCalledWith(500);
+  });
+
+  it("rejects an oversized JSON body with the standard 413 envelope (#1005)", async () => {
+    const original = process.env.JSON_BODY_LIMIT;
+    process.env.JSON_BODY_LIMIT = "16b";
+    try {
+      const res = await request(createApp())
+        .post("/api/jobs/create-job-draft")
+        .send({ payload: "x".repeat(128) })
+        .expect(413);
+
+      expect(res.body).toEqual({ success: false, error: "Payload too large" });
+      expect(res.headers["content-type"]).toMatch(/json/);
+    } finally {
+      if (original === undefined) delete process.env.JSON_BODY_LIMIT;
+      else process.env.JSON_BODY_LIMIT = original;
+    }
+  });
+});
+
+describe("CONTRACT_ID live config (#1006)", () => {
+  const original = process.env.CONTRACT_ID;
+
+  afterEach(() => {
+    if (original === undefined) delete process.env.CONTRACT_ID;
+    else process.env.CONTRACT_ID = original;
+  });
+
+  it("uses a value set after module import in /health", async () => {
+    process.env.CONTRACT_ID = "  C-LIVE-AFTER-IMPORT  ";
+
+    expect(config.contractId).toBe("C-LIVE-AFTER-IMPORT");
+    const res = await request(createApp()).get("/health");
+    expect(res.body.contract).toBe("C-LIVE-AFTER-IMPORT");
   });
 });

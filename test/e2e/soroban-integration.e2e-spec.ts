@@ -15,9 +15,25 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
-import { Address, Keypair, TransactionBuilder, type Transaction } from "@stellar/stellar-sdk";
+import {
+  Address,
+  BASE_FEE,
+  Contract,
+  Keypair,
+  TransactionBuilder,
+  scValToNative,
+  type Transaction,
+} from "@stellar/stellar-sdk";
 import { Api } from "@stellar/stellar-sdk/rpc";
-import { STATE_FILE, rpcServer, waitFor, type E2EState } from "./soroban-network.js";
+import {
+  STATE_FILE,
+  invokeContract,
+  loadConfig,
+  rpcServer,
+  sleep,
+  waitFor,
+  type E2EState,
+} from "./soroban-network.js";
 
 const PORT = Number(process.env.E2E_BACKEND_PORT ?? "3101");
 const BASE_URL = `http://127.0.0.1:${PORT}`;
@@ -28,6 +44,8 @@ const AUTO_RELEASE_DAYS = 7;
 const state = JSON.parse(fs.readFileSync(STATE_FILE, "utf8")) as E2EState;
 const admin = Keypair.fromSecret(state.adminSecret);
 const client = Keypair.fromSecret(state.clientSecret);
+const freelancer = Keypair.fromSecret(state.freelancerSecret);
+const arbiter = Keypair.fromSecret(state.arbiterSecret);
 const MILESTONE_AMOUNTS = state.milestoneAmounts;
 const server = rpcServer(state.rpcUrl);
 
@@ -314,5 +332,268 @@ describe("Soroban quickstart E2E: create an escrow through escrow-factory", () =
       funded: false,
       milestones: MILESTONE_AMOUNTS.map((amount, index) => ({ index, amount, status: "Pending" })),
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Job lifecycle after funding (#938). Every step asserts the HTTP response and
+// the event the indexer records for that transaction.
+// ---------------------------------------------------------------------------
+
+type BuildArg = { type: string; value: unknown };
+
+/** Sign `xdr` with `signer`, relay it through /submit and wait for it to apply. */
+async function signAndSubmit(xdr: string, signer: Keypair): Promise<string> {
+  const tx = TransactionBuilder.fromXDR(xdr, state.networkPassphrase) as Transaction;
+  tx.sign(signer);
+  const submitted = await api("POST", "/api/jobs/submit", {
+    signedXdr: tx.toXDR(),
+    sourceAddress: signer.publicKey(),
+  });
+  expect(submitted.status).toBe(200);
+  expect(submitted.body.data.status).not.toBe("ERROR");
+  const hash: string = submitted.body.data.hash;
+  const result = await server.pollTransaction(hash, { attempts: 60 });
+  expect(result.status).toBe(Api.GetTransactionStatus.SUCCESS);
+  return hash;
+}
+
+/** POST /build-tx for `method`, then sign and submit; returns the tx hash. */
+async function callThroughBackend(
+  contractId: string,
+  method: string,
+  signer: Keypair,
+  args: BuildArg[],
+): Promise<string> {
+  const built = await api("POST", "/api/jobs/build-tx", {
+    contractId,
+    method,
+    sourceAddress: signer.publicKey(),
+    args,
+  });
+  expect(built.status).toBe(200);
+  expect(built.body.success).toBe(true);
+  return signAndSubmit(built.body.data.xdr, signer);
+}
+
+/** Wait until GET /:contractId/history holds `eventType` for transaction `txHash`. */
+async function expectIndexedEvent(
+  contractId: string,
+  eventType: string,
+  txHash: string,
+): Promise<void> {
+  const event = await waitFor(
+    `indexed "${eventType}" event for ${txHash}`,
+    async () => {
+      const { status, body } = await api("GET", `/api/jobs/${contractId}/history?limit=100`);
+      if (status !== 200) return undefined;
+      return body.data.events.find(
+        (e: { event_type: string; txHash: string | null }) =>
+          e.event_type === eventType && e.txHash === txHash,
+      );
+    },
+    60_000,
+    1_000,
+  );
+  expect(event).toBeDefined();
+}
+
+/** Wait until GET /:contractId reports `status` for milestone `index`. */
+async function expectMilestoneStatus(
+  contractId: string,
+  index: number,
+  status: string,
+): Promise<void> {
+  await waitFor(
+    `milestone ${index} to be ${status}`,
+    async () => {
+      const { body } = await api("GET", `/api/jobs/${contractId}`);
+      return body?.data?.milestones?.[index]?.status === status ? true : undefined;
+    },
+    60_000,
+    1_000,
+  );
+  const { status: http, body } = await api("GET", `/api/jobs/${contractId}`);
+  expect(http).toBe(200);
+  expect(body.data.milestones[index].status).toBe(status);
+}
+
+/** The escrow token (native SAC) balance of `holder`, read by simulation. */
+async function tokenBalance(holder: string): Promise<bigint> {
+  const account = await server.getAccount(client.publicKey());
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: state.networkPassphrase,
+  })
+    .addOperation(new Contract(state.tokenContractId).call("balance", new Address(holder).toScVal()))
+    .setTimeout(60)
+    .build();
+  const sim = await server.simulateTransaction(tx);
+  if (!Api.isSimulationSuccess(sim) || !sim.result) {
+    throw new Error(`token balance simulation failed for ${holder}`);
+  }
+  return BigInt(scValToNative(sim.result.retval));
+}
+
+const addr = (value: string): BuildArg => ({ type: "address", value });
+const u32 = (value: number): BuildArg => ({ type: "u32", value });
+
+describe("Soroban quickstart E2E: deliver → partial approve → approve → dispute → resolve", () => {
+  const [first, second] = MILESTONE_AMOUNTS.map(BigInt);
+  const partial = first / 2n;
+
+  it("starts from a funded escrow holding every milestone amount", async () => {
+    expect(await tokenBalance(state.contractId)).toBe(first + second);
+  });
+
+  it("freelancer marks milestone 0 delivered", async () => {
+    const hash = await callThroughBackend(state.contractId, "mark_delivered", freelancer, [
+      addr(state.freelancer),
+      u32(0),
+    ]);
+    await expectIndexedEvent(state.contractId, "deliver", hash);
+    await expectMilestoneStatus(state.contractId, 0, "Delivered");
+  });
+
+  it("client partially approves milestone 0 through /partial-release", async () => {
+    const built = await api("POST", `/api/jobs/${state.contractId}/milestones/0/partial-release`, {
+      amount: partial.toString(),
+      sourceAddress: state.client,
+    });
+    expect(built.status).toBe(200);
+    expect(built.body).toMatchObject({ success: true, data: { xdr: expect.any(String) } });
+
+    const hash = await signAndSubmit(built.body.data.xdr, client);
+    await expectIndexedEvent(state.contractId, "approve", hash);
+    await expectMilestoneStatus(state.contractId, 0, "PartiallyReleased");
+    expect(await tokenBalance(state.contractId)).toBe(first + second - partial);
+  });
+
+  it("client approves the rest of milestone 0", async () => {
+    const hash = await callThroughBackend(state.contractId, "approve_milestone", client, [
+      addr(state.client),
+      u32(0),
+    ]);
+    await expectIndexedEvent(state.contractId, "approve", hash);
+    await expectMilestoneStatus(state.contractId, 0, "Released");
+    expect(await tokenBalance(state.contractId)).toBe(second);
+  });
+
+  it("freelancer delivers milestone 1 and the client disputes it", async () => {
+    const delivered = await callThroughBackend(state.contractId, "mark_delivered", freelancer, [
+      addr(state.freelancer),
+      u32(1),
+    ]);
+    await expectIndexedEvent(state.contractId, "deliver", delivered);
+
+    const disputed = await callThroughBackend(state.contractId, "raise_dispute", client, [
+      addr(state.client),
+      u32(1),
+    ]);
+    await expectIndexedEvent(state.contractId, "dispute", disputed);
+    await expectMilestoneStatus(state.contractId, 1, "Disputed");
+  });
+
+  it("arbiter resolves the dispute for the freelancer and the escrow is emptied", async () => {
+    const hash = await callThroughBackend(state.contractId, "resolve_dispute", arbiter, [
+      addr(state.arbiter),
+      u32(1),
+      { type: "bool", value: true },
+    ]);
+    await expectIndexedEvent(state.contractId, "resolve", hash);
+    await expectMilestoneStatus(state.contractId, 1, "Released");
+    expect(await tokenBalance(state.contractId)).toBe(0n);
+  });
+});
+
+describe("Soroban quickstart E2E: claim auto-release after the window elapses", () => {
+  const AUTO_RELEASE_SECONDS = 5;
+  const AMOUNT = "1000";
+  let escrowId: string;
+
+  it("creates a short-window escrow through the factory and both parties accept", async () => {
+    const built = await api("POST", "/api/jobs/build-tx", {
+      contractId: state.factoryContractId,
+      method: "create_escrow",
+      sourceAddress: client.publicKey(),
+      args: [
+        addr(state.client),
+        addr(state.freelancer),
+        addr(state.arbiter),
+        addr(state.tokenContractId),
+        { type: "u64", value: String(AUTO_RELEASE_SECONDS) },
+        { type: "vec", value: [{ type: "i128", value: AMOUNT }] },
+        { type: "vec", value: [{ type: "bytes", value: "00".repeat(32) }] },
+        {
+          type: "struct",
+          value: {
+            funding_mode: { type: "enum", value: "Upfront" },
+            dispute_timeout_seconds: { type: "u64", value: String(30 * 86_400) },
+            arbiter_fee_bps: { type: "u32", value: 0 },
+          },
+        },
+        { type: "bytes", value: randomBytes(32).toString("hex") },
+      ],
+    });
+    expect(built.status).toBe(200);
+
+    const tx = TransactionBuilder.fromXDR(built.body.data.xdr, state.networkPassphrase) as Transaction;
+    tx.sign(client);
+    const submitted = await api("POST", "/api/jobs/submit", {
+      signedXdr: tx.toXDR(),
+      sourceAddress: client.publicKey(),
+    });
+    expect(submitted.status).toBe(200);
+    const result = await server.pollTransaction(submitted.body.data.hash, { attempts: 60 });
+    if (result.status !== Api.GetTransactionStatus.SUCCESS || !result.returnValue) {
+      throw new Error("create_escrow returned no escrow address");
+    }
+    escrowId = Address.fromScVal(result.returnValue).toString();
+
+    // accept_job / accept_arbiter are not build-tx methods; call them directly.
+    const config = loadConfig();
+    await invokeContract(server, config, freelancer, escrowId, "accept_job", [
+      new Address(state.freelancer).toScVal(),
+    ]);
+    await invokeContract(server, config, arbiter, escrowId, "accept_arbiter", [
+      new Address(state.arbiter).toScVal(),
+    ]);
+
+    await waitFor(
+      "indexer to register the short-window escrow",
+      async () => {
+        const { body } = await api("GET", `/api/jobs/by-wallet/${state.client}`);
+        return body?.data?.jobs?.find((j: { contract_id: string }) => j.contract_id === escrowId);
+      },
+      90_000,
+      2_000,
+    );
+  });
+
+  it("client funds and freelancer delivers", async () => {
+    const funded = await callThroughBackend(escrowId, "fund", client, [addr(state.client)]);
+    await expectIndexedEvent(escrowId, "fund", funded);
+    expect(await tokenBalance(escrowId)).toBe(BigInt(AMOUNT));
+
+    const delivered = await callThroughBackend(escrowId, "mark_delivered", freelancer, [
+      addr(state.freelancer),
+      u32(0),
+    ]);
+    await expectIndexedEvent(escrowId, "deliver", delivered);
+  });
+
+  it("freelancer claims the auto-release once the window has passed", async () => {
+    await sleep((AUTO_RELEASE_SECONDS + 5) * 1_000);
+
+    const built = await api("POST", `/api/jobs/${escrowId}/milestones/0/claim-auto-release`, {
+      sourceAddress: state.freelancer,
+    });
+    expect(built.status).toBe(200);
+    expect(built.body).toMatchObject({ success: true, data: { xdr: expect.any(String) } });
+
+    const hash = await signAndSubmit(built.body.data.xdr, freelancer);
+    await expectIndexedEvent(escrowId, "claim", hash);
+    await expectMilestoneStatus(escrowId, 0, "Released");
+    expect(await tokenBalance(escrowId)).toBe(0n);
   });
 });

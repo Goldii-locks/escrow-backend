@@ -1,5 +1,6 @@
 import type { NextFunction, Request, Response } from "express";
 import logger from "../utils/logger.js";
+import { captureError } from "../utils/error-reporting.js";
 
 const BODY_PARSER_MESSAGES: Record<string, string> = {
   "entity.parse.failed": "Malformed JSON body",
@@ -36,5 +37,13 @@ export function globalErrorHandler(
 
   const message = err instanceof Error ? err.message : String(err);
   logger.error("Unhandled error", { error: message, path: req.path });
+  captureError(err, {
+    requestId: req.id,
+    method: req.method,
+    url: req.originalUrl,
+    headers: req.headers,
+    body: req.body,
+    tags: { source: "globalErrorHandler" },
+  });
   res.status(500).json({ success: false, error: "Internal server error" });
 }

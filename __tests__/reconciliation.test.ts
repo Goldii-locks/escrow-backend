@@ -129,4 +129,22 @@ describe("reconciliation (#714)", () => {
     expect(results).toHaveLength(0);
     expect(reader).not.toHaveBeenCalled();
   });
+
+  it("applies the configured RPC timeout and shared simulation source (#926)", async () => {
+    const fs = await import("fs");
+    const path = await import("path");
+    const { getActiveServer } = await import("../src/indexer/poller.js");
+    const { config } = await import("../src/config.js");
+
+    // Acceptance criterion: No new Server( in reconciliation.ts
+    const reconSource = fs.readFileSync(
+      path.resolve("src/indexer/reconciliation.ts"),
+      "utf8"
+    );
+    expect(reconSource).not.toContain("new Server(");
+
+    // Acceptance criterion: A test asserts that the configured timeout applies
+    const activeServer = getActiveServer();
+    expect((activeServer as any).httpClient?.defaults?.timeout).toBe(config.rpcTimeoutMs);
+  });
 });

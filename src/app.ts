@@ -5,6 +5,9 @@ import adminRoutes from "./routes/admin.js";
 import webhookRoutes from "./routes/webhooks.js";
 import tokenRoutes from "./routes/tokens.js";
 import statsRoutes from "./routes/stats.js";
+import clientErrorRoutes from "./routes/client-errors.js";
+import cspReportRoutes from "./routes/csp-report.js";
+import disputeRoutes from "./routes/disputes.js";
 import { generalLimiter } from "./middleware/rateLimiter.js";
 import { legacyApiDeprecation } from "./middleware/api-version.js";
 import { readinessHandler } from "./readiness.js";
@@ -12,6 +15,8 @@ import { globalCors } from "./middleware/global-cors.js";
 import { requestIdMiddleware, requestLogger } from "./middleware/request-id.js";
 import { globalErrorHandler } from "./middleware/error-handler.js";
 import { resolveTrustProxy } from "./utils/trust-proxy.js";
+import { config } from "./config.js";
+import { sendError } from "./utils/api-response.js";
 
 // Fail fast in production rather than booting into a silently insecure or
 // misdirected state. Without this the server starts happily and passes
@@ -71,13 +76,25 @@ export function createApp(): express.Express {
   app.use(requestIdMiddleware);
   app.use(globalCors());
   app.use(helmet());
-  app.use(express.json());
-
   // Structured HTTP request logging (#86), tagged with the request id (#773).
   app.use(requestLogger);
 
+  // #917, #918: Dedicated route-level body parsers with specific payload limits
+  app.use("/api/v1/client-errors", clientErrorRoutes);
+  app.use("/api/client-errors", clientErrorRoutes);
+  app.use("/api/v1/csp-report", cspReportRoutes);
+  app.use("/api/csp-report", cspReportRoutes);
+
+  app.use(express.json({ limit: config.jsonBodyLimit }));
+
   app.get("/health", (_req, res) => {
-    res.json({ status: "ok", contract: process.env.CONTRACT_ID });
+    res.json({
+      status: "ok",
+      contract: config.contractId,
+      // #894: baked into the image so deploy smoke tests can prove which
+      // build is actually serving traffic.
+      version: process.env.GIT_SHA,
+    });
   });
 
   // Readiness reflects the database and the poller; /health stays pure liveness.
@@ -90,11 +107,16 @@ export function createApp(): express.Express {
   app.use("/api/v1/webhooks", webhookRoutes);
   app.use("/api/v1/tokens", tokenRoutes);
   app.use("/api/v1/stats", statsRoutes);
+  app.use("/api/v1/disputes", disputeRoutes);
   app.use("/api/jobs", jobRoutes);
   app.use("/api/admin", adminRoutes);
   app.use("/api/webhooks", webhookRoutes);
   app.use("/api/tokens", tokenRoutes);
   app.use("/api/stats", statsRoutes);
+  app.use("/api/disputes", disputeRoutes);
+
+  // JSON 404 for unknown routes instead of Express's HTML page (#869).
+  app.use((_req, res) => sendError(res, 404, "Not found"));
 
   app.use(globalErrorHandler);
 

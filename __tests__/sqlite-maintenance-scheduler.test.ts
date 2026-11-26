@@ -2,11 +2,11 @@
  * Tests for the SQLite maintenance scheduler wired into poller.ts (Issue 3).
  *
  * Covers:
- *  - Maintenance executes immediately on startMaintenanceScheduler()
+ *  - Maintenance does NOT run at startup; first cycle after interval + jitter (#871)
  *  - Maintenance re-runs after DB_MAINTENANCE_INTERVAL_MS via fake timers
  *  - Skips execution when isVacuumLocked() is true (write lock active)
  *  - Never prunes events unless EVENT_RETENTION_DAYS is explicitly set
- *  - Prunes events and VACUUMs when EVENT_RETENTION_DAYS is set
+ *  - Prunes events when EVENT_RETENTION_DAYS is set, never running a full VACUUM
  */
 
 import { jest } from "@jest/globals";
@@ -42,6 +42,8 @@ describe("SQLite maintenance scheduler", () => {
 
   beforeEach(() => {
     jest.useFakeTimers();
+    // Zero jitter so the first cycle fires exactly one interval after start.
+    jest.spyOn(Math, "random").mockReturnValue(0);
     db = makeInMemoryDb();
     setDb(db);
     runMigrations();
@@ -52,21 +54,38 @@ describe("SQLite maintenance scheduler", () => {
 
   afterEach(() => {
     stopMaintenanceScheduler();
+    jest.restoreAllMocks();
     jest.useRealTimers();
     closeDb();
   });
 
   // -------------------------------------------------------------------------
-  // 1. Runs WAL checkpoint + optimize immediately on startMaintenanceScheduler
+  // 1. Does not run maintenance (or VACUUM) at startup (#871)
   // -------------------------------------------------------------------------
-  it("runs WAL checkpoint and optimize immediately on startMaintenanceScheduler", () => {
+  it("does not run maintenance or VACUUM at startup", () => {
+    process.env.EVENT_RETENTION_DAYS = "90";
     const pragmaSpy = jest.spyOn(db, "pragma");
+    const execSpy = jest.spyOn(db, "exec");
 
     startMaintenanceScheduler();
 
-    const calls = pragmaSpy.mock.calls as unknown as string[][];
-    expect(calls.some((c) => c[0] === "wal_checkpoint(TRUNCATE)")).toBe(true);
-    expect(calls.some((c) => c[0] === "optimize")).toBe(true);
+    expect(pragmaSpy).not.toHaveBeenCalled();
+    expect(execSpy).not.toHaveBeenCalledWith("VACUUM");
+  });
+
+  it("never calls db.exec(\"VACUUM\") on the main connection during a cycle", async () => {
+    process.env.EVENT_RETENTION_DAYS = "90";
+    db.prepare(
+      `INSERT INTO events (contract_id, event_type, ledger_sequence, timestamp, data_json, created_at)
+       VALUES ('C1', 'funded', 1, 1000, '{}', datetime('now', '-200 days'))`,
+    ).run();
+    const execSpy = jest.spyOn(db, "exec");
+
+    runMaintenanceCycle();
+    jest.runAllTimers();
+
+    const calls = execSpy.mock.calls as unknown as string[][];
+    expect(calls.some((c) => /^\s*VACUUM\b/i.test(c[0]))).toBe(false);
   });
 
   // -------------------------------------------------------------------------
@@ -82,14 +101,21 @@ describe("SQLite maintenance scheduler", () => {
     const after1 = (pragmaSpy.mock.calls as unknown as string[][]).filter(
       (c) => c[0] === "wal_checkpoint(TRUNCATE)",
     ).length;
-    expect(after1).toBe(1);
+    expect(after1).toBe(0);
 
     jest.advanceTimersByTime(intervalMs + 1);
 
     const after2 = (pragmaSpy.mock.calls as unknown as string[][]).filter(
       (c) => c[0] === "wal_checkpoint(TRUNCATE)",
     ).length;
-    expect(after2).toBe(2);
+    expect(after2).toBe(1);
+
+    jest.advanceTimersByTime(intervalMs);
+
+    const after3 = (pragmaSpy.mock.calls as unknown as string[][]).filter(
+      (c) => c[0] === "wal_checkpoint(TRUNCATE)",
+    ).length;
+    expect(after3).toBe(2);
   });
 
   // -------------------------------------------------------------------------
@@ -104,17 +130,17 @@ describe("SQLite maintenance scheduler", () => {
     // Run an async vacuum cycle to acquire the lock. The cycle itself will
     // complete quickly on an empty DB, so we intercept just before it releases
     // by making VACUUM block until we let it proceed.
-    let releaseVacuum!: () => void;
-    const vacuumBlocked = new Promise<void>((resolve) => {
-      releaseVacuum = resolve;
+    let _releaseVacuum!: () => void;
+    const _vacuumBlocked = new Promise<void>((resolve) => {
+      _releaseVacuum = resolve;
     });
 
     // Override db.exec temporarily to block on VACUUM
     const origExec = db.exec.bind(db);
-    let vacuumBlocking = false;
+    let _vacuumBlocking = false;
     const execSpy = jest.spyOn(db, "exec").mockImplementation((sql: string) => {
       if (sql === "VACUUM") {
-        vacuumBlocking = true;
+        _vacuumBlocking = true;
         // Block – in the real test we'll check the lock state, then release
         return origExec(sql);
       }
@@ -267,13 +293,13 @@ describe("SQLite maintenance scheduler", () => {
     const after1 = (pragmaSpy.mock.calls as unknown as string[][]).filter(
       (c) => c[0] === "wal_checkpoint(TRUNCATE)",
     ).length;
-    expect(after1).toBe(1);
+    expect(after1).toBe(0);
 
     jest.advanceTimersByTime(5_001);
     const after2 = (pragmaSpy.mock.calls as unknown as string[][]).filter(
       (c) => c[0] === "wal_checkpoint(TRUNCATE)",
     ).length;
-    expect(after2).toBe(2);
+    expect(after2).toBe(1);
   });
 
   // -------------------------------------------------------------------------
@@ -296,6 +322,34 @@ describe("SQLite maintenance scheduler", () => {
       (c) => c[0] === "wal_checkpoint(TRUNCATE)",
     ).length;
     expect(after).toBe(before);
+  });
+
+  // -------------------------------------------------------------------------
+  // 8. Expired job draft pruning (#881)
+  // -------------------------------------------------------------------------
+  it("deletes expired job drafts while keeping live ones (#881)", () => {
+    delete process.env.EVENT_RETENTION_DAYS;
+    const now = Date.now();
+    const expiredTime = new Date(now - 10_000).toISOString();
+    const liveTime = new Date(now + 100_000).toISOString();
+
+    db.prepare(`
+      INSERT INTO job_drafts (id, creator_address, payload_json, expires_at)
+      VALUES (?, ?, ?, ?)
+    `).run("expired-draft", "GB5C...1", "{}", expiredTime);
+
+    db.prepare(`
+      INSERT INTO job_drafts (id, creator_address, payload_json, expires_at)
+      VALUES (?, ?, ?, ?)
+    `).run("live-draft", "GB5C...2", "{}", liveTime);
+
+    runMaintenanceCycle();
+
+    const expired = db.prepare("SELECT * FROM job_drafts WHERE id = ?").get("expired-draft");
+    const live = db.prepare("SELECT * FROM job_drafts WHERE id = ?").get("live-draft");
+
+    expect(expired).toBeUndefined();
+    expect(live).toBeDefined();
   });
 
   // -------------------------------------------------------------------------

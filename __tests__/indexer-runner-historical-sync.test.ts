@@ -22,6 +22,7 @@ jest.unstable_mockModule("../src/utils/logger.js", () => ({
 }));
 
 jest.unstable_mockModule("../src/indexer/webhook-delivery.js", () => ({
+  pruneWebhookDeliveries: jest.fn(() => ({ delivered: 0, dead: 0 })),
   deliverWebhooks: jest.fn<() => Promise<void>>().mockResolvedValue(undefined),
 }));
 
@@ -251,7 +252,7 @@ describe("indexer_runner dynamic historical sync ranges (#254)", () => {
           await new Promise((resolve) => setImmediate(resolve));
         }
       } finally {
-        stopPoller();
+        void stopPoller();
       }
 
       const ledgerRequests = mockGetEvents.mock.calls

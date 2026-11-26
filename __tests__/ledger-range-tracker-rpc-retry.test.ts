@@ -405,13 +405,13 @@ describe("LedgerRangeTracker — RPC retry backoff (#Task1)", () => {
         },
       });
 
-      let attempt = 0;
+      let _attempt = 0;
       await expect(
         tracker.processRange({
           startLedger: 1,
           endLedger: 1,
           fetchEvents: async () => {
-            attempt++;
+            _attempt++;
             throw new Error("socket hang up");
           },
         }),

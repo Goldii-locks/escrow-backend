@@ -14,6 +14,10 @@ function getProvidedApiKey(req: Request): string | undefined {
   return undefined;
 }
 
+export type AdminRequest = Request & {
+  adminKeyIndex?: number;
+};
+
 export function requireAdmin(req: Request, res: Response, next: NextFunction) {
   const expectedKeys = configuredApiKeys("ADMIN_API_KEYS", "ADMIN_API_KEY");
   if (expectedKeys.length === 0) {
@@ -27,6 +31,7 @@ export function requireAdmin(req: Request, res: Response, next: NextFunction) {
     return;
   }
 
+  (req as AdminRequest).adminKeyIndex = keyIndex;
   logger.info("Admin API key authenticated", { keyIndex, path: req.path });
   next();
 }

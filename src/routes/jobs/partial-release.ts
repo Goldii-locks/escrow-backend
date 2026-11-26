@@ -26,11 +26,12 @@ import {
   inFlightPartialReleaseRequests,
   UNSIGNED_TX_TIMEOUT_S,
   unsignedTxValidUntil,
-  getFreshCachedBuildTx,
   setCachedBuildTx,
+  isFreshBuildTx,
   PARTIAL_RELEASE_CACHE_TTL,
   type BuildTxPayload,
 } from "./caches.js";
+import { cachedSingleFlight } from "./dedupe.js";
 import {
   classifySimError,
 } from "./errors.js";
@@ -79,24 +80,6 @@ router.post(
         sourceAddress,
       });
 
-      let account;
-      try {
-        account = await server.getAccount(sourceAddress as string);
-      } catch (err: unknown) {
-        const errMsg = formatError(err);
-        const { status, message } = classifySimError(errMsg);
-        logger.error("Failed to get account for partial release", {
-          traceId,
-          contractId,
-          index,
-          sourceAddress,
-          error: errMsg,
-          stack: err instanceof Error ? err.stack : undefined,
-        });
-        sendError(res, status, message);
-        return;
-      }
-
       const cacheKey = partialReleaseCacheKey(
         contractId as string,
         index as string,
@@ -105,24 +88,44 @@ router.post(
       );
 
       logger.debug("Checking partial-release cache", { traceId, contractId, index, cacheKey });
-      const cached = getFreshCachedBuildTx(partialReleaseCache, cacheKey);
-      if (cached !== undefined) {
-        logger.info("Partial-release XDR served from cache", {
-          traceId,
-          contractId,
-          index,
-          source: "cache",
-          xdrLength: cached.xdr.length,
-        });
-        sendSuccess(res, cached);
-        return;
-      }
+      let wasInFlight = false;
+      const payload = await cachedSingleFlight({
+        cache: partialReleaseCache,
+        inFlight: inFlightPartialReleaseRequests,
+        key: cacheKey,
+        isFresh: isFreshBuildTx,
+        log: (source) => {
+          if (source === "cache") {
+            const cached = partialReleaseCache.get<BuildTxPayload>(cacheKey);
+            logger.info("Partial-release XDR served from cache", {
+              traceId,
+              contractId,
+              index,
+              source: "cache",
+              xdrLength: cached?.xdr.length ?? 0,
+            });
+          } else if (source === "in-flight") {
+            wasInFlight = true;
+          }
+        },
+        produce: async () => {
+          let account;
+          try {
+            account = await server.getAccount(sourceAddress as string);
+          } catch (err: unknown) {
+            const errMsg = formatError(err);
+            const { status, message } = classifySimError(errMsg);
+            logger.error("Failed to get account for partial release", {
+              traceId,
+              contractId,
+              index,
+              sourceAddress,
+              error: errMsg,
+              stack: err instanceof Error ? err.stack : undefined,
+            });
+            throw { status, message };
+          }
 
-      let requestPromise = inFlightPartialReleaseRequests.get(cacheKey);
-      const servedFromInFlight = Boolean(requestPromise);
-
-      if (!requestPromise) {
-        requestPromise = (async (): Promise<BuildTxPayload> => {
           const contract = new Contract(contractId as string);
           const amountNum = BigInt(amount);
           const inclusionFee = await getInclusionFee(server);
@@ -170,37 +173,25 @@ router.post(
           };
           setCachedBuildTx(partialReleaseCache, cacheKey, payload, PARTIAL_RELEASE_CACHE_TTL);
           return payload;
-        })();
+        },
+      });
 
-        inFlightPartialReleaseRequests.set(cacheKey, requestPromise);
-      }
-
-      let payload: BuildTxPayload;
-      try {
-        payload = await requestPromise;
-      } catch (err: unknown) {
-        partialReleaseCache.del(cacheKey);
-        if (
-          typeof err === "object" &&
-          err !== null &&
-          "status" in err &&
-          "message" in err
-        ) {
-          const { status, message } = err as { status: number; message: string };
-          sendError(res, status, message);
-          return;
-        }
-        throw err;
-      } finally {
-        inFlightPartialReleaseRequests.delete(cacheKey);
-      }
-
-      if (servedFromInFlight) {
+      if (wasInFlight) {
         logger.info("Partial-release XDR served from in-flight cache", { contractId, index });
       }
 
       sendSuccess(res, payload);
     } catch (err: unknown) {
+      if (
+        typeof err === "object" &&
+        err !== null &&
+        "status" in err &&
+        "message" in err
+      ) {
+        const { status, message } = err as { status: number; message: string };
+        sendError(res, status, message);
+        return;
+      }
       const errMsg = formatError(err);
       // Structured, server-side-only error detail – the client receives a clean
       // 500 body with no internal stack trace leakage (#117).

@@ -226,7 +226,40 @@ const sorobanSymbolSchema = z
   .string()
   .regex(/^[A-Za-z0-9_]{1,32}$/, { message: "must be a Soroban symbol (A-Z, a-z, 0-9, _; up to 32)" });
 
-export const buildTxArgSchema: z.ZodTypeAny = z.discriminatedUnion("type", [
+export const BUILD_TX_MAX_VEC_ITEMS = 100;
+export const BUILD_TX_MAX_STRUCT_FIELDS = 16;
+export const BUILD_TX_MAX_DEPTH = 4;
+
+/** Computes the nesting depth of a build-tx contract argument (#927). */
+export function getBuildTxArgDepth(arg: unknown): number {
+  if (!arg || typeof arg !== "object") return 0;
+  const typed = arg as { type?: unknown; value?: unknown };
+  if (typed.type === "vec" && Array.isArray(typed.value)) {
+    if (typed.value.length === 0) return 1;
+    let maxChild = 0;
+    for (const item of typed.value) {
+      maxChild = Math.max(maxChild, getBuildTxArgDepth(item));
+    }
+    return 1 + maxChild;
+  }
+  if (
+    typed.type === "struct" &&
+    typed.value &&
+    typeof typed.value === "object" &&
+    !Array.isArray(typed.value)
+  ) {
+    const values = Object.values(typed.value as Record<string, unknown>);
+    if (values.length === 0) return 1;
+    let maxChild = 0;
+    for (const item of values) {
+      maxChild = Math.max(maxChild, getBuildTxArgDepth(item));
+    }
+    return 1 + maxChild;
+  }
+  return 1;
+}
+
+const rawBuildTxArgSchema: z.ZodTypeAny = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("address"),
     value: z
@@ -249,7 +282,9 @@ export const buildTxArgSchema: z.ZodTypeAny = z.discriminatedUnion("type", [
   }),
   z.object({
     type: z.literal("vec"),
-    value: z.array(z.lazy(() => buildTxArgSchema)),
+    value: z
+      .array(z.lazy(() => buildTxArgSchema))
+      .max(BUILD_TX_MAX_VEC_ITEMS, `vec cannot exceed ${BUILD_TX_MAX_VEC_ITEMS} items`),
   }),
   // A #[contracttype] struct, e.g. the escrow's EscrowSettings: field name ->
   // argument. Encoded as a map with symbol keys in sorted order.
@@ -259,11 +294,24 @@ export const buildTxArgSchema: z.ZodTypeAny = z.discriminatedUnion("type", [
       .record(sorobanSymbolSchema, z.lazy(() => buildTxArgSchema))
       .refine((fields) => Object.keys(fields).length > 0, {
         message: "struct needs at least one field",
+      })
+      .refine((fields) => Object.keys(fields).length <= BUILD_TX_MAX_STRUCT_FIELDS, {
+        message: `struct cannot exceed ${BUILD_TX_MAX_STRUCT_FIELDS} fields`,
       }),
   }),
   // A unit variant of a #[contracttype] enum, e.g. FundingMode::Upfront.
   z.object({ type: z.literal("enum"), value: sorobanSymbolSchema }),
 ]);
+
+export const buildTxArgSchema: z.ZodTypeAny = rawBuildTxArgSchema.superRefine((arg, ctx) => {
+  const depth = getBuildTxArgDepth(arg);
+  if (depth > BUILD_TX_MAX_DEPTH) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `Argument nesting depth ${depth} exceeds maximum depth of ${BUILD_TX_MAX_DEPTH}`,
+    });
+  }
+});
 
 /** POST /build-tx body schema validation */
 export const buildTxBodySchema = z.object({

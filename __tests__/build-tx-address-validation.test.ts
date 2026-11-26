@@ -7,6 +7,7 @@ const mockPrepareTransaction = jest.fn<() => Promise<unknown>>();
 
 jest.unstable_mockModule("../src/middleware/rateLimiter.js", () => ({
   strictLimiter: (_req: any, _res: any, next: any) => next(),
+  walletLookupLimiter: (_req: any, _res: any, next: any) => next(),
   generalLimiter: (_req: any, _res: any, next: any) => next(),
 }));
 
@@ -93,7 +94,7 @@ describe("POST /api/jobs/build-tx – Stellar address validation", () => {
   });
 
   it("rejects a missing address field", async () => {
-    const { sourceAddress, ...rest } = VALID_BODY;
+    const { sourceAddress: _sourceAddress, ...rest } = VALID_BODY;
     const res = await request(buildApp())
       .post("/api/jobs/build-tx")
       .send(rest)

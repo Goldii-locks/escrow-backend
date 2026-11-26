@@ -24,13 +24,14 @@ import {
   getDb,
   getIndexerStateValue,
   setIndexerStateValue,
+  pruneOldAuditLogs,
   type EventRow,
 } from "./db.js";
 import {
   isVacuumLocked,
   pruneOldEvents,
-  runVacuum,
 } from "./sqlite_vacuum_cleaner.js";
+import type Database from "better-sqlite3";
 import { RpcPollerClient, type RpcPollerClientOptions } from "./rpc-poller-client.js";
 import {
   createFailoverServer,
@@ -41,7 +42,7 @@ import {
   IndexerRunnerFailureMonitor,
   adjustIndexerRunnerPollInterval,
 } from "./indexer_runner.js";
-import { deliverWebhooks } from "./webhook-delivery.js";
+import { deliverWebhooks, pruneWebhookDeliveries } from "./webhook-delivery.js";
 import { buildGetEventsRequest } from "./event_type_filter.js";
 import { invalidateJobStateForEvents } from "./job-state-cache.js";
 import { invalidateContractCaches } from "../routes/jobs/caches.js";
@@ -49,6 +50,7 @@ import { formatError } from "../utils/format-error.js";
 import { config } from "../config.js";
 import { rpcAllowHttp } from "../utils/rpc-allow-http.js";
 import logger from "../utils/logger.js";
+import { captureError } from "../utils/error-reporting.js";
 import { stringifyWithBigInt } from "../utils/safe-json.js";
 
 const RPC_URL =
@@ -129,6 +131,11 @@ export function getActiveRpcNodeUrl(): string {
   return activeNodeUrl;
 }
 
+/** The active Server instance used by the indexer poller (#926). */
+export function getActiveServer(): Server {
+  return rpcClient.underlyingServer as Server;
+}
+
 // ---------------------------------------------------------------------------
 // Failure and stall tracking for the poll loop (#253, #271)
 // ---------------------------------------------------------------------------
@@ -150,8 +157,18 @@ export function getLastSuccessfulPollAt(): number | null {
   return failureMonitor.getLastSuccessfulAt();
 }
 
+// #893: ledger lag seen by the last *successful* cycle. Derived from the chain
+// head the poll already fetched, so readiness needs no extra RPC call.
+let lastObservedLedgerLag: number | null = null;
+
+/** Chain head minus the furthest ledger actually stored last poll. */
+export function getLastObservedLedgerLag(): number | null {
+  return lastObservedLedgerLag;
+}
+
 export function resetFailureState(): void {
   failureMonitor.reset();
+  lastObservedLedgerLag = null;
   resetPollDiagnosticsThrottle();
 }
 
@@ -207,16 +224,31 @@ export function toEventTimestamp(ledgerClosedAt: unknown): number | null {
   return Math.floor(millis / 1000);
 }
 
+// NOTE: topics_json is NULL for rows indexed before migration 20. Historical
+// topics are unrecoverable from the database — their XDR was never stored.
+// To recover them, re-import events through POST /api/admin/backfill.
 /** Map an RPC event notification onto the row shape `events` stores. */
 function toEventRow(event: Api.EventResponse, fallbackContractId: string): EventRow {
+  const decodedType = scValToNative(event.topic[0]);
+  if (typeof decodedType !== "string") {
+    throw new Error(
+      `event topic[0] decoded to ${typeof decodedType} (expected string); event_id=${event.id ?? "unknown"}`,
+    );
+  }
+  const extraTopics = event.topic.slice(1);
+  const topicsJson =
+    extraTopics.length > 0
+      ? stringifyWithBigInt(extraTopics.map((t) => scValToNative(t)))
+      : null;
   return {
     contractId: event.contractId?.contractId() ?? fallbackContractId,
-    eventType: scValToNative(event.topic[0]) as string,
+    eventType: decodedType,
     ledgerSequence: event.ledger,
     timestamp: toEventTimestamp(event.ledgerClosedAt),
     // i128/u64 event fields decode to bigint; store them as decimal strings
     // like the API does (#719).
     dataJson: stringifyWithBigInt(scValToNative(event.value)),
+    topicsJson,
     eventId:
       typeof event.id === "string" && event.id
         ? event.id
@@ -540,8 +572,9 @@ export async function fetchHistoricalEvents(
   }
 
   let contractIds: string[] = contractId ? [contractId] : getActiveContractIds();
-  if (contractIds.length === 0 && process.env.CONTRACT_ID) {
-    contractIds = [process.env.CONTRACT_ID];
+  const fallbackContractId = config.contractId;
+  if (contractIds.length === 0 && fallbackContractId) {
+    contractIds = [fallbackContractId];
   }
 
   let eventsFound = 0;
@@ -767,6 +800,11 @@ export function resetWebhookDeliveryQueueForTests(): void {
   webhookDeliveryTail = Promise.resolve();
 }
 
+/** Await all queued webhook deliveries (used by tests). */
+export function flushWebhookDeliveryQueueForTests(): Promise<void> {
+  return webhookDeliveryTail;
+}
+
 /**
  * Queue delivery of `[startLedger, endLedger]` behind every earlier range.
  * A failed run is logged and does not stall later ranges. The returned
@@ -775,9 +813,10 @@ export function resetWebhookDeliveryQueueForTests(): void {
 export function enqueueWebhookDelivery(
   startLedger: number,
   endLedger: number,
+  contractIds?: string[],
 ): Promise<void> {
   const run = webhookDeliveryTail
-    .then(() => deliverWebhooks(startLedger, endLedger))
+    .then(() => deliverWebhooks(startLedger, endLedger, contractIds))
     .then(
       () => undefined,
       (err) => {
@@ -785,6 +824,7 @@ export function enqueueWebhookDelivery(
           error: formatError(err),
           startLedger,
           endLedger,
+          contractIds,
         });
       },
     );
@@ -826,7 +866,7 @@ export function extractOldestLedger(source: unknown): number | undefined {
       if (typeof v === "number" && Number.isInteger(v) && v > 0) return v;
       if (typeof v === "string" && /^\d+$/.test(v)) return parseInt(v, 10);
     }
-    const nested = (obj as any).data ?? (obj as any).response;
+    const nested = (obj as Record<string, unknown>).data ?? (obj as Record<string, unknown>).response;
     if (nested && nested !== source) {
       const fromNested = extractOldestLedger(nested);
       if (fromNested !== undefined) return fromNested;
@@ -908,7 +948,7 @@ export async function pollEvents(): Promise<boolean> {
     // without a DB seed step, and stays indexed when FACTORY_CONTRACT_ID is
     // added alongside it. Only register it when the DB has never seen it, so a
     // contract an admin deactivated stays deactivated.
-    const legacyContractId = process.env.CONTRACT_ID;
+    const legacyContractId = config.contractId;
     if (
       legacyContractId &&
       !getAllContracts().some((c) => c.contract_id === legacyContractId)
@@ -950,6 +990,13 @@ export async function pollEvents(): Promise<boolean> {
       groups.set(lastLedgerSequence, group);
     }
 
+    // #893: start with the lag at each group's pointer (covers caught-up and
+    // skipped groups), then keep the worst lag left by page limits/clamping.
+    let observedLedgerLag = 0;
+    for (const pointer of groups.keys()) {
+      observedLedgerLag = Math.max(observedLedgerLag, currentLedger - pointer);
+    }
+
     let totalEvents = 0;
     // Webhooks must cover the earliest ledger any group fetched from, so a
     // catching-up contract's backfilled events are delivered too.
@@ -964,10 +1011,17 @@ export async function pollEvents(): Promise<boolean> {
     );
     const pageLimit = 100;
 
+    const polledGroupDeliveries: Array<{
+      startLedger: number;
+      endLedger: number;
+      contractIds: string[];
+    }> = [];
+
     for (const [pointer, groupContractIds] of groups) {
       if (currentLedger <= pointer) continue;
       anyGroupPolled = true;
 
+      const activeGroupContracts = [...groupContractIds];
       let startLedger = pointer + 1;
       minStartLedger = Math.min(minStartLedger, startLedger);
 
@@ -985,7 +1039,7 @@ export async function pollEvents(): Promise<boolean> {
       const fetchPageRetentionAware = async (
         pageStart: number,
         cursorValue: string | undefined,
-      ): Promise<any> => {
+      ): Promise<Api.GetEventsResponse> => {
         try {
           // All RPC calls share RpcPollerClient's single retry policy, which
           // backs off on timeouts, resets, 429s (honouring Retry-After) and
@@ -1040,7 +1094,7 @@ export async function pollEvents(): Promise<boolean> {
         const events = await fetchPageRetentionAware(startLedger, cursor);
         ensureCurrentCycle();
 
-        const pageEvents: any[] = (events as any).events ?? [];
+        const pageEvents: Api.EventResponse[] = events.events ?? [];
         // Build the batch to be written atomically (#84)
         // Decode per event so one bad event cannot block the page (#658).
         const batch: EventRow[] = decodeEventsIsolated(pageEvents, groupContractIds[0]);
@@ -1072,6 +1126,9 @@ export async function pollEvents(): Promise<boolean> {
             ledgerSequence: ev.ledgerSequence,
           });
           registerContract(childContractId, "escrow_child", ev.ledgerSequence);
+          if (!activeGroupContracts.includes(childContractId)) {
+            activeGroupContracts.push(childContractId);
+          }
 
           try {
             const childEvents = await rpcClient.getEvents(
@@ -1082,7 +1139,7 @@ export async function pollEvents(): Promise<boolean> {
               }),
             );
             ensureCurrentCycle();
-            const childPage: any[] = (childEvents as any).events ?? [];
+            const childPage: Api.EventResponse[] = childEvents.events ?? [];
             const childBatch: EventRow[] = decodeEventsIsolated(
               childPage,
               childContractId as string,
@@ -1095,7 +1152,7 @@ export async function pollEvents(): Promise<boolean> {
               childPage.length < pageLimit
                 ? currentLedger
                 : Math.max(
-                    ...childPage.map((e: any) => Number(e.ledger) || ev.ledgerSequence)
+                    ...childPage.map((e: Api.EventResponse) => Number(e.ledger) || ev.ledgerSequence)
                   );
             updateContractPointer(childContractId, childLedger);
           } catch (childErr) {
@@ -1109,9 +1166,9 @@ export async function pollEvents(): Promise<boolean> {
 
         const pageMaxLedger =
           pageEvents.length > 0
-            ? Math.max(...pageEvents.map((e: any) => Number(e.ledger) || startLedger))
+            ? Math.max(...pageEvents.map((e: Api.EventResponse) => Number(e.ledger) || startLedger))
             : lastStoredLedger;
-        const nextCursor = (events as any)?.cursor as string | undefined;
+        const nextCursor = events.cursor as string | undefined;
         const isLastPage =
           pageEvents.length < pageLimit || !nextCursor;
 
@@ -1119,7 +1176,7 @@ export async function pollEvents(): Promise<boolean> {
         // processed, or to the RPC's latest ledger once the final page ran
         // short and there is nothing left to collect.
         const newLedger = isLastPage
-          ? ((events as any)?.latestLedger ?? currentLedger)
+          ? (events.latestLedger ?? currentLedger)
           : pageMaxLedger;
 
         // Persist the page and advance both pointers atomically per page.
@@ -1135,8 +1192,17 @@ export async function pollEvents(): Promise<boolean> {
         totalEvents += pageEvents.length + childEventCount;
         diagnosticsBatch.push(...batch);
         lastStoredLedger = newLedger;
+        observedLedgerLag = Math.max(observedLedgerLag, currentLedger - lastStoredLedger);
         if (isLastPage) break;
         cursor = nextCursor;
+      }
+
+      if (lastStoredLedger >= startLedger) {
+        polledGroupDeliveries.push({
+          startLedger,
+          endLedger: lastStoredLedger,
+          contractIds: activeGroupContracts,
+        });
       }
     }
 
@@ -1144,6 +1210,7 @@ export async function pollEvents(): Promise<boolean> {
     ensureCurrentCycle();
     const totalElapsed = performance.now() - pollStart;
     failureMonitor.recordSuccess();
+    lastObservedLedgerLag = Math.max(0, observedLedgerLag);
     await recordActiveNodeSuccess();
 
     // --- Dynamic poller throttling ---
@@ -1169,7 +1236,18 @@ export async function pollEvents(): Promise<boolean> {
 
       // Not awaited: polling keeps its cadence, but deliveries stay in ledger
       // order behind any slower earlier range (#682).
-      void enqueueWebhookDelivery(minStartLedger, currentLedger);
+      // Deliver webhooks scoped per polled contract group (#885).
+      if (polledGroupDeliveries.length > 0) {
+        for (const delivery of polledGroupDeliveries) {
+          void enqueueWebhookDelivery(
+            delivery.startLedger,
+            delivery.endLedger,
+            delivery.contractIds,
+          );
+        }
+      } else if (Number.isFinite(minStartLedger)) {
+        void enqueueWebhookDelivery(minStartLedger, currentLedger);
+      }
     }
 
     if (!anyGroupPolled) {
@@ -1205,6 +1283,13 @@ export async function pollEvents(): Promise<boolean> {
         consecutiveFailures: failureMonitor.getConsecutiveFailures(),
         threshold: failureMonitor.getFailureThreshold(),
         lastSuccessAt: failureMonitor.getLastSuccessfulAt(),
+      });
+      captureError(err, {
+        tags: {
+          source: "poller",
+          operation: "poll_events",
+          consecutiveFailures: failureMonitor.getConsecutiveFailures(),
+        },
       });
     }
 
@@ -1261,7 +1346,18 @@ export function withPollCycleWatchdog<T>(
  * return, but a defensive catch keeps the loop alive even if a future code
  * path throws outside that contract (or rejects the interval update).
  */
-async function runPollCycle(): Promise<void> {
+/** The cycle currently running, so stopPoller() can wait for it (#870). */
+let activeCycle: Promise<void> | null = null;
+
+function runPollCycle(): Promise<void> {
+  const cycle = runPollCycleUnsafe();
+  activeCycle = cycle;
+  return cycle.finally(() => {
+    if (activeCycle === cycle) activeCycle = null;
+  });
+}
+
+async function runPollCycleUnsafe(): Promise<void> {
   try {
     // pollEvents() adjusts the interval itself, so the logged and scheduled
     // delays match (#639). The watchdog bounds a hung RPC that never settles.
@@ -1278,6 +1374,15 @@ async function runPollCycle(): Promise<void> {
       error: formatError(err),
       consecutiveFailures,
     });
+    if (failureMonitor.getConsecutiveFailures() >= failureMonitor.getFailureThreshold()) {
+      captureError(err, {
+        tags: {
+          source: "poller",
+          operation: "run_poll_cycle",
+          consecutiveFailures,
+        },
+      });
+    }
   }
 }
 
@@ -1289,6 +1394,8 @@ async function pollLoop() {
   // A pending poll must never keep a process or Jest worker alive (#951).
   pollerTimeout.unref?.();
 }
+
+let startupCycle: Promise<void> | null = null;
 
 export function startPoller() {
   if (pollerRunning) return;
@@ -1312,6 +1419,10 @@ export function startPoller() {
         pollerRunning ? runPollCycle() : undefined,
       )
     : runPollCycle();
+  startupCycle = firstCycle.then(
+    () => undefined,
+    () => undefined,
+  );
   void firstCycle
     .catch((err) => {
       logger.error("Initial poll cycle failed", {
@@ -1329,7 +1440,12 @@ export function startPoller() {
   startMaintenanceScheduler();
 }
 
-export function stopPoller() {
+/**
+ * Stop scheduling new cycles. The returned promise resolves once the in-flight
+ * cycle and the event-insert and webhook-delivery queues have settled, so
+ * shutdown can close SQLite safely afterwards (#870).
+ */
+export async function stopPoller(): Promise<void> {
   pollerRunning = false;
   if (pollerTimeout) {
     clearTimeout(pollerTimeout);
@@ -1338,6 +1454,13 @@ export function stopPoller() {
   resetPollerThrottleState();
   currentPollIntervalMs = POLL_INTERVAL_MIN_MS;
   stopMaintenanceScheduler();
+
+  await startupCycle;
+  await activeCycle;
+  startupCycle = null;
+  // Writes and deliveries enqueued by the finished cycle.
+  await eventInsertTail;
+  await webhookDeliveryTail;
 }
 
 // ---------------------------------------------------------------------------
@@ -1352,6 +1475,39 @@ export const DEFAULT_DB_MAINTENANCE_INTERVAL_MS = 21_600_000;
 
 let maintenanceTimeout: NodeJS.Timeout | null = null;
 
+/** Pages reclaimed per `PRAGMA incremental_vacuum` step. */
+const INCREMENTAL_VACUUM_PAGES_PER_STEP = 1_000;
+/** Upper bound on incremental-vacuum steps per maintenance cycle. */
+const INCREMENTAL_VACUUM_MAX_STEPS = 1_000;
+
+/**
+ * Reclaim free pages with `PRAGMA incremental_vacuum` in small steps, yielding
+ * to the event loop between steps so HTTP, the poller and the webhook queue
+ * keep running (#871). A full `VACUUM` rewrites the whole file synchronously
+ * and is never run from the maintenance cycle. On databases created before
+ * `auto_vacuum = INCREMENTAL` was enabled this is a no-op.
+ */
+function runIncrementalVacuum(db: Database.Database, step = 0, startedAt = Date.now()): void {
+  try {
+    const free = db.pragma("freelist_count", { simple: true }) as number;
+    if (free <= 0 || step >= INCREMENTAL_VACUUM_MAX_STEPS) {
+      logger.info("SQLite maintenance: incremental vacuum complete", {
+        steps: step,
+        remainingFreePages: free,
+        durationMs: Date.now() - startedAt,
+      });
+      return;
+    }
+    db.pragma(`incremental_vacuum(${INCREMENTAL_VACUUM_PAGES_PER_STEP})`);
+  } catch (err) {
+    logger.error("SQLite maintenance: incremental vacuum failed", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return;
+  }
+  setImmediate(() => runIncrementalVacuum(db, step + 1, startedAt));
+}
+
 /**
  * Execute one SQLite maintenance cycle:
  *   1. Skip (reschedule) when `isVacuumLocked()` is true so we never overlap
@@ -1359,8 +1515,12 @@ let maintenanceTimeout: NodeJS.Timeout | null = null;
  *   2. Run `PRAGMA wal_checkpoint(TRUNCATE)` to flush the WAL file and free
  *      disk space accumulated since the last checkpoint.
  *   3. Run `PRAGMA optimize` to update internal query-planner statistics.
- *   4. If `EVENT_RETENTION_DAYS` is explicitly set in the environment, prune
- *      events older than that many days and then run a full `VACUUM`.
+ *   4. Prune delivered webhook_deliveries rows older than
+ *      `WEBHOOK_DELIVERY_RETENTION_DAYS` (default 7) and dead rows older than
+ *      90 days; retryable `failed` rows are kept (#940).
+ *   5. If `EVENT_RETENTION_DAYS` is explicitly set in the environment, prune
+ *      events older than that many days and then reclaim space with a
+ *      stepped `PRAGMA incremental_vacuum` (never a full `VACUUM`, #871).
  *
  * Errors are caught and logged so a maintenance failure never crashes the
  * poller.
@@ -1374,14 +1534,74 @@ export function runMaintenanceCycle(): void {
   const db = getDb();
 
   try {
+    const startedAt = Date.now();
     db.pragma("wal_checkpoint(TRUNCATE)");
     db.pragma("optimize");
-    logger.info("SQLite maintenance completed", { operation: "wal_checkpoint+optimize" });
+    logger.info("SQLite maintenance completed", {
+      operation: "wal_checkpoint+optimize",
+      durationMs: Date.now() - startedAt,
+    });
   } catch (err) {
     logger.error("SQLite maintenance failed (wal_checkpoint/optimize)", {
       error: err instanceof Error ? err.message : String(err),
     });
     return;
+  }
+
+  try {
+    const pruned = pruneWebhookDeliveries(config.webhookDeliveryRetentionDays);
+    logger.info("SQLite maintenance: pruned webhook deliveries", pruned);
+  } catch (err) {
+    logger.error("SQLite maintenance: webhook delivery prune failed", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  // Reconciliation results retention (#925). Runs unconditionally; default 14 days.
+  try {
+    const retentionDays = config.reconciliationRetentionDays;
+    const cutoff = Math.floor(Date.now() / 1000) - retentionDays * 86400;
+    const result = getDb()
+      .prepare("DELETE FROM reconciliation_results WHERE checked_at < ?")
+      .run(cutoff);
+    if (result.changes > 0) {
+      logger.info("SQLite maintenance: pruned reconciliation results", {
+        retentionDays,
+        deleted: result.changes,
+      });
+    }
+  } catch (err) {
+    logger.error("SQLite maintenance: reconciliation retention pruning failed", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  // Prune audit log entries older than one year (#928)
+  try {
+    const prunedAuditLogs = pruneOldAuditLogs(db);
+    if (prunedAuditLogs > 0) {
+      logger.info("SQLite maintenance: pruned old audit logs", { pruned: prunedAuditLogs });
+    }
+  } catch (err) {
+    logger.error("SQLite maintenance: audit log prune failed", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  // Expired job draft pruning (#881) – runs independently of EVENT_RETENTION_DAYS.
+  try {
+    const nowIso = new Date().toISOString();
+    const result = db
+      .prepare("DELETE FROM job_drafts WHERE expires_at IS NOT NULL AND expires_at < ?")
+      .run(nowIso);
+    logger.info("SQLite maintenance: deleted expired job drafts", {
+      count: result.changes,
+      cutoff: nowIso,
+    });
+  } catch (err) {
+    logger.error("SQLite maintenance: failed to delete expired job drafts", {
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
 
   // Retention pruning – only when EVENT_RETENTION_DAYS is explicitly configured.
@@ -1395,12 +1615,16 @@ export function runMaintenanceCycle(): void {
       return;
     }
     try {
+      const startedAt = Date.now();
       const pruned = pruneOldEvents(db, retentionDays);
-      logger.info("SQLite maintenance: pruned old events", { retentionDays, pruned });
-      runVacuum(db);
-      logger.info("SQLite maintenance: VACUUM complete after retention prune");
+      logger.info("SQLite maintenance: pruned old events", {
+        retentionDays,
+        pruned,
+        durationMs: Date.now() - startedAt,
+      });
+      runIncrementalVacuum(db);
     } catch (err) {
-      logger.error("SQLite maintenance: retention prune/vacuum failed", {
+      logger.error("SQLite maintenance: retention prune failed", {
         error: err instanceof Error ? err.message : String(err),
         retentionDays,
       });
@@ -1408,43 +1632,38 @@ export function runMaintenanceCycle(): void {
   }
 }
 
-function scheduleNextMaintenance(intervalMs: number): void {
+function readMaintenanceIntervalMs(): number {
+  const ms = parseInt(
+    process.env.DB_MAINTENANCE_INTERVAL_MS ?? String(DEFAULT_DB_MAINTENANCE_INTERVAL_MS),
+    10,
+  );
+  return Number.isFinite(ms) && ms > 0 ? ms : DEFAULT_DB_MAINTENANCE_INTERVAL_MS;
+}
+
+function scheduleNextMaintenance(delayMs: number): void {
   maintenanceTimeout = setTimeout(() => {
     runMaintenanceCycle();
-    const next = parseInt(
-      process.env.DB_MAINTENANCE_INTERVAL_MS ?? String(DEFAULT_DB_MAINTENANCE_INTERVAL_MS),
-      10,
-    );
-    scheduleNextMaintenance(
-      Number.isFinite(next) && next > 0 ? next : DEFAULT_DB_MAINTENANCE_INTERVAL_MS,
-    );
-  }, intervalMs);
+    scheduleNextMaintenance(readMaintenanceIntervalMs());
+  }, delayMs);
   // The maintenance interval is hours; it must not hold a worker open (#951).
   maintenanceTimeout.unref?.();
 }
 
-/** Start the maintenance scheduler and run the first cycle immediately. */
+/**
+ * Start the maintenance scheduler. Nothing runs at startup (#871): the first
+ * cycle fires after one interval plus up to 10% jitter, so restarts and
+ * deploys don't all trigger maintenance at once.
+ */
 export function startMaintenanceScheduler(): void {
   if (maintenanceTimeout !== null) return; // already running
 
-  // Run once immediately at startup, then on the configured interval.
-  runMaintenanceCycle();
-
-  const intervalMs = parseInt(
-    process.env.DB_MAINTENANCE_INTERVAL_MS ?? String(DEFAULT_DB_MAINTENANCE_INTERVAL_MS),
-    10,
-  );
-  scheduleNextMaintenance(
-    Number.isFinite(intervalMs) && intervalMs > 0
-      ? intervalMs
-      : DEFAULT_DB_MAINTENANCE_INTERVAL_MS,
-  );
+  const intervalMs = readMaintenanceIntervalMs();
+  const jitterMs = Math.floor(Math.random() * intervalMs * 0.1);
+  scheduleNextMaintenance(intervalMs + jitterMs);
 
   logger.info("SQLite maintenance scheduler started", {
-    intervalMs:
-      Number.isFinite(intervalMs) && intervalMs > 0
-        ? intervalMs
-        : DEFAULT_DB_MAINTENANCE_INTERVAL_MS,
+    intervalMs,
+    firstRunInMs: intervalMs + jitterMs,
     retentionPruningEnabled: process.env.EVENT_RETENTION_DAYS !== undefined,
   });
 }
