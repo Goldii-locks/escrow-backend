@@ -9,6 +9,7 @@ const mockPrepareTransaction = jest.fn<() => Promise<unknown>>();
 
 jest.unstable_mockModule("../src/middleware/rateLimiter.js", () => ({
   strictLimiter: (_req: any, _res: any, next: any) => next(),
+  walletLookupLimiter: (_req: any, _res: any, next: any) => next(),
   generalLimiter: (_req: any, _res: any, next: any) => next(),
 }));
 

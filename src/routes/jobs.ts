@@ -10,6 +10,7 @@ import partialReleaseRouter from "./jobs/partial-release.js";
 import timeRemainingRouter from "./jobs/time-remaining.js";
 import claimAutoReleaseRouter from "./jobs/claim-auto-release.js";
 import submitRouter from "./jobs/submit.js";
+import txStatusRouter from "./jobs/tx-status.js";
 
 const router = Router();
 
@@ -22,6 +23,7 @@ router.use(historyCsvRouter);
 router.use(historyRouter);
 router.use(whitelistRouter);
 router.use(buildTxRouter);
+router.use(txStatusRouter);
 router.use(getJobRouter);
 router.use(partialReleaseRouter);
 router.use(timeRemainingRouter);
@@ -44,6 +46,8 @@ export {
   resetPartialReleaseCache,
   feePreviewCache,
   resetFeePreviewCache,
+  txStatusCache,
+  resetTxStatusCache,
   UNSIGNED_TX_TIMEOUT_S,
   UNSIGNED_TX_MIN_REMAINING_S,
 } from "./jobs/caches.js";

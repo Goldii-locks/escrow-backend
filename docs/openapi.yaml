@@ -131,10 +131,26 @@ components:
           type: string
         amount:
           type: string
+        releasedAmount:
+          type: string
+          description: Amount already released (stroops), useful for PartiallyReleased milestones.
         status:
           type: string
         approved:
           type: boolean
+        deliveredAt:
+          type: integer
+          description: Ledger timestamp (seconds) of delivery; 0 when not delivered.
+        funded:
+          type: boolean
+        specHash:
+          type: string
+          nullable: true
+          description: Committed spec hash as lowercase hex; null when unset (all zeroes).
+        deliverable:
+          type: string
+          nullable: true
+          description: Deliverable hash as lowercase hex; null when unset (all zeroes).
 
     JobState:
       type: object
@@ -155,6 +171,9 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/JobMilestone'
+        autoReleaseSeconds:
+          type: integer
+          description: Seconds after deliveredAt before a milestone can be auto-released.
 
     JobDraft:
       type: object
@@ -840,6 +859,62 @@ paths:
           description: Invalid transaction payload
         '429':
           description: Rate limit exceeded (SUBMIT_RATE_MAX)
+
+  /api/jobs/tx/{hash}:
+    get:
+      summary: Get submitted transaction status
+      description: |
+        Looks up a transaction submitted via /api/jobs/submit. Poll until the
+        status is SUCCESS or FAILED; NOT_FOUND means it is still pending (or
+        unknown). Terminal states are cached for 60 seconds.
+
+        Polling example:
+        ```js
+        let data;
+        do {
+          await new Promise((r) => setTimeout(r, 2000));
+          ({ data } = await (await fetch(`/api/jobs/tx/${hash}`)).json());
+        } while (data.status === "NOT_FOUND");
+        ```
+      parameters:
+        - name: hash
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^[0-9a-fA-F]{64}$'
+      responses:
+        '200':
+          description: Transaction status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      status:
+                        type: string
+                        enum: [NOT_FOUND, SUCCESS, FAILED]
+                      ledger:
+                        type: integer
+                        nullable: true
+                      createdAt:
+                        type: integer
+                        nullable: true
+                      resultCode:
+                        type: string
+                        nullable: true
+                      error:
+                        type: string
+                        description: Client-safe failure reason, only for FAILED.
+        '400':
+          description: Invalid transaction hash
+        '429':
+          description: Rate limit exceeded (JOB_CONTRACT_RATE_MAX)
 
   /api/admin/indexer-status:
     get:

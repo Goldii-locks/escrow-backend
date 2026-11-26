@@ -44,6 +44,16 @@ export function resetSubmitCache(): void {
   inFlightSubmitRequests.clear();
 }
 
+/** Terminal transaction states (SUCCESS / FAILED) never change (#865). */
+export const TX_STATUS_CACHE_TTL = 60;
+export const txStatusCache = new NodeCache({
+  stdTTL: TX_STATUS_CACHE_TTL,
+  useClones: false,
+});
+export function resetTxStatusCache(): void {
+  txStatusCache.flushAll();
+}
+
 export const BUILD_TX_CACHE_TTL = config.buildTxCacheTtlS;
 export const buildTxCache = new NodeCache({
   stdTTL: BUILD_TX_CACHE_TTL,

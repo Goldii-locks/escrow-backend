@@ -11,6 +11,7 @@ import {
   randomUUID,
   NETWORK_PASSPHRASE,
   server,
+  maskAddress,
 } from "./shared.js";
 import { rejectedRequestLogMeta, xdrLogMeta } from "../../utils/log-redaction.js";
 
@@ -50,7 +51,7 @@ router.post(
     logger.info("Submit transaction request received", {
       traceId,
       ...xdrLogMeta(signedXdr),
-      ...(sourceAddress && { sourceAddress }),
+      ...(sourceAddress && { sourceAddress: maskAddress(sourceAddress) }),
     });
 
     try {

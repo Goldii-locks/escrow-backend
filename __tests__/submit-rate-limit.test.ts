@@ -34,6 +34,7 @@ jest.unstable_mockModule("../src/utils/logger.js", () => ({
 
 jest.unstable_mockModule("../src/middleware/rateLimiter.js", () => ({
   strictLimiter: (_req: any, _res: any, next: any) => next(),
+  walletLookupLimiter: (_req: any, _res: any, next: any) => next(),
   generalLimiter: (_req: any, _res: any, next: any) => next(),
 }));
 

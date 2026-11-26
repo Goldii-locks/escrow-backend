@@ -78,22 +78,8 @@ import logger from "../../utils/logger.js";
 import { isValidStellarContractId } from "../../utils/stellar.js";
 import { randomUUID } from "crypto";
 
-/**
- * Truncate a Stellar address to `GABC…WXYZ` for info-level logs.
- *
- * Full addresses must never appear at `info` (the production log level)
- * because the HTTP request logger records the caller's IP on every request,
- * so logging the full address alongside it builds a durable IP↔wallet map.
- * Four leading + four trailing characters are enough for same-session
- * correlation without exposing the complete key.
- *
- * Pass the raw value to `logger.debug` wherever the full address is needed
- * for post-incident debugging.
- */
-export function maskAddress(address: string | undefined | null): string {
-  if (!address || address.length < 10) return address ?? "";
-  return `${address.slice(0, 4)}\u2026${address.slice(-4)}`;
-}
+// maskAddress lives in utils/log-redaction.ts (#866); re-exported for routes.
+export { maskAddress } from "../../utils/log-redaction.js";
 
 export function getContractId(): string {
   return config.contractId;
@@ -185,13 +171,52 @@ export const parseJobFromResult = (result: { result?: { retval?: unknown } }, co
     arbiter: String(jobRecord.arbiter),
     token: String(jobRecord.token),
     funded: convertScValToNativeStrings(jobRecord.funded),
-    milestones: (jobRecord.milestones as Record<string, unknown>[]).map((m, i) => ({
+    milestones: (jobRecord.milestones as Record<string, unknown>[]).map((m, i): ParsedMilestone => ({
       index: i,
       amount: String(m.amount),
+      releasedAmount: String(m.released_amount ?? 0),
       status: decodeStatus(m.status),
+      deliveredAt: Number(m.delivered_at ?? 0),
+      funded: Boolean(m.funded),
+      specHash: hashToHex(m.spec_hash),
+      deliverable: hashToHex(m.deliverable),
     })),
+    autoReleaseSeconds: Number(job.auto_release_seconds ?? 0),
   };
 };
+
+/** One milestone as returned by GET /api/jobs/:contractId (#863). */
+export interface ParsedMilestone {
+  index: number;
+  amount: string;
+  releasedAmount: string;
+  status: string;
+  /** Ledger timestamp (seconds) of delivery; 0 when not delivered. */
+  deliveredAt: number;
+  funded: boolean;
+  /** Lowercase hex, or null when unset / all zeroes. */
+  specHash: string | null;
+  deliverable: string | null;
+}
+
+/** Shape cached by the job-state cache and returned by get-job (#863). */
+export type ParsedJob = NonNullable<ReturnType<typeof parseJobFromResult>>;
+
+/**
+ * Encode a decoded BytesN value as lowercase hex. Missing values and
+ * all-zero hashes (the contract's "unset" sentinel) become null (#863).
+ */
+export function hashToHex(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  const bytes =
+    value instanceof Uint8Array
+      ? value
+      : typeof value === "string" && /^[0-9a-fA-F]*$/.test(value)
+        ? Buffer.from(value, "hex")
+        : null;
+  if (!bytes || bytes.length === 0 || bytes.every((b) => b === 0)) return null;
+  return Buffer.from(bytes).toString("hex");
+}
 
 /**
  * Convert a value produced by `scValToNative` into a JSON-safe structure

@@ -11,6 +11,8 @@ import {
   logger,
   maskAddress,
 } from "./shared.js";
+import { truncateForLog } from "../../utils/log-redaction.js";
+import { walletLookupLimiter } from "../../middleware/rateLimiter.js";
 import type {
   RequestWithValidatedQuery,
   ByWalletQuery,
@@ -29,8 +31,9 @@ const router = Router();
 router.get(
   "/by-wallet/:address",
   byWalletSecurityHeaders,
+  walletLookupLimiter,
   validate(byWalletParamsSchema, "params", (req) =>
-    logger.warn("Invalid by-wallet address", { address: req.params.address }),
+    logger.warn("Invalid by-wallet address", { address: truncateForLog(req.params.address) }),
   ),
   validate(byWalletQuerySchema, "query", (req) =>
     logger.warn("Invalid by-wallet query", { query: req.query }),
@@ -61,7 +64,7 @@ router.get(
       sendSuccess(res, result);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
-      logger.error("Jobs lookup failed", { address, error: message });
+      logger.error("Jobs lookup failed", { address: maskAddress(address), error: message });
       sendError(res, 500, "Internal server error");
     }
   },

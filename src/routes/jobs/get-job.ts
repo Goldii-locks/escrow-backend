@@ -17,6 +17,7 @@ import {
   NETWORK_PASSPHRASE,
   server,
   parseJobFromResult,
+  type ParsedJob,
   convertScValToNativeStrings,
   simulationSource,
   maskAddress,
@@ -237,7 +238,7 @@ router.get(
       // Cached for JOB_STATE_CACHE_TTL_S with concurrent misses sharing one
       // simulation; the poller invalidates the entry when it indexes a new
       // event for this contract (#679).
-      const { value: job, source } = await getCachedJobState(contractId, async () => {
+      const { value: job, source } = await getCachedJobState<ParsedJob>(contractId, async () => {
         const contract = new Contract(contractId);
         const account = simulationSource();
         const tx = new TransactionBuilder(account, {

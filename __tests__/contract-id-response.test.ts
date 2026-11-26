@@ -163,7 +163,11 @@ describe("GET /api/jobs/:contractId – response format and status codes", () =>
       arbiter: ARBITER,
       token: TOKEN,
       funded: true,
-      milestones: [{ index: 0, amount: "100", status: "Delivered" }],
+      autoReleaseSeconds: 0,
+      milestones: [{
+        index: 0, amount: "100", releasedAmount: "0", status: "Delivered",
+        deliveredAt: 0, funded: false, specHash: null, deliverable: null,
+      }],
     });
   });
 });
