@@ -73,7 +73,19 @@ type SimulateResponse = Awaited<ReturnType<Server["simulateTransaction"]>>;
  *  - Contract assertion / revert (error codes) → 422
  *  - Everything else → 500
  */
-export function classifySimError(rawError: string): { status: number; message: string } {
+import { getContractError, type ContractType } from "./contract-errors.js";
+
+export type SimErrorClassification = {
+  status: number;
+  message: string;
+  code?: number;
+  name?: string;
+};
+
+export function classifySimError(
+  rawError: string,
+  contractType?: ContractType,
+): SimErrorClassification {
   // 504 – upstream RPC stalled or timed out (#691)
   if (/timeout|ETIMEDOUT|ECONNRESET|socket hang up|request timeout|connect timeout/i.test(rawError)) {
     return { status: 504, message: "Upstream RPC timeout" };
@@ -84,20 +96,35 @@ export function classifySimError(rawError: string): { status: number; message: s
     return { status: 404, message: "Source account not found on network" };
   }
 
-  // 404 – contract missing / unregistered on the network
+  // 404 – contract missing / unregistered on the network (never map contract error codes to 404)
   if (
-    /not found|NotFound|contract not found/i.test(rawError) ||
-    /contract error #1\b/i.test(rawError)
+    /Error\(Storage,\s*MissingValue\)/i.test(rawError) ||
+    /\bcontract not found\b/i.test(rawError) ||
+    /\bContractNotFound\b/i.test(rawError) ||
+    /\bno such contract\b/i.test(rawError)
   ) {
     return { status: 404, message: "Contract not found on network" };
   }
 
-  // 422 – contract executed but reverted / assertion failed
-  const contractErrMatch = rawError.match(/contract error #(\d+)/i);
+  // 422 (or mapped status) – contract executed but reverted / assertion failed
+  const contractErrMatch =
+    rawError.match(/Error\(Contract,\s*#?(\d+)\)/i) ||
+    rawError.match(/contract error #?(\d+)/i);
   if (contractErrMatch) {
+    const code = Number(contractErrMatch[1]);
+    const errorDef = getContractError(code, contractType);
+    if (errorDef) {
+      return {
+        status: errorDef.status,
+        message: errorDef.message,
+        code,
+        name: errorDef.name,
+      };
+    }
     return {
       status: 422,
-      message: `Contract execution reverted (error code ${contractErrMatch[1]})`,
+      message: `Contract execution reverted (error code ${code})`,
+      code,
     };
   }
   if (/revert|assert|panic|trap/i.test(rawError)) {
@@ -115,12 +142,22 @@ export function classifySimError(rawError: string): { status: number; message: s
  */
 export class SimError extends Error {
   status: number;
+  code?: number;
+  contractName?: string;
   rawError?: string;
-  constructor(status: number, message: string, rawError?: string) {
+  constructor(
+    status: number,
+    message: string,
+    rawError?: string,
+    code?: number,
+    contractName?: string,
+  ) {
     super(message);
     this.name = "SimError";
     this.status = status;
     this.rawError = rawError;
+    this.code = code;
+    this.contractName = contractName;
   }
 }
 
@@ -182,13 +219,14 @@ export async function simulateRead(
   contractId: string,
   method: string,
   args: xdr.ScVal[] = [],
+  contractType?: ContractType,
 ): Promise<unknown> {
   const result = await simulateCall(contractId, method, args);
 
   if ("error" in result) {
     const rawError = String(result.error);
-    const { status, message } = classifySimError(rawError);
-    throw new SimError(status, message, rawError);
+    const { status, message, code, name } = classifySimError(rawError, contractType);
+    throw new SimError(status, message, rawError, code, name);
   }
   if ("result" in result && result.result?.retval) {
     return scValToNative(result.result.retval);

@@ -46,12 +46,41 @@ describe("classifySimError", () => {
     ["request timeout", 504],
     ["account not found", 404],
     ["contract not found", 404],
-    ["HostError: contract error #1", 404],
+    ["HostError: Error(Storage, MissingValue)", 404],
+    ["HostError: contract error #1", 422],
+    ["HostError: Error(Contract, #1)", 422],
     ["HostError: contract error #7", 422],
+    ["HostError: Error(Contract, #7)", 422],
     ["panic in contract", 422],
     ["something odd", 500],
   ])("maps %s to %i", (raw, status) => {
     expect(classifySimError(raw).status).toBe(status);
+  });
+
+  it("extracts numeric error code from Error(Contract, #N)", () => {
+    const res = classifySimError("HostError: Error(Contract, #7)");
+    expect(res.status).toBe(422);
+    expect(res.code).toBe(7);
+    expect(res.message).toBe("Contract execution reverted (error code 7)");
+  });
+
+  it("does not map code #1 to 404", () => {
+    const res = classifySimError("HostError: Error(Contract, #1)");
+    expect(res.status).toBe(422);
+    expect(res.code).toBe(1);
+    expect(res.message).toBe("Contract execution reverted (error code 1)");
+  });
+
+  it("maps missing contract instance to 404", () => {
+    const res = classifySimError("HostError: Error(Storage, MissingValue)");
+    expect(res.status).toBe(404);
+    expect(res.message).toBe("Contract not found on network");
+  });
+
+  it("maps timeout to 504", () => {
+    const res = classifySimError("request timeout");
+    expect(res.status).toBe(504);
+    expect(res.message).toBe("Upstream RPC timeout");
   });
 });
 
