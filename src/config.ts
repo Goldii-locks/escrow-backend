@@ -153,6 +153,10 @@ export const config = {
       1,
     );
   },
+  // #893: ~10 min of Stellar ledgers (5 s each).
+  get readyMaxLedgerLag(): number {
+    return readIntEnv("READY_MAX_LEDGER_LAG", 120, 0);
+  },
 
   // Graceful shutdown (#623)
   get shutdownTimeoutMs(): number {

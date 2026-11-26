@@ -61,10 +61,11 @@ jobs:
 
       - id: meta
         # Tag with the commit CI tested; on workflow_run GITHUB_SHA is the
-        # tip of main, which may be newer.
+        # tip of main, which may be newer. The full SHA is also baked into the
+        # image as GIT_SHA, so /health can prove the deployed tag is live.
         env:
           BUILD_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
-        run: echo "tag=${BUILD_SHA::12}-${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+        run: echo "tag=${BUILD_SHA}" >> "$GITHUB_OUTPUT"
 
       - uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -85,6 +86,8 @@ jobs:
             ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.meta.outputs.tag }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          build-args: |
+            GIT_SHA=${{ github.event.workflow_run.head_sha || github.sha }}
 
   deploy:
     name: Roll out to EC2
@@ -170,6 +173,8 @@ jobs:
       # evidence the backend booted successfully.  This step waits for the
       # backend to become available and asserts the exact JSON contract.
       - name: Smoke test — backend /health
+        env:
+          EXPECTED_VERSION: ${{ needs.build.outputs.image_tag }}
         run: |
           set -euo pipefail
           # The certificate is issued for milestonepay.app; an IP-based
@@ -178,10 +183,13 @@ jobs:
 
           # Poll for up to 90 s (18 × 5 s).  A backend container that crashed
           # on boot will never answer this endpoint so the step fails hard.
+          # #894: status alone would pass against a stale container, so the
+          # served build must match the tag we just deployed.
           for i in $(seq 1 18); do
             RESPONSE=$(curl --fail-with-body -sS -L --max-time 10 \
               "${BASE}/health" 2>/dev/null || true)
-            if echo "${RESPONSE}" | grep -q '"status":"ok"'; then
+            if echo "${RESPONSE}" | grep -q '"status":"ok"' \
+              && echo "${RESPONSE}" | grep -Fq "\"version\":\"${EXPECTED_VERSION}\""; then
               echo "backend healthy: ${RESPONSE}"
               exit 0
             fi
@@ -189,5 +197,5 @@ jobs:
             sleep 5
           done
 
-          echo "::error::backend /health never returned {\"status\":\"ok\"} within 90 s"
+          echo "::error::backend /health never reported version ${EXPECTED_VERSION} within 90 s"
           exit 1

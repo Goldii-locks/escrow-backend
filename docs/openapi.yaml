@@ -6,6 +6,10 @@ info:
     Express + TypeScript backend for the Soroban milestone escrow platform.
     Provides API endpoints for job querying, transaction building, transaction submission,
     indexer health, and event webhook subscriptions.
+    Every /api/* path below is also mounted under the /api/v1 server prefix;
+    requests using the unversioned /api/* prefix receive `Deprecation: true`
+    (#697). Liveness is /health, readiness (SQLite + poller + ledger lag) is
+    /ready.
 servers:
   - url: http://localhost:3001
     description: Local development server
@@ -15,6 +19,13 @@ servers:
     description: "Legacy compatibility base path (returns Deprecation: true)"
 
 components:
+  headers:
+    Deprecation:
+      description: Present on every unversioned /api/* response to point clients at /api/v1.
+      schema:
+        type: string
+        example: "true"
+
   securitySchemes:
     ApiKeyAuth:
       type: apiKey
@@ -58,6 +69,31 @@ components:
         contract:
           type: string
           example: CARZQMYKDGA4TTIE2XBDJ42EX27VYLLJGGG4WGUIXXWIVHPDTX3UCLJA
+        version:
+          type: string
+          nullable: true
+          description: GIT_SHA baked into the running image (#894).
+          example: 6d06868b1a2b3c4d5e6f708192a3b4c5d6e7f809
+
+    ReadinessResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [ready, not_ready]
+        lastIndexedLedger:
+          type: integer
+          nullable: true
+        lastSuccessfulPollAgeMs:
+          type: integer
+          nullable: true
+        ledgerLag:
+          type: integer
+          nullable: true
+          description: Chain head minus the last stored ledger observed by the last poll (#893).
+        failingCheck:
+          type: string
+          enum: [database, poller, ledgerLag]
 
     ApiError:
       type: object
@@ -167,8 +203,8 @@ components:
 paths:
   /health:
     get:
-      summary: Health check endpoint
-      description: Returns health status of the backend server and configured contract ID.
+      summary: Liveness probe
+      description: Returns health status, configured contract ID and the running GIT_SHA (#894).
       responses:
         '200':
           description: Server is healthy
@@ -176,6 +212,27 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HealthResponse'
+
+  /ready:
+    get:
+      summary: Readiness probe
+      description: >
+        Unauthenticated. 200 only when SQLite answers, the last successful poll
+        is recent and the ledger lag observed by that poll is within
+        READY_MAX_LEDGER_LAG; otherwise 503 with the failing check (#622, #893).
+      responses:
+        '200':
+          description: Ready to serve indexed data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadinessResponse'
+        '503':
+          description: Not ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadinessResponse'
 
   /api/jobs/by-wallet/{address}:
     get:
@@ -286,6 +343,29 @@ paths:
                 $ref: '#/components/schemas/ValidationError'
         '429':
           description: Rate limit exceeded (CREATE_JOB_DRAFT_RATE_MAX)
+
+  /api/jobs/drafts/{id}:
+    get:
+      summary: Fetch a persisted job draft
+      description: Returns an off-chain draft created by POST /api/jobs/create-job-draft (#667).
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: The stored draft payload
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobDraft'
+        '404':
+          description: Draft not found
+        '500':
+          description: Draft store unavailable
 
   /api/jobs/query:
     get:
@@ -428,6 +508,26 @@ paths:
                       total:
                         type: integer
                         description: Present only when includeTotal=true.
+        '400':
+          description: Invalid contractId or pagination
+
+  /api/jobs/{contractId}/history.csv:
+    get:
+      summary: Job event history as CSV
+      description: Same indexed event timeline as /history, serialised as CSV for spreadsheets.
+      parameters:
+        - name: contractId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: CSV event history
+          content:
+            text/csv:
+              schema:
+                type: string
         '400':
           description: Invalid contractId or pagination
 
@@ -1216,3 +1316,20 @@ paths:
           description: Contract does not implement the token interface
         '429':
           description: Rate limit exceeded
+
+  /api/stats:
+    get:
+      summary: Platform statistics
+      description: Aggregate indexed job and event counts for the admin dashboard.
+      responses:
+        '200':
+          description: Statistics snapshot
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  stats:
+                    type: object

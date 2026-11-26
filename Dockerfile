@@ -16,8 +16,9 @@ RUN npm prune --omit=dev
 
 # ---- runtime: minimal final image ----
 FROM node:24-bookworm-slim AS runtime
-WORKDIR /app
+ARG GIT_SHA=unknown
 ENV NODE_ENV=production
+ENV GIT_SHA=${GIT_SHA}
 RUN groupadd --system --gid 1001 nodejs \
     && useradd --system --uid 1001 --gid nodejs expressjs
 COPY --from=build /app/node_modules ./node_modules
