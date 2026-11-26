@@ -185,6 +185,24 @@ describe("admin routes – backfill lifecycle, contracts and failure paths (#948
         .expect(400);
       expect(res.body.success).toBe(false);
     });
+
+    it("rejects a contractId that is not a valid C... address", async () => {
+      const res = await request(app)
+        .post("/api/admin/backfill")
+        .set("x-api-key", KEY)
+        .send({ startLedger: 100, endLedger: 200, contractId: "abc" })
+        .expect(400);
+      expect(res.body.success).toBe(false);
+    });
+
+    it("rejects a negative startLedger", async () => {
+      const res = await request(app)
+        .post("/api/admin/backfill")
+        .set("x-api-key", KEY)
+        .send({ startLedger: -1, endLedger: 200 })
+        .expect(400);
+      expect(res.body.success).toBe(false);
+    });
   });
 
   describe("POST/DELETE /api/admin/contracts", () => {

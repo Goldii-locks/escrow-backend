@@ -55,33 +55,22 @@ type BackfillJob = HistoricalImportResult & {
 let backfillJob: BackfillJob | null = null;
 let backfillStarting = false;
 
-router.post("/backfill", async (req, res) => {
-  const body = req.body as Record<string, unknown> | undefined;
-  const startLedger = body?.startLedger;
-  const endLedger = body?.endLedger;
-  const contractId = body?.contractId;
+const backfillBodySchema = z
+  .object({
+    startLedger: z.number().int().positive(),
+    endLedger: z.number().int().positive(),
+    contractId: contractIdSchema.optional(),
+  })
+  .refine((d) => d.endLedger >= d.startLedger, {
+    message: "endLedger must be greater than or equal to startLedger",
+  });
 
-  if (
-    typeof startLedger !== "number" ||
-    !Number.isInteger(startLedger) ||
-    typeof endLedger !== "number" ||
-    !Number.isInteger(endLedger)
-  ) {
-    return res.status(400).json({
-      success: false,
-      error: "startLedger and endLedger must be integers",
-    });
-  }
-
-  if (
-    contractId !== undefined &&
-    (typeof contractId !== "string" || contractId.trim().length === 0)
-  ) {
-    return res.status(400).json({
-      success: false,
-      error: "contractId must be a non-empty string",
-    });
-  }
+router.post("/backfill", validate(backfillBodySchema, "body"), async (req, res) => {
+  const { startLedger, endLedger, contractId } = req.body as {
+    startLedger: number;
+    endLedger: number;
+    contractId?: string;
+  };
 
   if (backfillStarting || backfillJob?.status === "running") {
     return res.status(409).json({ success: false, error: "A backfill is already running" });
@@ -100,7 +89,7 @@ router.post("/backfill", async (req, res) => {
       status: "running",
       startLedger,
       endLedger,
-      ...(typeof contractId === "string" ? { contractId } : {}),
+      ...(contractId !== undefined ? { contractId } : {}),
       eventsFound: 0,
       eventsImported: 0,
     };
