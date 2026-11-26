@@ -778,6 +778,11 @@ export function resetWebhookDeliveryQueueForTests(): void {
   webhookDeliveryTail = Promise.resolve();
 }
 
+/** Await all queued webhook deliveries (used by tests). */
+export function flushWebhookDeliveryQueueForTests(): Promise<void> {
+  return webhookDeliveryTail;
+}
+
 /**
  * Queue delivery of `[startLedger, endLedger]` behind every earlier range.
  * A failed run is logged and does not stall later ranges. The returned
@@ -786,9 +791,10 @@ export function resetWebhookDeliveryQueueForTests(): void {
 export function enqueueWebhookDelivery(
   startLedger: number,
   endLedger: number,
+  contractIds?: string[],
 ): Promise<void> {
   const run = webhookDeliveryTail
-    .then(() => deliverWebhooks(startLedger, endLedger))
+    .then(() => deliverWebhooks(startLedger, endLedger, contractIds))
     .then(
       () => undefined,
       (err) => {
@@ -796,6 +802,7 @@ export function enqueueWebhookDelivery(
           error: formatError(err),
           startLedger,
           endLedger,
+          contractIds,
         });
       },
     );
@@ -982,10 +989,17 @@ export async function pollEvents(): Promise<boolean> {
     );
     const pageLimit = 100;
 
+    const polledGroupDeliveries: Array<{
+      startLedger: number;
+      endLedger: number;
+      contractIds: string[];
+    }> = [];
+
     for (const [pointer, groupContractIds] of groups) {
       if (currentLedger <= pointer) continue;
       anyGroupPolled = true;
 
+      const activeGroupContracts = [...groupContractIds];
       let startLedger = pointer + 1;
       minStartLedger = Math.min(minStartLedger, startLedger);
 
@@ -1090,6 +1104,9 @@ export async function pollEvents(): Promise<boolean> {
             ledgerSequence: ev.ledgerSequence,
           });
           registerContract(childContractId, "escrow_child", ev.ledgerSequence);
+          if (!activeGroupContracts.includes(childContractId)) {
+            activeGroupContracts.push(childContractId);
+          }
 
           try {
             const childEvents = await rpcClient.getEvents(
@@ -1157,6 +1174,14 @@ export async function pollEvents(): Promise<boolean> {
         if (isLastPage) break;
         cursor = nextCursor;
       }
+
+      if (lastStoredLedger >= startLedger) {
+        polledGroupDeliveries.push({
+          startLedger,
+          endLedger: lastStoredLedger,
+          contractIds: activeGroupContracts,
+        });
+      }
     }
 
     // Record success for any poll that completes without throwing, even idle cycles.
@@ -1189,7 +1214,18 @@ export async function pollEvents(): Promise<boolean> {
 
       // Not awaited: polling keeps its cadence, but deliveries stay in ledger
       // order behind any slower earlier range (#682).
-      void enqueueWebhookDelivery(minStartLedger, currentLedger);
+      // Deliver webhooks scoped per polled contract group (#885).
+      if (polledGroupDeliveries.length > 0) {
+        for (const delivery of polledGroupDeliveries) {
+          void enqueueWebhookDelivery(
+            delivery.startLedger,
+            delivery.endLedger,
+            delivery.contractIds,
+          );
+        }
+      } else if (Number.isFinite(minStartLedger)) {
+        void enqueueWebhookDelivery(minStartLedger, currentLedger);
+      }
     }
 
     if (!anyGroupPolled) {

@@ -694,8 +694,10 @@ function subscriptionsMatchEvent(
 
 export async function deliverWebhooks(
   startLedger: number,
-  endLedger: number
+  endLedger: number,
+  contractIds?: string[]
 ): Promise<DeliveryResult[]> {
+  ensureDeliveriesTable();
   const db = getDb();
 
   // Retry previously failed deliveries first, so a subscriber that was down
@@ -716,7 +718,11 @@ export async function deliverWebhooks(
     string,
     ReturnType<typeof getActiveSubscriptions>
   >();
+  const contractFilterSet = contractIds ? new Set(contractIds) : null;
   for (const sub of getActiveSubscriptions()) {
+    if (contractFilterSet && !contractFilterSet.has(sub.contract_id)) {
+      continue;
+    }
     const list = subscriptionsByContract.get(sub.contract_id) ?? [];
     list.push(sub);
     subscriptionsByContract.set(sub.contract_id, list);
@@ -725,13 +731,31 @@ export async function deliverWebhooks(
 
   // Only events for subscribed contracts are read, so the SQL engine skips
   // every other contract's rows before they reach application memory.
-  const contractIds = [...subscriptionsByContract.keys()];
-  const placeholders = contractIds.map(() => "?").join(", ");
+  // Exclude events where every active subscription for this contract already
+  // has a row in webhook_deliveries with status = 'delivered' (#885).
+  const scopedContractIds = [...subscriptionsByContract.keys()];
+  const placeholders = scopedContractIds.map(() => "?").join(", ");
   const pageQuery = db.prepare(
-    `SELECT * FROM events
-     WHERE ledger_sequence >= ? AND ledger_sequence <= ?
-       AND contract_id IN (${placeholders})
-     ORDER BY ledger_sequence ASC, id ASC`
+    `SELECT e.* FROM events e
+     WHERE e.ledger_sequence >= ? AND e.ledger_sequence <= ?
+       AND e.contract_id IN (${placeholders})
+       AND EXISTS (
+         SELECT 1 FROM webhook_subscriptions s
+         WHERE s.contract_id = e.contract_id
+           AND s.disabled_at IS NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM webhook_deliveries wd
+             WHERE wd.subscription_id = s.id
+               AND wd.event_id = e.id
+               AND wd.status = 'delivered'
+           )
+       )
+     ORDER BY e.ledger_sequence ASC, e.id ASC`
+  );
+
+  const isDeliveredStmt = db.prepare(
+    `SELECT 1 FROM webhook_deliveries
+     WHERE subscription_id = ? AND event_id = ? AND status = 'delivered'`
   );
 
   const results: DeliveryResult[] = [];
@@ -742,11 +766,17 @@ export async function deliverWebhooks(
     pageStart += WEBHOOK_DELIVERY_LEDGER_PAGE_SIZE
   ) {
     const pageEnd = Math.min(pageStart + WEBHOOK_DELIVERY_LEDGER_PAGE_SIZE - 1, endLedger);
-    const events = pageQuery.all(pageStart, pageEnd, ...contractIds) as EventDbRow[];
+    const events = pageQuery.all(pageStart, pageEnd, ...scopedContractIds) as EventDbRow[];
 
     for (const event of events) {
       for (const sub of subscriptionsByContract.get(event.contract_id) ?? []) {
         if (!subscriptionsMatchEvent(sub.event_types, event.event_type)) {
+          continue;
+        }
+
+        // Idempotency guard: exclude (subscription_id, event_id) pairs
+        // already marked as delivered (#885).
+        if (isDeliveredStmt.get(sub.id, event.id) !== undefined) {
           continue;
         }
 
