@@ -1,8 +1,6 @@
 import { Router } from "express";
 import type { Request, Response } from "express";
 import {
-  Contract,
-  TransactionBuilder,
   nativeToScVal,
   timeRemainingRateLimit,
   timeRemainingSecurityHeaders,
@@ -11,17 +9,16 @@ import {
   validate,
   contractMilestoneParamsSchema,
   logger,
-  NETWORK_PASSPHRASE,
   server,
-  simulationSource,
   scValToNative,
+  buildSimulationTx,
 } from "./shared.js";
-import { getInclusionFee } from "../../utils/fee-helper.js";
 
 import {
   timeRemainingCache,
   inFlightTimeRemainingRequests,
 } from "./caches.js";
+import { cachedSingleFlight } from "./dedupe.js";
 import {
   SimError,
   classifySimError,
@@ -61,32 +58,23 @@ router.get(
         ip: req.ip ?? req.socket?.remoteAddress,
       });
 
-      const cached = timeRemainingCache.get<number>(cacheKey);
-      if (cached !== undefined) {
-        logger.info("Time remaining served from cache", { contractId, index });
-        sendSuccess(res, { secondsRemaining: cached });
-        return;
-      }
-
-      let requestPromise = inFlightTimeRemainingRequests.get(cacheKey);
-      const servedFromInFlight = Boolean(requestPromise);
-
-      if (!requestPromise) {
-        requestPromise = (async (): Promise<number> => {
-          const contract = new Contract(contractId);
-          const account = simulationSource();
-          const tx = new TransactionBuilder(account, {
-            fee: await getInclusionFee(server),
-            networkPassphrase: NETWORK_PASSPHRASE,
-          })
-            .addOperation(
-              contract.call(
-                "time_until_auto_release",
-                nativeToScVal(Number(index), { type: "u32" }),
-              ),
-            )
-            .setTimeout(30)
-            .build();
+      const secondsRemaining = await cachedSingleFlight<number>({
+        cache: timeRemainingCache,
+        inFlight: inFlightTimeRemainingRequests,
+        key: cacheKey,
+        log: (source) => {
+          if (source === "cache") {
+            logger.info("Time remaining served from cache", { contractId, index });
+          } else if (source === "in-flight") {
+            logger.info("Time remaining served from in-flight cache", { contractId, index });
+          }
+        },
+        produce: async () => {
+          const tx = buildSimulationTx(
+            contractId,
+            "time_until_auto_release",
+            nativeToScVal(Number(index), { type: "u32" }),
+          );
 
           const result = await server.simulateTransaction(tx);
 
@@ -97,30 +85,18 @@ router.get(
           if ("result" in result && result.result?.retval) {
             // retval is an xdr.ScVal (u64 -> bigint); decode it (#599).
             const decoded = scValToNative(result.result.retval);
-            const secondsRemaining =
+            const sec =
               typeof decoded === "bigint" || typeof decoded === "number" ? Number(decoded) : NaN;
-            if (!Number.isFinite(secondsRemaining)) {
+            if (!Number.isFinite(sec)) {
               throw new SimError(500, "Internal server error");
             }
-            timeRemainingCache.set(cacheKey, secondsRemaining);
-            return secondsRemaining;
+            timeRemainingCache.set(cacheKey, sec);
+            return sec;
           }
           throw new SimError(500, "Internal server error");
-        })();
+        },
+      });
 
-        inFlightTimeRemainingRequests.set(cacheKey, requestPromise);
-      }
-
-      let secondsRemaining: number;
-      try {
-        secondsRemaining = await requestPromise;
-      } finally {
-        inFlightTimeRemainingRequests.delete(cacheKey);
-      }
-
-      if (servedFromInFlight) {
-        logger.info("Time remaining served from in-flight cache", { contractId, index });
-      }
       sendSuccess(res, { secondsRemaining });
     } catch (err: unknown) {
       if (err instanceof SimError) {

@@ -16,8 +16,8 @@ import {
   logger,
   NETWORK_PASSPHRASE,
   server,
-  simulationSource,
   scValToNative,
+  buildSimulationTx,
 } from "./shared.js";
 import { classifySimError } from "./errors.js";
 import { rejectedRequestLogMeta } from "../../utils/log-redaction.js";
@@ -101,16 +101,7 @@ router.get(
       // Fetch whitelisted tokens from contract. The escrow factory keeps its
       // list under get_allowed_tokens: those are the tokens new escrows may use.
       const requestPromise = (async (): Promise<string[]> => {
-        const contract = new Contract(contractId as string);
-        const account = simulationSource();
-        const tx = new TransactionBuilder(account, {
-          fee: await getInclusionFee(server),
-          networkPassphrase: NETWORK_PASSPHRASE,
-        })
-          .addOperation(contract.call(tokenReadMethod(contractId)))
-          .setTimeout(30)
-          .build();
-
+        const tx = buildSimulationTx(contractId as string, tokenReadMethod(contractId as string));
         const result = await server.simulateTransaction(tx);
 
         // Handle simulation error
@@ -290,18 +281,7 @@ router.post(
     // point the caller at the single-token form instead of replying
     // `updated: true` for work that was never done (#613).
     try {
-      const contract = new Contract(contractId);
-      const account = simulationSource();
-      const tx = new TransactionBuilder(account, {
-        fee: await getInclusionFee(server),
-        networkPassphrase: NETWORK_PASSPHRASE,
-      })
-        // Use the per-contract read method so the factory (allow_token / deny_token)
-        // is probed correctly and doesn't get a 500 from a missing method (#907).
-        .addOperation(contract.call(tokenReadMethod(contractId)))
-        .setTimeout(30)
-        .build();
-
+      const tx = buildSimulationTx(contractId, tokenReadMethod(contractId));
       const result = await server.simulateTransaction(tx);
 
       if ("error" in result) {

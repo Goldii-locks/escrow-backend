@@ -2,6 +2,20 @@ import request from "supertest";
 import express from "express";
 import router from "../src/routes/jobs.js";
 import { resetCreateJobDraftRateLimitBuckets } from "../src/middleware/job-contract-rate-limit.js";
+import Database from "better-sqlite3";
+import { setDb, runMigrations } from "../src/indexer/db.js";
+
+let db: Database.Database;
+
+beforeAll(() => {
+  db = new Database(":memory:");
+  setDb(db);
+  runMigrations();
+});
+
+afterAll(() => {
+  db.close();
+});
 
 // ---------------------------------------------------------------------------
 // Fixtures

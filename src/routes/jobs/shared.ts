@@ -73,6 +73,7 @@ import {
   server,
   getRpcUrl,
   simulationSource,
+  buildSimulationTx,
 } from "../../utils/soroban-call.js";
 import logger from "../../utils/logger.js";
 import { isValidStellarContractId } from "../../utils/stellar.js";
@@ -86,7 +87,7 @@ export function getContractId(): string {
 }
 // The RPC Server, network config and read-simulation source live in
 // utils/soroban-call.ts (#620); re-exported here for the route modules.
-export { NETWORK_PASSPHRASE, server, getRpcUrl, simulationSource };
+export { NETWORK_PASSPHRASE, server, getRpcUrl, simulationSource, buildSimulationTx };
 
 
 /**

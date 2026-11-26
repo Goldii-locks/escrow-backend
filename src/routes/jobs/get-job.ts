@@ -1,8 +1,6 @@
 import { Router } from "express";
 import type { Request, Response } from "express";
 import {
-  Contract,
-  TransactionBuilder,
   nativeToScVal,
   scValToNative,
   jobContractRateLimit,
@@ -14,15 +12,13 @@ import {
   feePreviewQuerySchema,
   logger,
   isValidStellarContractId,
-  NETWORK_PASSPHRASE,
   server,
   parseJobFromResult,
   type ParsedJob,
   convertScValToNativeStrings,
-  simulationSource,
   maskAddress,
+  buildSimulationTx,
 } from "./shared.js";
-import { getInclusionFee } from "../../utils/fee-helper.js";
 import { getCachedJobState } from "../../indexer/job-state-cache.js";
 import type {
   RequestWithValidatedQuery,
@@ -32,6 +28,7 @@ import {
   feePreviewCache,
   inFlightFeePreviewRequests,
 } from "./caches.js";
+import { cachedSingleFlight } from "./dedupe.js";
 import {
   SimError,
   classifySimError,
@@ -67,15 +64,7 @@ async function handleReadOnlyQuery(req: Request, res: Response): Promise<void> {
   }
 
   try {
-    const contract = new Contract(contractId);
-    const account = simulationSource();
-    const tx = new TransactionBuilder(account, {
-      fee: await getInclusionFee(server),
-      networkPassphrase: NETWORK_PASSPHRASE,
-    })
-      .addOperation(contract.call(method))
-      .setTimeout(30)
-      .build();
+    const tx = buildSimulationTx(contractId, method);
     const result = await server.simulateTransaction(tx);
 
     if ("error" in result) {
@@ -138,64 +127,47 @@ router.get(
       .validatedQuery as FeePreviewQuery;
     const cacheKey = `${contractId}:${amount}`;
 
-    // Check cache
-    const cached = feePreviewCache.get<Record<string, unknown>>(cacheKey);
-    if (cached !== undefined) {
-      logger.info("Fee preview served from cache", { contractId, amount });
-      sendSuccess(res, cached);
-      return;
-    }
-
-    let requestPromise = inFlightFeePreviewRequests.get(cacheKey) as
-      | Promise<Record<string, unknown>>
-      | undefined;
-    const servedFromInFlight = Boolean(requestPromise);
-
-    if (!requestPromise) {
-      requestPromise = (async (): Promise<Record<string, unknown>> => {
-        const contract = new Contract(contractId);
-        const account = simulationSource();
-        const tx = new TransactionBuilder(account, {
-          fee: await getInclusionFee(server),
-          networkPassphrase: NETWORK_PASSPHRASE,
-        })
-          .addOperation(
-            contract.call(
-              "calculate_platform_fee_split",
-              nativeToScVal(BigInt(amount), { type: "i128" }),
-            ),
-          )
-          .setTimeout(30)
-          .build();
-
-        // Read-only simulation only – never submits a transaction (#719).
-        const result = await server.simulateTransaction(tx);
-
-        if ("error" in result) {
-          const { status, message } = classifySimError(String(result.error));
-          throw new SimError(status, message);
-        }
-
-        if ("result" in result && result.result?.retval) {
-          const retval = scValToNative(result.result.retval);
-          const split = convertScValToNativeStrings(retval) as Record<
-            string,
-            unknown
-          >;
-          feePreviewCache.set(cacheKey, split);
-          return split;
-        }
-
-        throw new SimError(500, "Internal server error");
-      })();
-      inFlightFeePreviewRequests.set(cacheKey, requestPromise);
-    }
-
     try {
-      const split = await requestPromise;
-      if (servedFromInFlight) {
-        logger.info("Fee preview served from in-flight cache", { contractId, amount });
-      }
+      const split = await cachedSingleFlight<Record<string, unknown>>({
+        cache: feePreviewCache,
+        inFlight: inFlightFeePreviewRequests as Map<string, Promise<Record<string, unknown>>>,
+        key: cacheKey,
+        log: (source) => {
+          if (source === "cache") {
+            logger.info("Fee preview served from cache", { contractId, amount });
+          } else if (source === "in-flight") {
+            logger.info("Fee preview served from in-flight cache", { contractId, amount });
+          }
+        },
+        produce: async () => {
+          const tx = buildSimulationTx(
+            contractId,
+            "calculate_platform_fee_split",
+            nativeToScVal(BigInt(amount), { type: "i128" }),
+          );
+
+          // Read-only simulation only – never submits a transaction (#719).
+          const result = await server.simulateTransaction(tx);
+
+          if ("error" in result) {
+            const { status, message } = classifySimError(String(result.error));
+            throw new SimError(status, message);
+          }
+
+          if ("result" in result && result.result?.retval) {
+            const retval = scValToNative(result.result.retval);
+            const splitObj = convertScValToNativeStrings(retval) as Record<
+              string,
+              unknown
+            >;
+            feePreviewCache.set(cacheKey, splitObj);
+            return splitObj;
+          }
+
+          throw new SimError(500, "Internal server error");
+        },
+      });
+
       sendSuccess(res, split);
     } catch (err: unknown) {
       // Failures are never cached; the client only sees a classified status
@@ -210,8 +182,6 @@ router.get(
         error: formatError(err),
       });
       sendError(res, 500, "Internal server error");
-    } finally {
-      inFlightFeePreviewRequests.delete(cacheKey);
     }
   },
 );
@@ -239,16 +209,7 @@ router.get(
       // simulation; the poller invalidates the entry when it indexes a new
       // event for this contract (#679).
       const { value: job, source } = await getCachedJobState<ParsedJob>(contractId, async () => {
-        const contract = new Contract(contractId);
-        const account = simulationSource();
-        const tx = new TransactionBuilder(account, {
-          fee: await getInclusionFee(server),
-          networkPassphrase: NETWORK_PASSPHRASE,
-        })
-          .addOperation(contract.call("get_job"))
-          .setTimeout(30)
-          .build();
-
+        const tx = buildSimulationTx(contractId, "get_job");
         const result = await server.simulateTransaction(tx);
 
         if ("error" in result) {

@@ -111,10 +111,12 @@ router.post(
         saveJobDraft(draft.id, creatorAddress, draft);
       } catch (dbErr: unknown) {
         const dbErrorMessage = dbErr instanceof Error ? dbErr.message : String(dbErr);
-        logger.warn("Failed to persist job draft to database", {
+        logger.error("Failed to persist job draft to database", {
           draftId: draft.id,
           error: dbErrorMessage,
         });
+        sendError(res, 503, "Could not save draft");
+        return;
       }
 
       sendSuccess(res, draft);
