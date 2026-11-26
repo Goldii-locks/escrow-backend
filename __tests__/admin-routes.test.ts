@@ -212,14 +212,14 @@ describe("admin routes – backfill lifecycle, contracts and failure paths (#948
         .set("x-api-key", KEY)
         .send({ contractId: CONTRACT, label: "with start", startLedger: 12345 })
         .expect(201);
-      expect(created.body.contract.startLedger).toBe(12345);
-      expect(created.body.contract.active).toBe(true);
+      expect(created.body.data.startLedger).toBe(12345);
+      expect(created.body.data.active).toBe(true);
 
       const listed = await request(app)
         .get("/api/admin/contracts")
         .set("x-api-key", KEY)
         .expect(200);
-      const found = listed.body.contracts.find(
+      const found = listed.body.data.find(
         (c: { contractId: string }) => c.contractId === CONTRACT
       );
       expect(found.startLedger).toBe(12345);
@@ -228,7 +228,20 @@ describe("admin routes – backfill lifecycle, contracts and failure paths (#948
         .delete(`/api/admin/contracts/${CONTRACT}`)
         .set("x-api-key", KEY)
         .expect(200);
-      expect(removed.body.contractId).toBe(CONTRACT);
+      expect(removed.body.data.contractId).toBe(CONTRACT);
+    });
+  });
+
+  describe("GET /api/admin/webhook-subscriptions", () => {
+    it("returns the standard { success, data } envelope (#874)", async () => {
+      const res = await request(app)
+        .get("/api/admin/webhook-subscriptions")
+        .set("x-api-key", KEY)
+        .expect(200);
+      expect(res.body.success).toBe(true);
+      expect(Array.isArray(res.body.data.subscriptions)).toBe(true);
+      expect(Array.isArray(res.body.data.active)).toBe(true);
+      expect(Array.isArray(res.body.data.disabled)).toBe(true);
     });
   });
 

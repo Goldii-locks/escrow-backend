@@ -33,6 +33,9 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      - name: Check .env.example matches src/ (#872)
+        run: node scripts/check-env-example.mjs
+
       - name: Type check
         run: npx tsc --noEmit
 

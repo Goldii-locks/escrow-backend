@@ -89,15 +89,15 @@ describe("GET /api/admin/metrics", () => {
 
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
-      expect(res.body.metrics.lastIndexedLedger).toBe(500);
-      expect(res.body.metrics.totalEvents).toBe(2);
-      expect(res.body.metrics.eventsByType).toEqual({
+      expect(res.body.data.lastIndexedLedger).toBe(500);
+      expect(res.body.data.totalEvents).toBe(2);
+      expect(res.body.data.eventsByType).toEqual({
         job_created: 1,
         job_completed: 1,
       });
-      expect(res.body.metrics).toHaveProperty("activeContractsCount");
-      expect(res.body.metrics).toHaveProperty("totalSubscriptions");
-      expect(res.body.metrics).toHaveProperty("collectedAt");
+      expect(res.body.data).toHaveProperty("activeContractsCount");
+      expect(res.body.data).toHaveProperty("totalSubscriptions");
+      expect(res.body.data).toHaveProperty("collectedAt");
     });
 
     it("accepts a Bearer token", async () => {

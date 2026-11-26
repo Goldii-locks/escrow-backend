@@ -88,8 +88,8 @@ describe("Admin Contracts Endpoints (#659)", () => {
         .expect(201);
 
       expect(postRes.body.success).toBe(true);
-      expect(postRes.body.contract.contractId).toBe(VALID_CONTRACT_1);
-      expect(postRes.body.contract.label).toBe("Test escrow 1");
+      expect(postRes.body.data.contractId).toBe(VALID_CONTRACT_1);
+      expect(postRes.body.data.label).toBe("Test escrow 1");
 
       const activeIds = getActiveContractIds();
       expect(activeIds).toContain(VALID_CONTRACT_1);
@@ -100,7 +100,7 @@ describe("Admin Contracts Endpoints (#659)", () => {
         .expect(200);
 
       expect(getRes.body.success).toBe(true);
-      const found = getRes.body.contracts.find((c: any) => c.contractId === VALID_CONTRACT_1);
+      const found = getRes.body.data.find((c: any) => c.contractId === VALID_CONTRACT_1);
       expect(found).toBeDefined();
       expect(found.active).toBe(true);
       expect(found.registered_at).toBeDefined();
@@ -124,7 +124,7 @@ describe("Admin Contracts Endpoints (#659)", () => {
         .expect(200);
 
       expect(delRes.body.success).toBe(true);
-      expect(delRes.body.contractId).toBe(VALID_CONTRACT_2);
+      expect(delRes.body.data.contractId).toBe(VALID_CONTRACT_2);
 
       // No longer in active contract IDs
       expect(getActiveContractIds()).not.toContain(VALID_CONTRACT_2);
@@ -135,7 +135,7 @@ describe("Admin Contracts Endpoints (#659)", () => {
         .set("x-api-key", "test-admin-key")
         .expect(200);
 
-      const found = getRes.body.contracts.find((c: any) => c.contractId === VALID_CONTRACT_2);
+      const found = getRes.body.data.find((c: any) => c.contractId === VALID_CONTRACT_2);
       expect(found).toBeDefined();
       expect(found.active).toBe(false);
     });

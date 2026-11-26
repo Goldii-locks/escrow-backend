@@ -54,14 +54,9 @@ export const strictLimiter = rateLimit({
  * exhaust it and lock everyone else out; these two routes also mutate
  * subscriptions, so they get their own budget on top of the general one.
  */
-const webhookMax = parseInt(
-  process.env.WEBHOOK_RATE_LIMIT_MAX || "30",
-  10
-);
-
 export const webhookLimiter = rateLimit({
   windowMs,
-  max: webhookMax,
+  max: () => config.webhookRateLimitMax,
   standardHeaders: true,
   legacyHeaders: false,
   message: rateLimitMessage,

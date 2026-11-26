@@ -18,6 +18,15 @@ export function sendError(
   res.status(status).json({ success: false, error } satisfies ApiErrorBody);
 }
 
-export function sendSuccess<T>(res: Response, data: T): void {
-  res.status(200).json({ success: true, data } satisfies ApiSuccessBody<T>);
+/**
+ * `legacy` keeps deprecated top-level keys alongside `data` while clients
+ * migrate to the standard envelope (#874).
+ */
+export function sendSuccess<T>(
+  res: Response,
+  data: T,
+  options: { status?: number; legacy?: Record<string, unknown> } = {},
+): void {
+  const { status = 200, legacy } = options;
+  res.status(status).json({ ...legacy, success: true, data } satisfies ApiSuccessBody<T>);
 }

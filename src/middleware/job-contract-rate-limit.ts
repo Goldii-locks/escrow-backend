@@ -1,4 +1,5 @@
 import type { NextFunction, Request, Response } from "express";
+import { readIntEnv, registerRouteRateLimitEnv } from "../config.js";
 
 export type RateBucket = { count: number; resetAt: number };
 
@@ -18,6 +19,7 @@ export type RouteLimiterMiddleware = ((req: Request, res: Response, next: NextFu
 
 export function makeRouteLimiter(options: RouteLimiterOptions): RouteLimiterMiddleware {
   const { envPrefix, defaultMax, defaultWindowMs } = options;
+  registerRouteRateLimitEnv(envPrefix, defaultMax, defaultWindowMs);
   const buckets = new Map<string, RateBucket>();
   let sweepTimer: NodeJS.Timeout | null = null;
 
@@ -38,15 +40,9 @@ export function makeRouteLimiter(options: RouteLimiterOptions): RouteLimiterMidd
     }
   }
 
-  const resolveWindowMs = (): number => {
-    const configured = Number(process.env[`${envPrefix}_WINDOW_MS`] ?? defaultWindowMs);
-    return Number.isFinite(configured) && configured > 0 ? configured : defaultWindowMs;
-  };
+  const resolveWindowMs = (): number => readIntEnv(`${envPrefix}_WINDOW_MS`, defaultWindowMs, 1);
 
-  const resolveMaxRequests = (): number => {
-    const configured = Number(process.env[`${envPrefix}_MAX`] ?? defaultMax);
-    return Number.isFinite(configured) && configured > 0 ? configured : defaultMax;
-  };
+  const resolveMaxRequests = (): number => readIntEnv(`${envPrefix}_MAX`, defaultMax, 1);
 
   const middleware = (req: Request, res: Response, next: NextFunction): void => {
     const windowMs = resolveWindowMs();
