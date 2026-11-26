@@ -104,17 +104,17 @@ describe("SQLite maintenance scheduler", () => {
     // Run an async vacuum cycle to acquire the lock. The cycle itself will
     // complete quickly on an empty DB, so we intercept just before it releases
     // by making VACUUM block until we let it proceed.
-    let releaseVacuum!: () => void;
-    const vacuumBlocked = new Promise<void>((resolve) => {
-      releaseVacuum = resolve;
+    let _releaseVacuum!: () => void;
+    const _vacuumBlocked = new Promise<void>((resolve) => {
+      _releaseVacuum = resolve;
     });
 
     // Override db.exec temporarily to block on VACUUM
     const origExec = db.exec.bind(db);
-    let vacuumBlocking = false;
+    let _vacuumBlocking = false;
     const execSpy = jest.spyOn(db, "exec").mockImplementation((sql: string) => {
       if (sql === "VACUUM") {
-        vacuumBlocking = true;
+        _vacuumBlocking = true;
         // Block – in the real test we'll check the lock state, then release
         return origExec(sql);
       }

@@ -140,15 +140,16 @@ export async function assertRpcNetworkMatches(): Promise<void> {
 // ---------------------------------------------------------------------------
 // Helper: parse job fields out of a successful simulation result
 // ---------------------------------------------------------------------------
-export const parseJobFromResult = (result: any, contractId: string) => {
+export const parseJobFromResult = (result: { result?: { retval?: unknown } }, contractId: string) => {
   if (!("result" in result) || !result.result?.retval) return null;
 
   // retval is an xdr.ScVal (an scvMap for the contract's Job struct); decode
   // it rather than calling accessors that ScVal does not have (#597).
-  const job = scValToNative(result.result.retval);
-  if (!job || typeof job !== "object" || !Array.isArray(job.milestones)) {
+  const job = scValToNative(result.result.retval as Parameters<typeof scValToNative>[0]);
+  if (!job || typeof job !== "object" || !Array.isArray((job as Record<string, unknown>).milestones)) {
     throw new Error("unexpected get_job retval shape");
   }
+  const jobRecord = job as Record<string, unknown>;
 
   // Unit enum variants decode to a one-element array, e.g. ["Pending"].
   const decodeStatus = (status: unknown): string =>
@@ -156,12 +157,12 @@ export const parseJobFromResult = (result: any, contractId: string) => {
 
   return {
     id: contractId,
-    client: String(job.client),
-    freelancer: String(job.freelancer),
-    arbiter: String(job.arbiter),
-    token: String(job.token),
-    funded: convertScValToNativeStrings(job.funded),
-    milestones: job.milestones.map((m: any, i: number) => ({
+    client: String(jobRecord.client),
+    freelancer: String(jobRecord.freelancer),
+    arbiter: String(jobRecord.arbiter),
+    token: String(jobRecord.token),
+    funded: convertScValToNativeStrings(jobRecord.funded),
+    milestones: (jobRecord.milestones as Record<string, unknown>[]).map((m, i) => ({
       index: i,
       amount: String(m.amount),
       status: decodeStatus(m.status),

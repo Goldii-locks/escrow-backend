@@ -182,7 +182,7 @@ export async function simulateRead(
   contractId: string,
   method: string,
   args: xdr.ScVal[] = [],
-): Promise<any> {
+): Promise<unknown> {
   const result = await simulateCall(contractId, method, args);
 
   if ("error" in result) {

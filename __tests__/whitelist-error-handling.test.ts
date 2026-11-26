@@ -531,7 +531,7 @@ describe("GET /api/jobs/:contractId/whitelist – Robust Error Handling (Issue #
   describe("Promise-based async error handling", () => {
     it("catches errors thrown in the inner requestPromise async function", async () => {
       mockSimulateTransaction.mockRejectedValue(
-        new Error("network timeout at internal server")
+        new Error("unexpected internal error from RPC")
       );
 
       const res = await request(buildApp())
