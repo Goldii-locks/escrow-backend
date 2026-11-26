@@ -1,12 +1,18 @@
+import { randomUUID } from "crypto";
 import { Router } from "express";
 import type { Request, Response } from "express";
 import { sendSuccess, sendError } from "../utils/api-response.js";
 import { requireApiKey } from "../middleware/apiKeyAuth.js";
-import { getSubscriptionsForContract, recordAdminAuditLog } from "../indexer/db.js";
+import {
+  getSubscriptionsForContract,
+  recordAdminAuditLog,
+  type EventDbRow,
+} from "../indexer/db.js";
 import { requireAdmin, type AdminRequest } from "../middleware/adminAuth.js";
 import { webhookLimiter } from "../middleware/rateLimiter.js";
 import logger from "../utils/logger.js";
 import { formatError } from "../utils/format-error.js";
+import { deliverToUrl } from "../indexer/webhook-delivery.js";
 import {
   dispatchSubscribe,
   dispatchUnsubscribe,
@@ -111,6 +117,51 @@ router.post("/subscribe", webhookLimiter, requireAdmin, (req, res) => {
   }
 
   sendSuccess(res, { subscription: result.subscription, traceId: result.traceId });
+});
+
+// Lets an integrator verify their endpoint/TLS before a real on-chain event
+// happens (#858), without creating a webhook_deliveries row or touching the
+// subscription's failure counters — a failed ping must not auto-disable a
+// subscription or appear in dead-letter listings.
+router.post("/test", webhookLimiter, requireAdmin, async (req, res) => {
+  const contractId = req.body?.contract_id;
+  const webhookUrl = req.body?.webhook_url;
+  if (typeof contractId !== "string" || contractId.trim().length === 0) {
+    return sendError(res, 400, "contract_id is required");
+  }
+  if (typeof webhookUrl !== "string" || webhookUrl.trim().length === 0) {
+    return sendError(res, 400, "webhook_url is required");
+  }
+
+  const subscription = getSubscriptionsForContract(contractId).find(
+    (sub) => sub.webhook_url === webhookUrl,
+  );
+  if (!subscription) {
+    return sendError(
+      res,
+      404,
+      "No webhook subscription matches that contract_id and webhook_url",
+    );
+  }
+
+  const pingEvent: EventDbRow = {
+    id: -1,
+    contract_id: contractId,
+    event_type: "ping",
+    event_id: `ping:${randomUUID()}`,
+    ledger_sequence: 0,
+    timestamp: Math.floor(Date.now() / 1000),
+    data_json: "{}",
+    created_at: new Date().toISOString(),
+  };
+
+  const outcome = await deliverToUrl(webhookUrl, pingEvent);
+  sendSuccess(res, {
+    ok: outcome.ok,
+    status: outcome.status,
+    errorCode: outcome.errorCode,
+    durationMs: outcome.durationMs,
+  });
 });
 
 router.post("/unsubscribe", webhookLimiter, requireAdmin, (req, res) => {

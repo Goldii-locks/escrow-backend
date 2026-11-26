@@ -199,6 +199,30 @@ export const config = {
     }
     return date.toUTCString();
   },
+
+  // Webhook delivery (#859). Previously read at module load with bare
+  // parseInt in src/indexer/webhook-delivery.ts, so a typo'd value silently
+  // fell back to the default (for the two bounds) or became NaN (for the
+  // three retry/dead-letter settings), permanently disabling retries and
+  // dead-lettering instead of failing startup.
+  get webhookTimeoutMs(): number {
+    return readIntEnv("WEBHOOK_TIMEOUT_MS", 5000, 1);
+  },
+  get webhookDisableAfter(): number {
+    return readIntEnv("WEBHOOK_DISABLE_AFTER", 50, 1);
+  },
+  get webhookDeliveryPageSize(): number {
+    return readIntEnv("WEBHOOK_DELIVERY_PAGE_SIZE", 500, 1);
+  },
+  get webhookRetryBaseDelayMs(): number {
+    return readIntEnv("WEBHOOK_RETRY_BASE_DELAY_MS", 60000, 1);
+  },
+  get webhookRetryMaxAgeDays(): number {
+    return readIntEnv("WEBHOOK_RETRY_MAX_AGE_DAYS", 7, 1);
+  },
+  get webhookMaxDeliveryAttempts(): number {
+    return readIntEnv("WEBHOOK_MAX_DELIVERY_ATTEMPTS", 25, 1);
+  },
 } as const;
 
 /**

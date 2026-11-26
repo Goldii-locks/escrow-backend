@@ -17,6 +17,7 @@ import {
   getDeadDeliveries,
   getSubscriptionDeliveries,
   getFailedDeliveryCount,
+  replayWebhookDeliveries,
 } from "../indexer/webhook-delivery.js";
 import {
   fetchHistoricalEvents,
@@ -331,6 +332,54 @@ router.get("/webhook-subscriptions/:id/deliveries", (req, res) => {
     sendError(res, 500, "Internal server error");
   }
 });
+
+// POST /api/admin/webhook-deliveries/replay - reset dead (or matching)
+// deliveries back to retryable, since otherwise the only recovery from a
+// receiver outage of more than WEBHOOK_MAX_DELIVERY_ATTEMPTS/
+// WEBHOOK_RETRY_MAX_AGE_DAYS is hand-editing SQLite (#857).
+const replayDeliveriesBodySchema = z
+  .object({
+    ids: z.array(z.number().int().positive()).min(1).optional(),
+    subscription_id: z.number().int().positive().optional(),
+    status: z.literal("dead").optional(),
+    since: z.number().int().nonnegative().optional(),
+  })
+  .refine(
+    (body) =>
+      (body.ids && body.ids.length > 0) ||
+      body.subscription_id !== undefined ||
+      body.status !== undefined ||
+      body.since !== undefined,
+    {
+      message:
+        "Provide either ids, or at least one filter field (subscription_id, status, since)",
+    },
+  );
+
+router.post(
+  "/webhook-deliveries/replay",
+  validate(replayDeliveriesBodySchema, "body"),
+  (req, res) => {
+    const { ids, subscription_id, status, since } = req.body as {
+      ids?: number[];
+      subscription_id?: number;
+      status?: "dead";
+      since?: number;
+    };
+    try {
+      const queued = replayWebhookDeliveries({
+        ids,
+        subscriptionId: subscription_id,
+        status,
+        since,
+      });
+      sendSuccess(res, { queued });
+    } catch (err) {
+      logger.error("Failed to replay webhook deliveries", { error: formatError(err) });
+      res.status(500).json({ success: false, error: "Internal server error" });
+    }
+  },
+);
 
 router.get("/metrics", (_req, res) => {
   try {
