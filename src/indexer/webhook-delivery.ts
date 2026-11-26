@@ -384,6 +384,34 @@ function recordDeliveryOutcome(
   }
 }
 
+/** Dead-letter rows are kept this long for admin inspection before pruning (#940). */
+export const WEBHOOK_DEAD_RETENTION_DAYS = 90;
+
+/**
+ * Delete delivery bookkeeping that is no longer useful (#940): `delivered`
+ * rows older than `deliveredRetentionDays` and `dead` rows older than
+ * WEBHOOK_DEAD_RETENTION_DAYS, judged by `updated_at`. `failed` rows are still
+ * retryable and are never touched. Returns the number of rows removed per status.
+ */
+export function pruneWebhookDeliveries(deliveredRetentionDays: number): {
+  delivered: number;
+  dead: number;
+} {
+  ensureDeliveriesTable();
+  const db = getDb();
+  const del = (status: string, days: number): number =>
+    db
+      .prepare(
+        `DELETE FROM webhook_deliveries
+         WHERE status = ? AND updated_at < datetime('now', ?)`
+      )
+      .run(status, `-${days} days`).changes;
+  return {
+    delivered: del("delivered", deliveredRetentionDays),
+    dead: del("dead", WEBHOOK_DEAD_RETENTION_DAYS),
+  };
+}
+
 /** Admin visibility into permanently failed deliveries (#611). */
 export function getDeadDeliveries(limit = 100): DeadDelivery[] {
   try {

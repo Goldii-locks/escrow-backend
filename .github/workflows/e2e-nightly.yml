@@ -9,9 +9,18 @@ on:
         description: "escrow-contract git ref to build"
         required: false
         default: "main"
+      force_failure:
+        description: "Fail the run on purpose to exercise the e2e-nightly issue reporting"
+        type: boolean
+        required: false
+        default: false
   schedule:
     # Nightly at 04:00 UTC, an hour after escrow-contract's own E2E run.
     - cron: "0 4 * * *"
+
+permissions:
+  contents: read
+  issues: write
 
 jobs:
   e2e:
@@ -70,6 +79,12 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Forced failure (test hook)
+        if: inputs.force_failure
+        run: |
+          echo "force_failure input set; failing on purpose" >&2
+          exit 1
+
       - name: Run E2E suite
         run: npm run test:e2e
         env:
@@ -83,3 +98,35 @@ jobs:
       - name: Stop Stellar quickstart
         if: always()
         run: docker stop escrow-backend-e2e-quickstart || true
+
+      # Scheduled runs are the only drift detector, so a red run must not go
+      # unnoticed (#939): keep exactly one open e2e-nightly issue, comment on it
+      # for repeat failures, and close it on the next green run. A manual run
+      # with force_failure exercises the same path.
+      - name: Open or update e2e-nightly issue
+        if: failure() && (github.event_name == 'schedule' || inputs.force_failure)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh label create e2e-nightly --color B60205 \
+            --description "Nightly E2E run is failing" 2>/dev/null || true
+          existing="$(gh issue list --label e2e-nightly --state open --limit 1 \
+            --json number --jq '.[0].number // empty')"
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "Nightly E2E failed again: $RUN_URL"
+          else
+            gh issue create --label e2e-nightly \
+              --title "Nightly E2E run is failing" \
+              --body "The nightly E2E run failed: $RUN_URL. This usually means contract/backend drift (a renamed method or a changed event shape). This issue closes automatically on the next green run."
+          fi
+
+      - name: Close e2e-nightly issue on success
+        if: success() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          for n in $(gh issue list --label e2e-nightly --state open --json number --jq '.[].number'); do
+            gh issue close "$n" --comment "Nightly E2E is green again: $RUN_URL"
+          done

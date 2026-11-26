@@ -41,7 +41,7 @@ import {
   IndexerRunnerFailureMonitor,
   adjustIndexerRunnerPollInterval,
 } from "./indexer_runner.js";
-import { deliverWebhooks } from "./webhook-delivery.js";
+import { deliverWebhooks, pruneWebhookDeliveries } from "./webhook-delivery.js";
 import { buildGetEventsRequest } from "./event_type_filter.js";
 import { invalidateJobStateForEvents } from "./job-state-cache.js";
 import { invalidateContractCaches } from "../routes/jobs/caches.js";
@@ -1395,7 +1395,10 @@ let maintenanceTimeout: NodeJS.Timeout | null = null;
  *   2. Run `PRAGMA wal_checkpoint(TRUNCATE)` to flush the WAL file and free
  *      disk space accumulated since the last checkpoint.
  *   3. Run `PRAGMA optimize` to update internal query-planner statistics.
- *   4. If `EVENT_RETENTION_DAYS` is explicitly set in the environment, prune
+ *   4. Prune delivered webhook_deliveries rows older than
+ *      `WEBHOOK_DELIVERY_RETENTION_DAYS` (default 7) and dead rows older than
+ *      90 days; retryable `failed` rows are kept (#940).
+ *   5. If `EVENT_RETENTION_DAYS` is explicitly set in the environment, prune
  *      events older than that many days and then run a full `VACUUM`.
  *
  * Errors are caught and logged so a maintenance failure never crashes the
@@ -1418,6 +1421,15 @@ export function runMaintenanceCycle(): void {
       error: err instanceof Error ? err.message : String(err),
     });
     return;
+  }
+
+  try {
+    const pruned = pruneWebhookDeliveries(config.webhookDeliveryRetentionDays);
+    logger.info("SQLite maintenance: pruned webhook deliveries", pruned);
+  } catch (err) {
+    logger.error("SQLite maintenance: webhook delivery prune failed", {
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
 
   // Retention pruning – only when EVENT_RETENTION_DAYS is explicitly configured.
