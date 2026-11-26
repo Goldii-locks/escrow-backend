@@ -76,12 +76,7 @@ export function createApp(): express.Express {
   app.use(requestIdMiddleware);
   app.use(globalCors());
   app.use(helmet());
-<<<<<<< HEAD
-  app.use(express.json({ limit: config.jsonBodyLimit }));
-
   // Structured HTTP request logging (#86), tagged with the request id (#773).
-=======
->>>>>>> pr996
   app.use(requestLogger);
 
   // #917, #918: Dedicated route-level body parsers with specific payload limits
@@ -90,7 +85,7 @@ export function createApp(): express.Express {
   app.use("/api/v1/csp-report", cspReportRoutes);
   app.use("/api/csp-report", cspReportRoutes);
 
-  app.use(express.json());
+  app.use(express.json({ limit: config.jsonBodyLimit }));
 
   app.get("/health", (_req, res) => {
     res.json({
