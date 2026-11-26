@@ -14,24 +14,18 @@
  */
 
 import {
-  Account,
   Contract,
-  Keypair,
   TransactionBuilder,
   Address,
   scValToNative,
+  BASE_FEE,
 } from "@stellar/stellar-sdk";
-import { Server } from "@stellar/stellar-sdk/rpc";
 import { getDb } from "./db.js";
 import { sumLedgerAmounts } from "../utils/audit_ledger_sum_checker.js";
 import logger from "../utils/logger.js";
-import { rpcAllowHttp } from "../utils/rpc-allow-http.js";
 import { config } from "../config.js";
-
-const RPC_URL = process.env.SOROBAN_RPC_URL || "https://soroban-testnet.stellar.org";
-const NETWORK_PASSPHRASE =
-  process.env.SOROBAN_NETWORK_PASSPHRASE || "Test SDF Network ; September 2015";
-const BASE_FEE = "100";
+import { simulationSource, NETWORK_PASSPHRASE } from "../utils/soroban-call.js";
+import { getActiveServer } from "./poller.js";
 
 /** Event types counted as inflows to the escrow. */
 export const INFLOW_EVENT_TYPES = ["fund"] as const;
@@ -148,15 +142,12 @@ function resolveToken(contractId: string): string | null {
 
 /**
  * Default balance reader: simulates `balance(id)` on the token contract. A
- * read-only simulation does not need a funded source account, so a random
- * keypair is used as the transaction source.
+ * read-only simulation uses the shared simulationSource() from soroban-call.ts
+ * and the active RPC node from the poller (#926).
  */
 export const readOnChainBalance: BalanceReader = async (contractId, token) => {
-  const server = new Server(RPC_URL, {
-    allowHttp: rpcAllowHttp(RPC_URL),
-    timeout: config.rpcTimeoutMs,
-  });
-  const source = new Account(Keypair.random().publicKey(), "0");
+  const server = getActiveServer();
+  const source = simulationSource();
   const tx = new TransactionBuilder(source, {
     fee: BASE_FEE,
     networkPassphrase: NETWORK_PASSPHRASE,
@@ -323,13 +314,12 @@ export function getLatestReconciliationResults(): ReconciliationResult[] {
 
 /**
  * Start the scheduled reconciliation job. Interval comes from
- * RECONCILE_INTERVAL_MS (default 3600000). Overlapping runs are skipped.
+ * config.reconcileIntervalMs (default 3600000). Overlapping runs are skipped.
  */
 export function startReconciliationJob(
   reader: BalanceReader = readOnChainBalance
 ): NodeJS.Timeout {
-  const configured = Number(process.env.RECONCILE_INTERVAL_MS ?? "3600000");
-  const intervalMs = Number.isFinite(configured) && configured > 0 ? configured : 3600000;
+  const intervalMs = config.reconcileIntervalMs;
   let running = false;
 
   const timer = setInterval(async () => {

@@ -181,6 +181,24 @@ export const config = {
   get shutdownTimeoutMs(): number {
     return readIntEnv("SHUTDOWN_TIMEOUT_MS", 10000, 1);
   },
+
+  // Scheduled reconciliation (#714, #926)
+  get reconcileIntervalMs(): number {
+    return readIntEnv("RECONCILE_INTERVAL_MS", 3600000, 1);
+  },
+
+  // Legacy API sunset (#929)
+  get legacyApiSunset(): string | undefined {
+    const raw = process.env.LEGACY_API_SUNSET;
+    if (raw === undefined || raw.trim() === "") return undefined;
+    const date = new Date(raw.trim());
+    if (Number.isNaN(date.getTime())) {
+      throw new Error(
+        `Invalid date environment variable LEGACY_API_SUNSET=${JSON.stringify(raw)}: expected an ISO date string`,
+      );
+    }
+    return date.toUTCString();
+  },
 } as const;
 
 /**

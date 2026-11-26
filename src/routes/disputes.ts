@@ -8,7 +8,6 @@ import {
 } from "@stellar/stellar-sdk";
 import NodeCache from "node-cache";
 import {
-  jobContractCors,
   jobContractSecurityHeaders,
 } from "../middleware/job-contract-security.js";
 import { jobContractRateLimit } from "../middleware/job-contract-rate-limit.js";
@@ -113,10 +112,8 @@ function getIndexedEventsForMilestone(
 // ---------------------------------------------------------------------------
 // GET /api/disputes/:disputeId
 // ---------------------------------------------------------------------------
-router.options("/:disputeId", jobContractCors);
 router.get(
   "/:disputeId",
-  jobContractCors,
   jobContractSecurityHeaders,
   jobContractRateLimit,
   async (req: Request, res: Response) => {
@@ -226,7 +223,7 @@ router.get(
             .setTimeout(30)
             .build();
           const resSim = await server.simulateTransaction(tx);
-          return parseJobFromResult(resSim, contractId);
+          return parseJobFromResult(resSim as Parameters<typeof parseJobFromResult>[0], contractId);
         });
 
         if (job) {
@@ -309,10 +306,8 @@ router.get(
 // ---------------------------------------------------------------------------
 // GET /api/disputes/:disputeId/history
 // ---------------------------------------------------------------------------
-router.options("/:disputeId/history", jobContractCors);
 router.get(
   "/:disputeId/history",
-  jobContractCors,
   jobContractSecurityHeaders,
   jobContractRateLimit,
   (req: Request, res: Response) => {
@@ -385,10 +380,8 @@ router.get(
 // ---------------------------------------------------------------------------
 // GET /api/disputes/:disputeId/evidence
 // ---------------------------------------------------------------------------
-router.options("/:disputeId/evidence", jobContractCors);
 router.get(
   "/:disputeId/evidence",
-  jobContractCors,
   jobContractSecurityHeaders,
   jobContractRateLimit,
   (req: Request, res: Response) => {

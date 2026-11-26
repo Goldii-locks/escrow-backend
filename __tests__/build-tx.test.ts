@@ -939,4 +939,132 @@ describe("POST /api/jobs/build-tx — contract method allowlist (#709)", () => {
       expect(res.body.success).toBe(true); expect(res.body.data.xdr).toBe("AAAAAQ=="); expect(res.body.xdr).toBe("AAAAAQ==");
     },
   );
+
+  describe("cap build-tx vec length and struct/vec nesting depth (#927)", () => {
+    it("returns 400 when nesting depth is 5", async () => {
+      // Build depth 5 argument: vec -> vec -> vec -> vec -> u32
+      let nested: any = { type: "u32", value: 1 };
+      for (let i = 0; i < 4; i++) {
+        nested = { type: "vec", value: [nested] };
+      }
+      const res = await request(app)
+        .post("/api/jobs/build-tx")
+        .send({
+          ...VALID_BODY,
+          method: "approve_milestones",
+          args: [nested],
+        })
+        .expect(400);
+
+      expect(res.body.success).toBe(false);
+      expect(JSON.stringify(res.body)).toMatch(/nesting depth/i);
+    });
+
+    it("returns 400 when a vector contains 101 items", async () => {
+      const items = Array.from({ length: 101 }, (_, i) => ({
+        type: "u32",
+        value: i,
+      }));
+      const res = await request(app)
+        .post("/api/jobs/build-tx")
+        .send({
+          ...VALID_BODY,
+          method: "approve_milestones",
+          args: [{ type: "vec", value: items }],
+        })
+        .expect(400);
+
+      expect(res.body.success).toBe(false);
+      expect(JSON.stringify(res.body)).toMatch(/vec cannot exceed 100 items/i);
+    });
+
+    it("returns 400 when a struct contains more than 16 fields", async () => {
+      const fields: Record<string, any> = {};
+      for (let i = 0; i < 17; i++) {
+        fields[`field_${i}`] = { type: "u32", value: i };
+      }
+      const res = await request(app)
+        .post("/api/jobs/build-tx")
+        .send({
+          ...VALID_BODY,
+          method: "initialize",
+          args: [{ type: "struct", value: fields }],
+        })
+        .expect(400);
+
+      expect(res.body.success).toBe(false);
+      expect(JSON.stringify(res.body)).toMatch(/struct cannot exceed 16 fields/i);
+    });
+
+    it("accepts the real create_escrow argument shape", async () => {
+      mockPrepareTransaction.mockResolvedValue({
+        toXDR: () => "AAAAAQ==",
+        hash: () => Buffer.from("aa".repeat(32), "hex"),
+        fee: "100",
+      });
+      const body = {
+        ...VALID_BODY,
+        method: "create_escrow",
+        args: [
+          { type: "address", value: VALID_ADDRESS },
+          { type: "address", value: SECOND_ADDRESS },
+          { type: "address", value: VALID_ADDRESS },
+          { type: "address", value: VALID_BODY.contractId },
+          { type: "u64", value: "604800" },
+          { type: "vec", value: [{ type: "i128", value: "10000000" }] },
+          { type: "vec", value: [{ type: "bytes", value: "00".repeat(32) }] },
+          {
+            type: "struct",
+            value: {
+              funding_mode: { type: "enum", value: "Upfront" },
+              dispute_timeout_seconds: { type: "u64", value: "2592000" },
+              arbiter_fee_bps: { type: "u32", value: 0 },
+            },
+          },
+          { type: "bytes", value: "ab".repeat(32) },
+        ],
+      };
+      const res = await request(app)
+        .post("/api/jobs/build-tx")
+        .send(body)
+        .expect(200);
+
+      expect(res.body.success).toBe(true);
+    });
+
+    it("accepts the real initialize argument shape", async () => {
+      mockPrepareTransaction.mockResolvedValue({
+        toXDR: () => "AAAAAQ==",
+        hash: () => Buffer.from("aa".repeat(32), "hex"),
+        fee: "100",
+      });
+      const body = {
+        ...VALID_BODY,
+        method: "initialize",
+        args: [
+          { type: "address", value: VALID_ADDRESS },
+          { type: "address", value: SECOND_ADDRESS },
+          { type: "address", value: VALID_ADDRESS },
+          { type: "address", value: VALID_BODY.contractId },
+          { type: "u64", value: "604800" },
+          { type: "vec", value: [{ type: "i128", value: "10000000" }] },
+          { type: "vec", value: [{ type: "bytes", value: "00".repeat(32) }] },
+          {
+            type: "struct",
+            value: {
+              funding_mode: { type: "enum", value: "Upfront" },
+              dispute_timeout_seconds: { type: "u64", value: "2592000" },
+              arbiter_fee_bps: { type: "u32", value: 0 },
+            },
+          },
+        ],
+      };
+      const res = await request(app)
+        .post("/api/jobs/build-tx")
+        .send(body)
+        .expect(200);
+
+      expect(res.body.success).toBe(true);
+    });
+  });
 });

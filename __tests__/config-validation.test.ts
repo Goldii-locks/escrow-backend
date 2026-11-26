@@ -23,6 +23,11 @@ describe("numeric env validation (#624)", () => {
     expect(() => validateConfigAtStartup()).toThrow(/POLL_INTERVAL_MS/);
   });
 
+  it("RECONCILE_INTERVAL_MS=abc fails startup naming the variable (#926)", () => {
+    process.env.RECONCILE_INTERVAL_MS = "abc";
+    expect(() => validateConfigAtStartup()).toThrow(/RECONCILE_INTERVAL_MS/);
+  });
+
   it("truncated numbers like RATE_LIMIT_MAX=100r fail startup", () => {
     process.env.RATE_LIMIT_MAX = "100r";
     expect(() => config.rateLimitMax).toThrow(/RATE_LIMIT_MAX/);

@@ -24,6 +24,7 @@ export function requestLogger(
   next: NextFunction,
 ): void {
   const start = Date.now();
+  const legacyReq = req as Request & { isLegacyApi?: boolean; legacyRequestCount?: number };
   let logged = false;
   const logRequest = (aborted: boolean): void => {
     if (logged) return;
@@ -35,6 +36,9 @@ export function requestLogger(
       status: res.statusCode,
       durationMs: Date.now() - start,
       ip: req.ip ?? req.socket?.remoteAddress,
+      ...(legacyReq.isLegacyApi
+        ? { isLegacyApi: true, legacyRequestCount: legacyReq.legacyRequestCount }
+        : {}),
     };
     if (aborted) {
       logger.warn("HTTP request", { ...fields, aborted: true });

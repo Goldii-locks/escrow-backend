@@ -669,6 +669,27 @@ const MIGRATIONS: Migration[] = [
       );
     },
   },
+  {
+    version: 23,
+    description: "admin_audit_log table for auditing administrative actions (#928)",
+    up: `
+      CREATE TABLE IF NOT EXISTS admin_audit_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        key_index INTEGER NOT NULL,
+        request_id TEXT,
+        method TEXT NOT NULL,
+        path TEXT NOT NULL,
+        action TEXT NOT NULL,
+        target TEXT,
+        params_json TEXT,
+        status INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_admin_audit_log_at
+        ON admin_audit_log (at);
+    `,
+  },
 ];
 
 /** Index names created by the SQLite schema manager lookup-index migration (#259). */
@@ -3242,4 +3263,142 @@ export function deleteEventsInRange(
     return result.changes;
   });
   return tx();
+}
+
+// ---------------------------------------------------------------------------
+// Admin API action audit logging (#928)
+// ---------------------------------------------------------------------------
+
+export interface AdminAuditLogRow {
+  id: number;
+  at: string;
+  key_index: number;
+  request_id: string | null;
+  method: string;
+  path: string;
+  action: string;
+  target: string | null;
+  params_json: string | null;
+  status: number;
+}
+
+export interface RecordAdminAuditLogParams {
+  key_index: number;
+  request_id?: string | null;
+  method: string;
+  path: string;
+  action: string;
+  target?: string | null;
+  params?: unknown;
+  status: number;
+}
+
+function redactAuditValue(key: string, value: unknown): unknown {
+  const lowerKey = key.toLowerCase();
+  if (
+    lowerKey.includes("secret") ||
+    lowerKey.includes("key") ||
+    lowerKey.includes("password") ||
+    lowerKey.includes("token") ||
+    lowerKey.includes("auth")
+  ) {
+    return "[REDACTED]";
+  }
+  if (lowerKey.includes("webhook") || lowerKey.includes("url")) {
+    if (typeof value === "string") {
+      try {
+        const u = new URL(value);
+        return `${u.protocol}//${u.host}/***`;
+      } catch {
+        return "[REDACTED_URL]";
+      }
+    }
+    return "[REDACTED_URL]";
+  }
+  if (value && typeof value === "object") {
+    if (Array.isArray(value)) {
+      return value.map((v) => redactAuditValue(key, v));
+    }
+    return redactAuditParams(value as Record<string, unknown>);
+  }
+  return value;
+}
+
+export function redactAuditParams(params: unknown): unknown {
+  if (!params || typeof params !== "object") return params;
+  if (Array.isArray(params)) {
+    return params.map((item) => redactAuditParams(item));
+  }
+  const result: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(params as Record<string, unknown>)) {
+    result[key] = redactAuditValue(key, value);
+  }
+  return result;
+}
+
+export function recordAdminAuditLog(
+  entry: RecordAdminAuditLogParams,
+  database?: Database.Database,
+): AdminAuditLogRow {
+  const db = database || getDb();
+  const redactedParams = entry.params !== undefined && entry.params !== null
+    ? redactAuditParams(entry.params)
+    : null;
+  const paramsJson = redactedParams !== null ? JSON.stringify(redactedParams) : null;
+
+  const stmt = db.prepare(`
+    INSERT INTO admin_audit_log (key_index, request_id, method, path, action, target, params_json, status)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  const info = stmt.run(
+    entry.key_index,
+    entry.request_id ?? null,
+    entry.method,
+    entry.path,
+    entry.action,
+    entry.target ?? null,
+    paramsJson,
+    entry.status,
+  );
+
+  return db
+    .prepare("SELECT * FROM admin_audit_log WHERE id = ?")
+    .get(info.lastInsertRowid) as AdminAuditLogRow;
+}
+
+export function getAdminAuditLogs(
+  options: { limit?: number; before?: string | number } = {},
+  database?: Database.Database,
+): AdminAuditLogRow[] {
+  const db = database || getDb();
+  const limit = Math.max(1, Math.min(100, options.limit ?? 50));
+  let sql = "SELECT * FROM admin_audit_log";
+  const params: unknown[] = [];
+
+  if (options.before !== undefined && options.before !== null && String(options.before).trim() !== "") {
+    const raw = String(options.before).trim();
+    if (/^\d+$/.test(raw)) {
+      sql += " WHERE id < ?";
+      params.push(parseInt(raw, 10));
+    } else {
+      sql += " WHERE at < ?";
+      params.push(raw);
+    }
+  }
+
+  sql += " ORDER BY id DESC LIMIT ?";
+  params.push(limit);
+
+  return db.prepare(sql).all(...params) as AdminAuditLogRow[];
+}
+
+/**
+ * Prune audit log entries older than one year in the maintenance process (#928).
+ */
+export function pruneOldAuditLogs(database?: Database.Database): number {
+  const db = database || getDb();
+  const result = db
+    .prepare("DELETE FROM admin_audit_log WHERE at < datetime('now', '-1 year')")
+    .run();
+  return result.changes;
 }

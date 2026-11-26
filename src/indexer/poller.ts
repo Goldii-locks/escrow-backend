@@ -24,6 +24,7 @@ import {
   getDb,
   getIndexerStateValue,
   setIndexerStateValue,
+  pruneOldAuditLogs,
   type EventRow,
 } from "./db.js";
 import {
@@ -128,6 +129,11 @@ async function recordActiveNodeFailure(err: unknown): Promise<void> {
 /** Active RPC node URL the indexer is polling. */
 export function getActiveRpcNodeUrl(): string {
   return activeNodeUrl;
+}
+
+/** The active Server instance used by the indexer poller (#926). */
+export function getActiveServer(): Server {
+  return rpcClient.underlyingServer as Server;
 }
 
 // ---------------------------------------------------------------------------
@@ -1566,6 +1572,18 @@ export function runMaintenanceCycle(): void {
     }
   } catch (err) {
     logger.error("SQLite maintenance: reconciliation retention pruning failed", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  // Prune audit log entries older than one year (#928)
+  try {
+    const prunedAuditLogs = pruneOldAuditLogs(db);
+    if (prunedAuditLogs > 0) {
+      logger.info("SQLite maintenance: pruned old audit logs", { pruned: prunedAuditLogs });
+    }
+  } catch (err) {
+    logger.error("SQLite maintenance: audit log prune failed", {
       error: err instanceof Error ? err.message : String(err),
     });
   }
