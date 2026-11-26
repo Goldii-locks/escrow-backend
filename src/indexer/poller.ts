@@ -551,8 +551,9 @@ export async function fetchHistoricalEvents(
   }
 
   let contractIds: string[] = contractId ? [contractId] : getActiveContractIds();
-  if (contractIds.length === 0 && process.env.CONTRACT_ID) {
-    contractIds = [process.env.CONTRACT_ID];
+  const fallbackContractId = config.contractId;
+  if (contractIds.length === 0 && fallbackContractId) {
+    contractIds = [fallbackContractId];
   }
 
   let eventsFound = 0;
@@ -926,7 +927,7 @@ export async function pollEvents(): Promise<boolean> {
     // without a DB seed step, and stays indexed when FACTORY_CONTRACT_ID is
     // added alongside it. Only register it when the DB has never seen it, so a
     // contract an admin deactivated stays deactivated.
-    const legacyContractId = process.env.CONTRACT_ID;
+    const legacyContractId = config.contractId;
     if (
       legacyContractId &&
       !getAllContracts().some((c) => c.contract_id === legacyContractId)

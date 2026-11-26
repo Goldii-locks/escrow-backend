@@ -1,4 +1,5 @@
 import { jest } from "@jest/globals";
+import http from "node:http";
 import express from "express";
 import request from "supertest";
 
@@ -50,6 +51,57 @@ describe("request IDs", () => {
       "HTTP request",
       expect.objectContaining({ requestId }),
     );
+    const httpLogs = (info.mock.calls as unknown as Array<[unknown, unknown]>)
+      .filter(([message]) => message === "HTTP request");
+    expect(httpLogs).toHaveLength(1);
+  });
+
+  it("logs an aborted request once at warn level with aborted: true", async () => {
+    const warn = jest.spyOn(logger, "warn").mockImplementation(() => logger);
+    const info = jest.spyOn(logger, "info").mockImplementation(() => logger);
+    let markClosed: () => void = () => {};
+    const closed = new Promise<void>((resolve) => {
+      markClosed = resolve;
+    });
+    let markReceived: () => void = () => {};
+    const received = new Promise<void>((resolve) => {
+      markReceived = resolve;
+    });
+
+    const app = express();
+    app.use(requestIdMiddleware);
+    app.use(requestLogger);
+    app.get("/hang", (_req, res) => {
+      markReceived();
+      res.on("close", () => markClosed());
+    });
+
+    const server = app.listen(0);
+    await new Promise<void>((resolve) => server.once("listening", () => resolve()));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("missing server port");
+
+    const client = http.request({
+      port: address.port,
+      path: "/hang",
+      method: "GET",
+      headers: { connection: "close" },
+    });
+    client.on("error", () => {});
+    client.end();
+    await received;
+    client.destroy();
+
+    await closed;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(
+      "HTTP request",
+      expect.objectContaining({ aborted: true, url: "/hang" }),
+    );
+    expect(info).not.toHaveBeenCalled();
   });
 
   it("replaces an invalid supplied ID with a generated UUID", async () => {
