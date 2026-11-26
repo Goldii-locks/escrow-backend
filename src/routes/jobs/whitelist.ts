@@ -236,7 +236,6 @@ router.post(
         const prepared = await server.prepareTransaction(tx);
         const xdr = prepared.toXDR();
 
-        whitelistCache.del(contractId);
         logger.info("Whitelist update transaction built", { contractId, token, action });
         sendSuccess(res, { xdr });
         return;
@@ -296,7 +295,6 @@ router.post(
         }
       }
 
-      whitelistCache.del(contractId);
       logger.warn("Bulk whitelist update rejected", { contractId, count: targetAddresses.length });
       sendError(
         res,

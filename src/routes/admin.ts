@@ -336,4 +336,17 @@ router.get("/jobs", (req, res) => {
   }
 });
 
+// POST /api/admin/undecodable-events/retry - re-decode events that were parked
+// after a decoder failure, now that a fix is deployed (#933).
+router.post("/undecodable-events/retry", async (_req, res) => {
+  try {
+    const { retryUndecodableEvents } = await import("../indexer/poller.js");
+    const result = await retryUndecodableEvents();
+    res.json({ success: true, ...result });
+  } catch (err) {
+    logger.error("Failed to retry undecodable events", { error: formatError(err) });
+    res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
 export default router;
