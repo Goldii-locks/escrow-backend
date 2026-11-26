@@ -83,6 +83,7 @@ Legend:
 | `src/routes/jobs/caches.ts` | live | — |
 | `src/routes/jobs/claim-auto-release.ts` | live | — |
 | `src/routes/jobs/create-job-draft.ts` | live | — |
+| `src/routes/jobs/dedupe.ts` | live | — |
 | `src/routes/jobs/errors.ts` | live | — |
 | `src/routes/jobs/get-job.ts` | live | — |
 | `src/routes/jobs/history-csv.ts` | live | — |
@@ -91,11 +92,11 @@ Legend:
 | `src/routes/jobs/shared.ts` | live | — |
 | `src/routes/jobs/submit.ts` | live | — |
 | `src/routes/jobs/time-remaining.ts` | live | — |
+| `src/routes/jobs/tx-status.ts` | live | — |
 | `src/routes/jobs/whitelist.ts` | live | — |
 | `src/routes/stats.ts` | live | — |
 | `src/routes/tokens.ts` | live | — |
 | `src/routes/webhooks.ts` | live | — |
-| `src/routes/whitelist.test.ts` | unwired | [#718](https://github.com/Goldii-locks/escrow-backend/issues/718) |
 | `src/schemas/client-errors.ts` | live | — |
 | `src/schemas/jobs.ts` | live | — |
 | `src/shutdown.ts` | live | — |
@@ -103,9 +104,11 @@ Legend:
 | `src/utils/api-keys.ts` | live | — |
 | `src/utils/api-response.ts` | live | — |
 | `src/utils/audit_ledger_sum_checker.ts` | live | — |
+| `src/utils/contract-errors.ts` | live | — |
 | `src/utils/csv-serializer.ts` | live | — |
 | `src/utils/db-precision.ts` | live | — |
 | `src/utils/digit-limit-validator.ts` | live | — |
+| `src/utils/error-reporting.ts` | live | — |
 | `src/utils/fee-deduction-calculator.ts` | live | — |
 | `src/utils/fee-helper.ts` | live | — |
 | `src/utils/financial_report_math.ts` | unwired | [#718](https://github.com/Goldii-locks/escrow-backend/issues/718) |
@@ -115,8 +118,6 @@ Legend:
 | `src/utils/logger.ts` | live | — |
 | `src/utils/partial_payment_allocator.ts` | unwired | [#718](https://github.com/Goldii-locks/escrow-backend/issues/718) |
 | `src/utils/partial-payment-allocator.ts` | live | — |
-| `src/utils/push_notification_service.ts` | unwired | [#718](https://github.com/Goldii-locks/escrow-backend/issues/718) |
-| `src/utils/refund_ratio_helper.ts` | unwired | [#718](https://github.com/Goldii-locks/escrow-backend/issues/718) |
 | `src/utils/rounding.ts` | live | — |
 | `src/utils/rpc-allow-http.ts` | live | — |
 | `src/utils/safe-json.ts` | live | — |

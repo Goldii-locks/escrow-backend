@@ -233,7 +233,8 @@ export async function simulateRead(
   method: string,
   args: xdr.ScVal[] = [],
   contractType?: ContractType,
-): Promise<unknown> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+): Promise<any> {
   const result = await simulateCall(contractId, method, args);
 
   if ("error" in result) {
