@@ -1,9 +1,6 @@
 import { Router } from "express";
 import type { Request, Response } from "express";
-import {
-  byWalletCors,
-  byWalletSecurityHeaders,
-} from "../middleware/job-contract-security.js";
+import { byWalletSecurityHeaders } from "../middleware/job-contract-security.js";
 import { walletLookupLimiter } from "../middleware/rateLimiter.js";
 import { validate } from "../middleware/validate.js";
 import type { RequestWithValidatedQuery } from "../middleware/validate.js";
@@ -17,7 +14,7 @@ import {
 } from "../indexer/db.js";
 import { sendError, sendSuccess } from "../utils/api-response.js";
 import logger from "../utils/logger.js";
-import { maskAddress } from "../utils/stellar.js";
+import { maskAddress } from "../utils/log-redaction.js";
 import { formatError } from "../utils/format-error.js";
 
 const router = Router();
@@ -28,11 +25,8 @@ const router = Router();
 // Query params: ?since=&limit=
 // ---------------------------------------------------------------------------
 
-router.options("/:address/activity", byWalletCors);
-
 router.get(
   "/:address/activity",
-  byWalletCors,
   byWalletSecurityHeaders,
   walletLookupLimiter,
   validate(walletActivityParamsSchema, "params", (req) =>

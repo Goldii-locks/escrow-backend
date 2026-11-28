@@ -1,10 +1,12 @@
 {
   "_comment": "Baseline of existing Knip findings. New unused files or exports cause CI to fail.",
-  "generatedAt": "2026-11-26T11:33:10.339Z",
+  "generatedAt": "2026-11-28T14:40:11.044Z",
   "files": [],
   "exports": [
     "src/indexer/db.ts:SCHEMA_MANAGER_INDEXES",
     "src/indexer/db.ts:countUndecodableEvents",
+    "src/indexer/db.ts:extractEventActor",
+    "src/indexer/db.ts:extractMilestoneIndex",
     "src/indexer/db.ts:getEventInsertLockCount",
     "src/indexer/db.ts:getSkippedLedgerRange",
     "src/indexer/db.ts:insertEventBatchLocked",
@@ -161,6 +163,7 @@
   "types": [
     "src/indexer/db.ts:AdminJobSummary",
     "src/indexer/db.ts:JobSummary",
+    "src/indexer/db.ts:WalletActivityItem",
     "src/indexer/event_type_filter.ts:RpcGetEventsResult",
     "src/indexer/failover-recovery.ts:FailoverRecoveryLedgerRange",
     "src/indexer/indexer_metrics_collector.ts:IndexerHistoricalLedgerEventCount",
@@ -195,6 +198,7 @@
     "src/schemas/jobs.ts:ContractMilestoneParams",
     "src/schemas/jobs.ts:PartialReleaseBody",
     "src/schemas/jobs.ts:SubmitBody",
+    "src/schemas/jobs.ts:WalletActivityParams",
     "src/schemas/jobs.ts:WhitelistParams",
     "src/utils/api-response.ts:ApiErrorBody",
     "src/utils/api-response.ts:ApiSuccessBody",

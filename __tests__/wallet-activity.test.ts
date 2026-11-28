@@ -1,6 +1,7 @@
 import Database from "better-sqlite3";
 import request from "supertest";
 import express from "express";
+import { globalCors } from "../src/middleware/global-cors.js";
 import {
   initSchema,
   insertEvent,
@@ -43,6 +44,7 @@ beforeEach(() => {
 
 describe("Wallet Activity Feed (GET /api/wallets/:address/activity)", () => {
   const app = express();
+  app.use(globalCors());
   app.use(express.json());
   app.use("/api", legacyApiDeprecation);
   app.use("/api/v1/wallets", walletRoutes);
