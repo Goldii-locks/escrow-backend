@@ -1,5 +1,10 @@
 import type { NextFunction, Request, Response } from "express";
 import logger from "../utils/logger.js";
+import { maskAddress } from "../utils/log-redaction.js";
+
+/** Mask full Stellar addresses in a URL before logging (they would link IP to wallet). */
+const maskAddressesInPath = (url: string): string =>
+  url.replace(/[GC][A-Z2-7]{55}/g, (addr) => maskAddress(addr));
 
 /** Matches the versioned prefix: /api/v1, /api/v1/..., /api/v1?... */
 const VERSIONED_PATH = /^\/api\/v1(?:[/?]|$)/;
@@ -56,8 +61,8 @@ export function legacyApiDeprecation(req: Request, res: Response, next: NextFunc
     logger.info("Legacy unversioned API request", {
       isLegacyApi: true,
       legacyRequestCount,
-      path: req.originalUrl,
-      successor: successorPath,
+      path: maskAddressesInPath(req.originalUrl),
+      successor: maskAddressesInPath(successorPath),
     });
   }
   next();

@@ -645,3 +645,43 @@ export const historyQuerySchema = byWalletQuerySchema.extend({
 });
 
 export type HistoryQuery = z.infer<typeof historyQuerySchema>;
+
+/** Route params: /api/wallets/:address/activity */
+export const walletActivityParamsSchema = z.object({
+  address: stellarAddressSchema,
+});
+
+/** Query params: ?since=&limit= for GET /api/wallets/:address/activity */
+export const walletActivityQuerySchema = z.object({
+  since: z
+    .union([z.string(), z.number()])
+    .optional()
+    .refine(
+      (v) =>
+        v === undefined ||
+        (typeof v === "number"
+          ? Number.isInteger(v) && v >= 0
+          : /^\d+$/.test(v)),
+      { message: "since must be a non-negative integer cursor" },
+    )
+    .transform((v) =>
+      v === undefined ? undefined : typeof v === "number" ? v : parseInt(v, 10),
+    ),
+  limit: z
+    .union([z.string(), z.number()])
+    .optional()
+    .default("50")
+    .refine(
+      (v) =>
+        typeof v === "number"
+          ? Number.isInteger(v) && v >= 1 && v <= 100
+          : /^\d+$/.test(v) &&
+            parseInt(v, 10) >= 1 &&
+            parseInt(v, 10) <= 100,
+      { message: "limit must be between 1 and 100" },
+    )
+    .transform((v) => (typeof v === "number" ? v : parseInt(v, 10))),
+});
+
+export type WalletActivityParams = z.infer<typeof walletActivityParamsSchema>;
+export type WalletActivityQuery = z.infer<typeof walletActivityQuerySchema>;

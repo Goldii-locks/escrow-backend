@@ -96,6 +96,7 @@ Legend:
 | `src/routes/jobs/whitelist.ts` | live | — |
 | `src/routes/stats.ts` | live | — |
 | `src/routes/tokens.ts` | live | — |
+| `src/routes/wallets.ts` | live | — |
 | `src/routes/webhooks.ts` | live | — |
 | `src/schemas/client-errors.ts` | live | — |
 | `src/schemas/jobs.ts` | live | — |

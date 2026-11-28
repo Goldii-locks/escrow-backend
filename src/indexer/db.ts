@@ -2447,6 +2447,446 @@ export async function getJobsByWallet(
   }
 }
 
+export interface WalletActivityItem {
+  id: number;
+  type: string;
+  summary: string;
+  contractId: string;
+  milestoneIndex?: number;
+  ledger: number;
+  timestamp: number | null;
+  txHash: string | null;
+  actorRole: string | null;
+}
+
+export interface WalletActivityResult {
+  activity: WalletActivityItem[];
+}
+
+export function formatActivitySummary(
+  eventType: string,
+  milestoneIndex?: number,
+): string {
+  const type = eventType.toLowerCase();
+  const hasMilestone = milestoneIndex !== undefined;
+
+  switch (type) {
+    case "deliver":
+    case "delivered":
+      return hasMilestone
+        ? `Milestone ${milestoneIndex} marked delivered`
+        : "Milestone marked delivered";
+    case "approve":
+    case "approved":
+      return hasMilestone
+        ? `Milestone ${milestoneIndex} approved`
+        : "Milestone approved";
+    case "dispute":
+    case "dispute_raised":
+      return hasMilestone
+        ? `Milestone ${milestoneIndex} disputed`
+        : "Dispute raised";
+    case "claim":
+      return hasMilestone
+        ? `Milestone ${milestoneIndex} claimed`
+        : "Milestone claimed";
+    case "resolve":
+    case "dispute_resolved":
+      return hasMilestone
+        ? `Milestone ${milestoneIndex} dispute resolved`
+        : "Dispute resolved";
+    case "arbsplit":
+      return hasMilestone
+        ? `Milestone ${milestoneIndex} dispute split by arbiter`
+        : "Dispute split by arbiter";
+    case "dispescal":
+      return hasMilestone
+        ? `Milestone ${milestoneIndex} dispute escalated`
+        : "Dispute escalated";
+    case "partial_release":
+      return hasMilestone
+        ? `Milestone ${milestoneIndex} partially released`
+        : "Partial payment released";
+    case "extend":
+      return hasMilestone
+        ? `Milestone ${milestoneIndex} deadline extended`
+        : "Deadline extended";
+    case "evidence":
+      return hasMilestone
+        ? `Evidence submitted for milestone ${milestoneIndex}`
+        : "Evidence submitted";
+    case "m_ext":
+      return hasMilestone
+        ? `Milestone ${milestoneIndex} extended`
+        : "Milestone extended";
+    case "m_extcns":
+      return hasMilestone
+        ? `Milestone ${milestoneIndex} extension consented`
+        : "Milestone extension consented";
+    case "ms_add":
+      return "Milestone added";
+    case "ms_reduce":
+      return "Milestone reduced";
+    case "msadmref":
+      return hasMilestone
+        ? `Milestone ${milestoneIndex} admin refunded`
+        : "Milestone admin refunded";
+    case "msadmrel":
+      return hasMilestone
+        ? `Milestone ${milestoneIndex} admin released`
+        : "Milestone admin released";
+    case "msfund":
+      return hasMilestone
+        ? `Milestone ${milestoneIndex} funded`
+        : "Milestone funded";
+    case "mslock":
+      return hasMilestone
+        ? `Milestone ${milestoneIndex} locked`
+        : "Milestone locked";
+    case "msrev":
+      return hasMilestone
+        ? `Milestone ${milestoneIndex} reviewed`
+        : "Milestone reviewed";
+    case "epalloc":
+      return hasMilestone
+        ? `Early payout allocated for milestone ${milestoneIndex}`
+        : "Early payout allocated";
+    case "epclaim":
+      return hasMilestone
+        ? `Early payout claimed for milestone ${milestoneIndex}`
+        : "Early payout claimed";
+    case "epspltref":
+      return "Early payout split refund";
+    case "fund":
+    case "funded":
+      return "Escrow funded";
+    case "init":
+    case "initialized":
+      return "Escrow initialized";
+    case "cancel":
+      return "Contract cancelled";
+    case "cancelrev":
+      return "Cancellation reviewed";
+    case "cxlappr":
+      return "Cancellation approved";
+    case "cxlspref":
+      return "Cancellation split refunded";
+    case "withdraw":
+      return "Funds withdrawn";
+    case "sweep":
+      return "Excess funds swept";
+    case "pause":
+      return "Contract paused";
+    case "resume":
+      return "Contract resumed";
+    case "acceptarb":
+      return "Arbiter accepted assignment";
+    case "acceptjob":
+      return "Job accepted";
+    case "arbchg":
+      return "Arbiter changed";
+    case "rolechg":
+      return "Participant role changed";
+    case "freerot":
+      return "Freelancer rotated";
+    case "upgrade":
+      return "Contract upgraded";
+    case "migrate":
+      return "Contract migrated";
+    case "admin":
+      return "Admin action performed";
+    case "admincxl":
+      return "Contract cancelled by admin";
+    case "adminexc":
+      return "Admin execution completed";
+    case "adminprp":
+      return "Admin proposal created";
+    case "admovrf":
+      return "Admin override refund";
+    case "admovrls":
+      return "Admin override release";
+    case "admstrm":
+      return "Admin stream action";
+    case "adtwsplt":
+      return "Admin twin split executed";
+    case "adtxrfd":
+      return "Admin tax refund executed";
+    case "adtxrls":
+      return "Admin tax release executed";
+    case "adcovls":
+      return "Admin cover released";
+    case "adcovrf":
+      return "Admin cover refunded";
+    case "emoverrid":
+      return "Emergency override executed";
+    case "empause":
+      return "Contract paused for emergency";
+    case "emunpause":
+      return "Contract unpaused from emergency";
+    case "intyield":
+      return "Interest yield distributed";
+    case "iyspltref":
+      return "Interest yield split refund";
+    case "msigappr":
+      return "Multisig approved";
+    case "msigcfg":
+      return "Multisig configured";
+    case "msigcfgp":
+      return "Multisig config proposed";
+    case "msigcfgx":
+      return "Multisig config executed";
+    case "msiginit":
+      return "Multisig initialized";
+    case "p_strcns":
+      return "Payment stream consented";
+    case "p_stream":
+      return "Payment streamed";
+    case "pf_lock":
+      return "Platform fee locked";
+    case "pf_ovr":
+      return "Platform fee override";
+    case "pf_set":
+      return "Platform fee set";
+    case "pf_split":
+      return "Platform fee split";
+    case "splitref":
+      return "Split refund executed";
+    case "sprefnet":
+      return "Split refund net settled";
+    case "taxpaid":
+      return "Tax paid";
+    case "taxrcpt":
+      return "Tax receipt generated";
+    case "taxwh":
+      return "Tax withheld";
+    case "taxwith":
+      return "Tax withdrawn";
+    case "twspltref":
+      return "Twin split refund executed";
+    case "unaccref":
+      return "Unaccepted refund executed";
+    case "wldel":
+      return "Token removed from whitelist";
+    case "wtok":
+      return "Whitelisted token updated";
+    case "yldacc":
+      return "Yield accrued";
+    case "yldcons":
+      return "Yield distribution consented";
+    case "yldlock":
+      return "Yield locked";
+    case "yldrate":
+      return "Yield rate updated";
+    case "yldset":
+      return "Yield parameters set";
+    case "yldunlock":
+      return "Yield unlocked";
+    default: {
+      const clean = type.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+      return hasMilestone ? `Milestone ${milestoneIndex} ${clean}` : clean;
+    }
+  }
+}
+
+export function extractMilestoneIndex(data: Record<string, unknown>): number | undefined {
+  const candidates = [
+    data["milestone_index"],
+    data["milestoneIndex"],
+    data["index"],
+    data["milestone"],
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate === "number" && Number.isInteger(candidate) && candidate >= 0) {
+      return candidate;
+    }
+    if (typeof candidate === "string" && /^\d+$/.test(candidate.trim())) {
+      return parseInt(candidate.trim(), 10);
+    }
+  }
+  return undefined;
+}
+
+export function extractEventActor(
+  eventType: string,
+  data: Record<string, unknown>,
+): string | null {
+  const directCandidates = [
+    data["actor"],
+    data["caller"],
+    data["by"],
+    data["approved_by"],
+    data["approvedBy"],
+    data["delivered_by"],
+    data["deliveredBy"],
+    data["disputed_by"],
+    data["disputedBy"],
+    data["resolved_by"],
+    data["resolvedBy"],
+    data["claimed_by"],
+    data["claimedBy"],
+    data["initiator"],
+    data["sender"],
+    data["signer"],
+    data["sourceAddress"],
+    data["source_address"],
+  ];
+  for (const candidate of directCandidates) {
+    if (typeof candidate === "string" && candidate.trim().length > 0) {
+      return candidate.trim();
+    }
+  }
+
+  const type = eventType.toLowerCase();
+  if (type === "deliver" || type === "delivered") {
+    if (typeof data["freelancer"] === "string" && data["freelancer"].trim().length > 0) {
+      return data["freelancer"].trim();
+    }
+    if (typeof data["worker"] === "string" && data["worker"].trim().length > 0) {
+      return data["worker"].trim();
+    }
+  } else if (type === "approve" || type === "approved") {
+    if (typeof data["client"] === "string" && data["client"].trim().length > 0) {
+      return data["client"].trim();
+    }
+  } else if (type === "claim") {
+    if (typeof data["freelancer"] === "string" && data["freelancer"].trim().length > 0) {
+      return data["freelancer"].trim();
+    }
+    if (typeof data["worker"] === "string" && data["worker"].trim().length > 0) {
+      return data["worker"].trim();
+    }
+  } else if (type === "resolve" || type === "dispute_resolved" || type === "arbsplit") {
+    if (typeof data["arbiter"] === "string" && data["arbiter"].trim().length > 0) {
+      return data["arbiter"].trim();
+    }
+  } else if (type === "fund" || type === "funded" || type === "init" || type === "initialized") {
+    if (typeof data["client"] === "string" && data["client"].trim().length > 0) {
+      return data["client"].trim();
+    }
+  }
+
+  if (typeof data["from"] === "string" && data["from"].trim().length > 0) {
+    return data["from"].trim();
+  }
+
+  return null;
+}
+
+export function buildWalletActivityQuery(
+  address: string,
+  options: { since?: number | null; limit?: number } = {},
+): { query: string; params: unknown[] } {
+  const { since = null, limit = null } = options;
+  const limitClause = limit !== null ? " LIMIT ?" : "";
+  const query = `SELECT DISTINCT
+    e.id,
+    e.contract_id,
+    e.event_type,
+    e.ledger_sequence,
+    e.timestamp,
+    e.data_json,
+    e.tx_hash
+  FROM job_participants jp
+  JOIN events e ON e.contract_id = jp.contract_id
+  WHERE jp.address = ?
+    AND (? IS NULL OR e.id > ?)
+  ORDER BY e.id DESC${limitClause}`;
+
+  const params = limit !== null ? [address, since, since, limit] : [address, since, since];
+  return { query, params };
+}
+
+export async function getWalletActivity(
+  address: string,
+  options: { since?: number; limit?: number } = {},
+): Promise<WalletActivityResult> {
+  const db = getDb();
+  const safeLimit = Math.max(1, Math.min(100, options.limit ?? 50));
+  const since =
+    options.since !== undefined && Number.isInteger(options.since) && options.since >= 0
+      ? options.since
+      : null;
+
+  const normalizedAddress = address.trim();
+  const { query, params } = buildWalletActivityQuery(normalizedAddress, { since });
+  const stmt = db.prepare(query);
+
+  const getParticipantsStmt = db.prepare(
+    `SELECT address, role FROM job_participants WHERE contract_id = ?`,
+  );
+
+  const contractParticipantsCache = new Map<string, Map<string, string>>();
+
+  function getContractParticipants(contractId: string): Map<string, string> {
+    let cached = contractParticipantsCache.get(contractId);
+    if (!cached) {
+      cached = new Map<string, string>();
+      const rows = getParticipantsStmt.all(contractId) as Array<{ address: string; role: string }>;
+      const priorityOrder: Record<string, number> = { client: 3, freelancer: 2, arbiter: 1 };
+      for (const row of rows) {
+        const addr = row.address.trim();
+        const existingRole = cached.get(addr);
+        if (!existingRole || (priorityOrder[row.role] ?? 0) > (priorityOrder[existingRole] ?? 0)) {
+          cached.set(addr, row.role);
+        }
+      }
+      contractParticipantsCache.set(contractId, cached);
+    }
+    return cached;
+  }
+
+  const items: WalletActivityItem[] = [];
+
+  for (const row of stmt.iterate(...params) as Iterable<{
+    id: number;
+    contract_id: string;
+    event_type: string;
+    ledger_sequence: number;
+    timestamp: number | null;
+    data_json: string;
+    tx_hash: string | null;
+  }>) {
+    let data: Record<string, unknown> = {};
+    try {
+      data = JSON.parse(row.data_json) as Record<string, unknown>;
+    } catch {
+      data = {};
+    }
+
+    const actor = extractEventActor(row.event_type, data);
+    if (actor && actor.toLowerCase() === normalizedAddress.toLowerCase()) {
+      continue;
+    }
+
+    let actorRole: string | null = null;
+    if (actor) {
+      const participants = getContractParticipants(row.contract_id);
+      actorRole = participants.get(actor) ?? null;
+    }
+
+    const milestoneIndex = extractMilestoneIndex(data);
+    const summary = formatActivitySummary(row.event_type, milestoneIndex);
+
+    items.push({
+      id: row.id,
+      type: row.event_type,
+      summary,
+      contractId: row.contract_id,
+      ...(milestoneIndex !== undefined ? { milestoneIndex } : {}),
+      ledger: row.ledger_sequence,
+      timestamp: row.timestamp ?? null,
+      txHash: row.tx_hash ?? null,
+      actorRole,
+    });
+
+    if (items.length >= safeLimit) {
+      break;
+    }
+  }
+
+  return { activity: items };
+}
+
 export interface EventDbRow {
   id: number;
   contract_id: string;

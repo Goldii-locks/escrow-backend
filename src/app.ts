@@ -8,6 +8,7 @@ import statsRoutes from "./routes/stats.js";
 import clientErrorRoutes from "./routes/client-errors.js";
 import cspReportRoutes from "./routes/csp-report.js";
 import disputeRoutes from "./routes/disputes.js";
+import walletRoutes from "./routes/wallets.js";
 import { generalLimiter } from "./middleware/rateLimiter.js";
 import { legacyApiDeprecation } from "./middleware/api-version.js";
 import { readinessHandler } from "./readiness.js";
@@ -108,11 +109,13 @@ export function createApp(): express.Express {
   app.use("/api/v1/tokens", tokenRoutes);
   app.use("/api/v1/stats", statsRoutes);
   app.use("/api/v1/disputes", disputeRoutes);
+  app.use("/api/v1/wallets", walletRoutes);
   app.use("/api/jobs", jobRoutes);
   app.use("/api/admin", adminRoutes);
   app.use("/api/webhooks", webhookRoutes);
   app.use("/api/tokens", tokenRoutes);
   app.use("/api/stats", statsRoutes);
+  app.use("/api/wallets", walletRoutes);
   app.use("/api/disputes", disputeRoutes);
 
   // JSON 404 for unknown routes instead of Express's HTML page (#869).
